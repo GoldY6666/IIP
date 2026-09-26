@@ -1,0 +1,5 @@
+# internal/api/.gitkeep
+# 用途：M1 起的 HTTP 路由分层目录（handler 层）。
+# 依据：docs/IIP-V1.0-技术设计文档.md §4.1（POST /api/v1/alerts/webhook）
+#       docs/IIP-M0详细开发计划.md T0.4（server 预留 M1 路由挂载点）。
+# M0 阶段为空目录占位，保证 git 跟踪该路径；M1 在此实现 webhook 等 handler。

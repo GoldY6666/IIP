@@ -1,0 +1,5 @@
+# T0.2 本地验证数据卷（compose 由 P4 负责）
+# 本文件仅用于记录 web/ 前端独立运行所需的最小说明，非业务配置。
+node_modules/
+dist/
+.vite/

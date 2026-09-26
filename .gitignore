@@ -1,0 +1,44 @@
+# --- Go 构建产物 ---
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# --- 覆盖率 ---
+coverage.out
+coverage.html
+
+# --- 本地配置 / 密钥（永不入库） ---
+.env
+.env.*
+!.env.example
+config.local.yaml
+config.local.yml
+
+# --- 前端 ---
+node_modules/
+web/dist/
+web/.vite/
+web/node_modules/
+*.local
+
+# --- Python（临时辅助脚本遗留） ---
+__pycache__/
+*.py[cod]
+
+# --- 调试/临时产物（禁止入库） ---
+_tmp/
+_probe.txt
+_tree.txt
+_*.txt
+
+# --- 编辑器 / 系统 ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

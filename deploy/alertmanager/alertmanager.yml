@@ -1,0 +1,44 @@
+# IIP M0 — Alertmanager 配置
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.6
+#
+# receiver 指向 iip-server 的 Alertmanager webhook 端点（M1 第一天就要用它发真告警）。
+# 路径拼写必须精确：/api/v1/alerts/webhook （参见 docs/IIP-V1.0-技术设计文档.md §4.1）
+#
+# M0 现状：iip-server 尚未实现该路由，webhook 会返回 404 —— 这属预期，
+# 恰好证明告警确实在向后端推送。M1 实现 handler 后自动变 200。
+
+global:
+  # 生产环境请替换为真实 SMTP；M0 无邮件需求，留占位
+  resolve_timeout: 5m
+
+route:
+  # 所有告警进入的根路由
+  receiver: iip-webhook
+  group_by: ["alertname", "namespace", "service"]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 4h
+  # 子路由预留（M1/M6 按 severity 分流 Slack/PagerDuty）
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: iip-webhook
+      continue: false
+    - matchers:
+        - severity = "info"
+      receiver: iip-webhook
+      continue: false
+
+inhibit_rules:
+  # critical 抑制同 alertname 的 info，避免重复轰炸（示例，M1 按需调整）
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "info"
+    equal: ["alertname", "namespace", "service"]
+
+receivers:
+  - name: iip-webhook
+    webhook_configs:
+      - url: "http://host.docker.internal:8080/api/v1/alerts/webhook"
+        send_resolved: true

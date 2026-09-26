@@ -1,0 +1,33 @@
+# IIP M0 — Prometheus 配置（占位 + 示例告警规则）
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.6
+#
+# 说明：M0 阶段还没有真实的 exporter（IIP 自身 /metrics 在 M6 才做）。
+# 因此这里只保留 Prometheus 自身的 self-scrape job，并用一条"必然触发"的
+# 假规则（up{job="prometheus"} == 1）来保证 Alertmanager 随时能收到 firing，
+# 用于 M0 联调验证告警链路（Prometheus → Alertmanager → webhook 接收端）。
+# M1 起 Alertmanager 的 receiver 将真实打到 iip-server。
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  # 未显式设置时区，Prometheus 内部一律 UTC
+  external_labels:
+    cluster: iip-local
+    env: m0
+
+# 规则文件：目录挂载方式（rules/ 下所有 *.yml 都会被加载）
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # 自身自抓取：job_name 必须与 rules 中 up{job="prometheus"} 保持一致，
+  # 否则假规则永远不会满足 up == 1。
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # M1 预留：iip-server（当前未实现 /metrics，先注释，M6 打开）
+  # - job_name: "iip-server"
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["host.docker.internal:8080"]

@@ -1,0 +1,42 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"HighLatency\"}",
+  "truncatedAlerts": 0,
+  "status": "resolved",
+  "receiver": "iip-webhook",
+  "groupLabels": {
+    "alertname": "HighLatency"
+  },
+  "commonLabels": {
+    "alertname": "HighLatency",
+    "service": "checkout",
+    "namespace": "production",
+    "severity": "critical",
+    "team": "platform"
+  },
+  "commonAnnotations": {
+    "summary": "Checkout p99 latency above 1s"
+  },
+  "externalURL": "http://iip-alertmanager:9093",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "HighLatency",
+        "service": "checkout",
+        "namespace": "production",
+        "severity": "critical",
+        "team": "platform",
+        "instance": "checkout-def456"
+      },
+      "annotations": {
+        "summary": "High latency on checkout-def456",
+        "value": "980ms"
+      },
+      "startsAt": "2026-09-24T18:31:00Z",
+      "endsAt": "2026-09-24T19:00:00Z",
+      "generatorURL": "http://iip-prometheus:9090/graph?g0.expr=histogram_quantile",
+      "fingerprint": "zzz999different"
+    }
+  ]
+}

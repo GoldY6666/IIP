@@ -1,0 +1,51 @@
+# IIP M0 — Loki 单机最小可用配置（Loki 3.x 格式）
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.6
+#
+# 注意：Loki 3.x 与 2.x 配置格式有差异：
+#   - 使用 common 段统一配置
+#   - schema_config 使用 tsdb store（v13 schema），不再用 boltdb-shipper
+#   - 需显式声明 limits_config.allow_structured_metadata（3.x 默认 true，这里写死保持一致）
+# 目标：M0 只保证进程健康、3100 /ready 可达；M4 证据采集才会真正写日志。
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  allow_structured_metadata: true
+  retention_period: 168h   # 7 天，与备份保留期一致
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+ruler:
+  storage:
+    type: local
+    local:
+      directory: /loki/rules

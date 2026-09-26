@@ -1,0 +1,23 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json,sql}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
+
+# Windows PowerShell 5.1 对无 BOM 的 UTF-8 文件按系统 ANSI 代码页解析，
+# 会把脚本内的中文注释/输出乱码。PS 脚本含中文，故显式要求 UTF-8 BOM。
+[*.ps1]
+charset = utf-8-bom

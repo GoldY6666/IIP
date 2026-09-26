@@ -1,0 +1,36 @@
+# sqlc 配置
+# 规格依据：docs/IIP-M0详细开发计划.md §4「M0 → M1 交接物」——T0.2 后顺手加 sqlc.yaml
+#          与 queries/alerts.sql 骨架，使 M1 第一天写 webhook handler 零障碍。
+#
+# 说明：
+#   - M0 只落配置与查询骨架，**不生成任何 Go 产物**（生成物属 M1 起用）。
+#   - 生成命令（M1 起）：sqlc generate
+#       * 需 sqlc CLI v1.27.0（Windows 上发行包为 MinGW 构建，需 libwinpthread-1.dll 同目录）。
+#   - M1 起生成物**提交进仓库**（docs/decisions.md OPEN-2 裁定），
+#     使 CI 与 docker build 不必安装 sqlc CLI。
+#
+# schema 逐条列出**仅 up 迁移**，避免 sqlc 误读 .down.sql（DROP 语句）与 embed.go。
+# 新增迁移时需同步追加到本列表。
+
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema:
+      - "migrations/0001_init.up.sql"
+      - "migrations/0002_alerts_fingerprint_firing_uq.up.sql"
+    queries:
+      - "internal/db/queries/"
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        # 使用 pgx/v5 作为数据库驱动（与 internal/store 保持一致）
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_prepared_queries: false
+        emit_interface: true
+        emit_empty_slices: true
+        overrides:
+          # JSONB 列映射为 json.RawMessage，避免生成产物引入额外类型依赖
+          - db_type: "jsonb"
+            go_type: "encoding/json.RawMessage"

@@ -1,0 +1,37 @@
+# IIP M0 — 示例告警规则
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.6
+#
+# 目的：提供一条"必然触发"的假规则，验证 Prometheus → Alertmanager 告警链路。
+# 逻辑：job="prometheus" 自抓取永远 up == 1，因此该规则在采集到第一个样本后
+#       会持续处于 firing 状态。这恰好用于 M0 联调（Alertmanager UI 能看到
+#       firing，且向后端 webhook 推送；webhook 返回 404 属预期，M1 修复）。
+# 注意：job 名必须与 prometheus.yml 中 scrape_configs.job_name 完全一致。
+
+groups:
+  - name: iip-m0-smoke
+    rules:
+      # 假规则：自抓取恒为 up==1 → 立即持续 firing，用于联调验证。
+      - alert: M0SmokeTestAlwaysFiring
+        expr: up{job="prometheus"} == 1
+        for: 0m
+        labels:
+          severity: info
+          team: platform
+          service: iip-self
+        annotations:
+          summary: "M0 联调烟测：告警链路验证（必然触发）"
+          description: "该规则用于验证 Prometheus→Alertmanager→webhook 链路，M1 起替换为真实规则。"
+
+      # 示例业务规则（M1 起接入真实指标后启用）：HighLatency
+      # 名称与 docs 中提到的示例规则对齐，注释保留供 M1 直接启用。
+      - alert: HighLatency
+        # 假指标：表达式默认恒为真（1==1），保证 M0 可 fire；M1 接入 http_request_duration 后替换
+        expr: vector(1) == 1
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+          service: checkout
+        annotations:
+          summary: "Checkout API p99 延迟超过阈值（示例规则）"
+          description: "p99 > 500ms 持续 5 分钟（M0 为示例假规则，M1 接入真实指标）。"

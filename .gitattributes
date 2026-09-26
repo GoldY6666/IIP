@@ -1,0 +1,40 @@
+# 统一文本文件为 LF 行尾，防止 Windows CRLF 污染 CI 与容器内构建。
+# 规则依据：AGENTS.md §9。
+* text=auto eol=lf
+
+# 显式声明文本类型（确保检出为 LF）
+*.go      text eol=lf
+*.sql     text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.js      text eol=lf
+Makefile  text eol=lf
+*.ps1     text eol=lf
+.editorconfig text eol=lf
+.gitattributes text eol=lf
+.gitignore     text eol=lf
+
+# 容器相关：Dockerfile 与 .dockerignore 必须 LF。
+# Dockerfile 里的 RUN 用行继续符 "\" 拼接多行命令，CRLF 会让 "\" 变成
+# "\r"，shell 解析直接失败——这是 Windows 上构建 Linux 镜像的经典坑。
+Dockerfile    text eol=lf
+.dockerignore text eol=lf
+*.dockerfile  text eol=lf
+
+# 二进制文件不得做行尾转换
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.exe   binary
+*.dll   binary
+*.so    binary
+*.pdf   binary
+
+# 迁移 SQL 不计入语言统计噪音（可选，便于 review 聚焦）
+migrations/*.sql linguist-detectable=true

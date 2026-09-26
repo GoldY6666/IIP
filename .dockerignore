@@ -1,0 +1,55 @@
+# IIP — 构建上下文排除清单
+#
+# 作用：缩小 `docker build` 上传给 daemon 的上下文体积，并避免把
+# 本地产物 / 密钥 / 前端依赖误打进镜像。改错这里会显著拖慢构建。
+
+# --- VCS ---
+.git/
+.gitattributes
+.github/
+
+# --- 构建产物（镜像内重新编译，绝不带入） ---
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# --- 前端依赖与产物（server/worker 镜像不含前端） ---
+web/
+node_modules/
+
+# --- 本地配置 / 密钥（永不入镜像） ---
+.env
+.env.*
+!.env.example
+config.local.yaml
+config.local.yml
+
+# --- 文档与编排（运行时不需要） ---
+docs/
+deploy/
+Makefile
+README.md
+AGENTS.md
+
+# --- 测试夹具（M0 未使用，M1 起如需再放开） ---
+testdata/
+
+# --- 编辑器 / 系统 ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- 临时与调试产物 ---
+_tmp/
+__pycache__/
+*.py[cod]
+_*.txt
+config.local.*

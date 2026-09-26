@@ -1,0 +1,181 @@
+# IIP — 本地联调编排
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.6（五服务版本表）
+# 规则：所有镜像版本钉死，禁止 latest。
+#
+# 两组服务：
+#   依赖组（官方镜像）：postgres / redis / prometheus / alertmanager / loki
+#   应用组（本项目构建）：iip-server / iip-worker
+#
+# 镜像构建（在仓库根执行，先 build 再 up）：
+#   docker build --target server -t iip-server:0.0-m0 .
+#   docker build --target worker -t iip-worker:0.0-m0 .
+#   # 或一次性：make image-build
+#
+# 起停：
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml ps
+#   docker compose -f deploy/docker-compose.yml down        # 保留 named volume 数据
+#   docker compose -f deploy/docker-compose.yml down -v     # 连数据一起删（reset）
+#
+# 注意：应用组用 `profiles: [app]` 隔离。默认 `up -d` 只起依赖组五个服务，
+# 与 T0.6 验收标准（五服务全 healthy）保持一致。
+# 需要连应用一起起时：docker compose --profile app up -d
+
+name: iip
+
+# ---------------------------------------------------------------- 公共锚点
+# 应用组的镜像与连接串在此集中定义，避免两处漂移。
+x-app-image: &app-image iip-server:0.0-m1
+# 容器内连库走 compose 服务名 postgres:5432（不是宿主机的 5433）。
+x-app-env: &app-env
+  IIP_PG_URL: "postgres://postgres:dev@postgres:5432/iip?sslmode=disable"
+  IIP_LOG_LEVEL: "info"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: iip-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: iip
+      # 与 IIP_PG_URL 中的连接串保持一致；仅本地联调用
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # -U/-d 与上面环境变量一致，避免默认库不存在导致 unhealthy
+      test: ["CMD-SHELL", "pg_isready -U postgres -d iip"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    container_name: iip-redis
+    restart: unless-stopped
+    # V1.0 代码不连 Redis（用 DB polling 替代），此处仅为 V1.x 队列预留占位
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:v2.54.0
+    container_name: iip-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    extra_hosts:
+      # 保证 Linux 上 host.docker.internal 也可解析，跨平台一致
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9090/-/healthy | grep -q Healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: iip-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # 注意：alertmanager 的 /-/healthy 响应体是 "OK"，不是 prometheus 的
+    # "Prometheus Server is Healthy."。早先这行是从 prometheus 复制过来的
+    # （grep -q Healthy），永远匹配不上，容器恒为 unhealthy。
+    # 这里只依赖 wget 的退出码（非 2xx 即非零），不绑上游文案。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9093/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: iip-loki
+    restart: unless-stopped
+    # M4 证据采集用；M0 只保证进程健康与 3100 可达
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3100/ready | grep -q ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ------------------------------------------------------------- 应用组
+  iip-server:
+    image: *app-image
+    container_name: iip-server
+    profiles: ["app"]
+    restart: unless-stopped
+    environment: *app-env
+    ports:
+      # 宿主机 8080 -> 容器 8080（与本地裸跑保持一致）
+      - "8080:8080"
+    depends_on:
+      postgres:
+        # 等 PG 真能接受查询再启动：server 启动时会自动跑迁移，
+        # 库没就绪会导致迁移失败并退出。
+        condition: service_healthy
+    # 运行层是 distroless，镜像内没有 sh/curl/wget，无法用 HTTP 探针。
+    # 改用二进制自身的 --healthcheck 模式：请求本机 /healthz，按结果退出 0/1。
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/iip-server", "--healthcheck", "--http-addr=:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  iip-worker:
+    image: iip-worker:0.0-m1
+    container_name: iip-worker
+    profiles: ["app"]
+    restart: unless-stopped
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # worker 无监听端口，无法用端口/HTTP 探活。
+    # 它靠 polling 循环持续查库，进程活着即正常工作，
+    # 因此健康判定退化为「进程是否仍在运行」——由 restart 策略兜底。
+    # 这里显式不配 healthcheck，避免制造一个无意义的假探针。
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  alertmanager_data:
+  loki_data:

@@ -1,0 +1,193 @@
+package alert
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"time"
+)
+
+// outcomeKind 是单条告警的处理归类，与 Result 的四个计数字段一一对应。
+type outcomeKind int
+
+const (
+	outcomeAccepted outcomeKind = iota
+	outcomeSkipped
+	outcomeUpdated
+	outcomeRejected
+)
+
+// itemOutcome 是单条告警的处理结论；rejected 时带原因。
+type itemOutcome struct {
+	kind   outcomeKind
+	reason string
+}
+
+// Service 编排 M1 的五阶段流水线：
+//
+//	Validate → Normalize → Fingerprint → Deduplicate → Persist
+//
+// 它只做编排与计数：HTTP 解析在 internal/api，SQL 在 internal/repository。
+// 这样一层的服务就能被完整单测覆盖（注入假 Repository 即可）。
+type Service struct {
+	repo   Repository
+	logger *slog.Logger
+}
+
+// NewService 构造 Service。logger 传 nil 时退化为 slog.Default()，
+// 避免调用方为了日志装配而多写分支。
+func NewService(repo Repository, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{repo: repo, logger: logger}
+}
+
+// Ingest 处理一批告警，返回计数结果。
+//
+// 单条失败**不阻断整批**：该条计入 Result.Rejected 并附原因，同批其他告警照常处理。
+// 只有底层存储不可用才返回 error —— 那时 handler 会回 503，从而触发 Alertmanager 重试，
+// 这是唯一正确的行为（把告警丢掉才是灾难）。
+func (s *Service) Ingest(ctx context.Context, p *Payload) (Result, error) {
+	var res Result
+	if p == nil {
+		return res, errors.New("payload 为空")
+	}
+
+	for i, raw := range p.Alerts {
+		outcome, err := s.ingestOne(ctx, raw, p.Status)
+		if err != nil {
+			return res, fmt.Errorf("处理第 %d 条告警失败: %w", i, err)
+		}
+		res.record(i, outcome)
+	}
+	return res, nil
+}
+
+// record 把单条结论累加进 Result，并保留 rejected 的原因。
+func (r *Result) record(index int, outcome itemOutcome) {
+	switch outcome.kind {
+	case outcomeAccepted:
+		r.Accepted++
+	case outcomeSkipped:
+		r.Skipped++
+	case outcomeUpdated:
+		r.Updated++
+	case outcomeRejected:
+		r.Rejected++
+		r.Errors = append(r.Errors, ItemError{Index: index, Error: outcome.reason})
+	}
+}
+
+// ingestOne 走完单条告警的全部阶段。
+//
+// 返回的 error 仅表示**存储层故障**（应升级为整批失败）；字段级问题一律
+// 返回 outcomeRejected + nil，从而不牵连同批其他告警。
+func (s *Service) ingestOne(ctx context.Context, raw json.RawMessage, topStatus string) (itemOutcome, error) {
+	// 阶段一：解码 + 字段级校验
+	rawAlert, err := DecodeRawAlert(raw)
+	if err != nil {
+		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil
+	}
+	if err = ValidateAlert(&rawAlert); err != nil {
+		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil
+	}
+
+	// 阶段二 + 三：归一化（内部即用 GenerateFingerprint 计算指纹）
+	normalized, warnings, err := Normalize(&rawAlert, raw, topStatus)
+	if err != nil {
+		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil
+	}
+	for _, w := range warnings {
+		s.logger.Warn("告警归一化提示",
+			slog.String("fingerprint", normalized.Fingerprint),
+			slog.String("detail", w))
+	}
+
+	// 阶段四 + 五：去重判定与持久化
+	return s.persist(ctx, &normalized)
+}
+
+// persist 实现手册 §4.4 的分支表：按「入站状态 × 库中最新一条状态」决定动作。
+func (s *Service) persist(ctx context.Context, a *Alert) (itemOutcome, error) {
+	latest, err := s.repo.LatestByFingerprint(ctx, a.Fingerprint)
+	if errors.Is(err, ErrNotFound) {
+		return s.persistWithoutHistory(ctx, a)
+	}
+	if err != nil {
+		return itemOutcome{}, err
+	}
+	return s.persistAgainstHistory(ctx, a, &latest)
+}
+
+// persistWithoutHistory 处理「该指纹在库中没有任何历史行」。
+func (s *Service) persistWithoutHistory(ctx context.Context, a *Alert) (itemOutcome, error) {
+	if a.Status == StatusResolved {
+		// 孤立 resolved：M1 上线前该告警已在起火，或上游乱序/重复投递。
+		// 不插入「只有结束、没有开始」的行——它会污染时间线，也无法参与后续关联。
+		s.logger.Warn("收到无对应 firing 的 resolved 告警，已跳过",
+			slog.String("fingerprint", a.Fingerprint))
+		return itemOutcome{kind: outcomeSkipped}, nil
+	}
+	return s.insert(ctx, a)
+}
+
+// persistAgainstHistory 处理「库中已有历史行」的三种组合。
+func (s *Service) persistAgainstHistory(ctx context.Context, a *Alert, latest *StoredAlert) (itemOutcome, error) {
+	switch a.Status {
+	case StatusFiring:
+		if latest.Status == StatusFiring {
+			// 同一指纹的 firing 已在库中——V1.0 §4.2 的「跳过」。
+			s.logger.Debug("重复的 firing 告警，已跳过", slog.String("fingerprint", a.Fingerprint))
+			return itemOutcome{kind: outcomeSkipped}, nil
+		}
+		// 已 resolved 的旧行之后重新起火：插新行，保留历史（否则会覆盖掉故障记录）。
+		return s.insert(ctx, a)
+
+	case StatusResolved:
+		if latest.Status != StatusFiring {
+			s.logger.Debug("重复的 resolved 告警，已跳过", slog.String("fingerprint", a.Fingerprint))
+			return itemOutcome{kind: outcomeSkipped}, nil
+		}
+		endsAt := a.EndsAt
+		if endsAt == nil {
+			// 上游未给结束时间：以接收时刻兜底，避免已恢复的告警永远停在 firing。
+			now := time.Now().UTC()
+			endsAt = &now
+		}
+		if err := s.repo.Resolve(ctx, latest.ID, endsAt); err != nil {
+			return itemOutcome{}, err
+		}
+		s.logger.Info("告警已置为 resolved",
+			slog.Int64("alert_id", latest.ID),
+			slog.String("fingerprint", a.Fingerprint))
+		return itemOutcome{kind: outcomeUpdated}, nil
+
+	default:
+		// ValidateAlert 已把 status 限定为 firing / resolved，此处纯属防御。
+		return itemOutcome{
+			kind:   outcomeRejected,
+			reason: fmt.Sprintf("不支持的 status: %q", a.Status),
+		}, nil
+	}
+}
+
+// insert 落库；命中唯一约束被跳过时计入 skipped（并发去重兜底生效的信号）。
+func (s *Service) insert(ctx context.Context, a *Alert) (itemOutcome, error) {
+	stored, inserted, err := s.repo.Insert(ctx, a)
+	if err != nil {
+		return itemOutcome{}, err
+	}
+	if !inserted {
+		s.logger.Warn("插入被唯一约束跳过（并发去重兜底生效）",
+			slog.String("fingerprint", a.Fingerprint))
+		return itemOutcome{kind: outcomeSkipped}, nil
+	}
+	s.logger.Info("告警已落库",
+		slog.Int64("alert_id", stored.ID),
+		slog.String("fingerprint", a.Fingerprint),
+		slog.String("severity", a.Severity))
+	return itemOutcome{kind: outcomeAccepted}, nil
+}

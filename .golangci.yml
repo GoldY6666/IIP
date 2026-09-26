@@ -1,0 +1,72 @@
+# IIP — golangci-lint 配置
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.7
+# 要求：errcheck / govet / staticcheck / gocritic 四个 linter 必开。
+#
+# 版本约定：CI 使用 golangci-lint-action@v6，其默认安装的 golangci-lint 为 v1.x（>=1.60）。
+# 本文件采用 **golangci-lint v1 配置格式**（非 v2）。若升级到 golangci-lint v2，
+# 需迁移为 `version: "2"` 格式并改用 linters.settings。
+# 本地验证：
+#   golangci-lint run ./...
+#   golangci-lint config verify   # 校验本文件语法（v1.55+ 可用）
+
+run:
+  # 与 CI 保持一致的超时，避免本地/CI 行为漂移
+  timeout: 5m
+  # 只分析有变动的包可选；M0 保持全量，简单可预期
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    # —— T0.7 明确要求必开的四个 ——
+    - errcheck      # 未处理的 error 返回值
+    - govet         # go vet 官方检查集
+    - staticcheck   # 静态分析（含 gosimple/stylecheck 在 v1 中合并）
+    - gocritic      # 代码质量与风格
+    # —— 工程必备补充（M0 起就纳入，成本低） ——
+    - ineffassign   # 无效赋值
+    - unused        # 未使用的代码
+    - gofmt         # 格式检查（与 gofumpt 互补，保证 CI 不依赖本地工具）
+    - goimports     # import 分组与排序
+
+linters-settings:
+  errcheck:
+    # 检查未处理的类型断言（类型断言失败会 panic，必须处理）
+    check-type-assertions: true
+    # 不检查 `_ =` 空标识符赋值：`_ = x.Close()` 是 Go 官方推荐的「显式声明忽略」
+    # 写法，语义上已经表达了「我知道有返回值且不关心」。若开启 check-blank，
+    # 会把这种正确写法也判为违规，迫使代码改成隐式忽略（反而更差）。
+    check-blank: false
+    # 允许显式忽略的常见无害返回值：只读关闭与 HTTP 响应写出
+    exclude-functions:
+      - (io.Closer).Close
+      - (io.ReadCloser).Close
+      - (*os.File).Close
+      - (net/http.ResponseWriter).Write
+  govet:
+    enable-all: true
+    disable:
+      # fieldalignment 对 M0 的 struct 过度苛刻，且会与后续手写的配置结构冲突
+      - fieldalignment
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+    disabled-checks:
+      # 允许 package comment 与文件头注释合并写法（避免与 gofumpt 冲突）
+      - commentFormatting
+  goimports:
+    local-prefixes: github.com/yu/iip
+
+issues:
+  # 不因单条问题数量限制而漏报
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-use-default: false
+  exclude-rules:
+    # 测试文件中允许更宽松（表驱动测试常有未检查的 error）
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gocritic

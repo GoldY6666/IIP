@@ -1,0 +1,121 @@
+# IIP CI 流水线
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.7
+# 触发：push 到任意分支 + PR 到 main
+# 结构：两个并行 job —— backend（Go）与 frontend（web/，pnpm）
+#
+# 依赖约定（由后端 P1/P3 产出，CI 只引用不创建）：
+#   - 仓库根 go.mod（module: github.com/yu/iip）
+#   - 仓库根 .golangci.yml
+#   - web/package.json + web/pnpm-lock.yaml（pnpm，Vite react-ts 模板）
+
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+# 同分支新推送取消旧的进行中运行，省 CI 额度
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 从仓库根 go.mod 读取 Go 版本，避免与本地漂移
+          go-version-file: go.mod
+          cache: true
+          # 默认以 go.mod 的 hash 作为缓存 key（无需指定 go.sum）；缓存不可用时 action 仅告警不失败
+
+      - name: Verify module files are committed
+        # 明确失败信息：go.sum 必须先由本地 `go mod tidy` 生成并提交，否则 build/test 无法进行
+        run: |
+          if [ ! -f go.sum ]; then
+            echo "::error::go.sum 缺失。请在本机执行 'go mod tidy' 后提交 go.sum（CI 需要它做模块校验）。"
+            exit 1
+          fi
+
+      - name: Download modules
+        run: go mod download
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          # 版本必须与 .golangci.yml 的配置格式（v1 格式）兼容
+          version: v1.61.0
+          args: --config=./.golangci.yml --timeout=5m
+          # 只在 Go 代码变更时跑由 action 自行判断，这里保持默认
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (race + coverage)
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage.out
+          if-no-files-found: warn
+          retention-days: 7
+
+  frontend:
+    name: frontend (web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify lockfile is committed
+        # pnpm install --frozen-lockfile 需要 web/pnpm-lock.yaml 已提交；缺失时给出明确指引
+        run: |
+          if [ ! -f pnpm-lock.yaml ]; then
+            echo "::error::web/pnpm-lock.yaml 缺失。请在本机 web/ 下执行 'pnpm install' 生成并提交该 lockfile（CI 用 --frozen-lockfile 做可复现安装）。"
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        # 必须显式指定版本，与 web/pnpm-lock.yaml 的 lockfileVersion 兼容（pnpm 9 → lockfileVersion 9）
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # 注意：uses: 步骤在仓库根执行，cache-dependency-path 相对仓库根，故为 web/pnpm-lock.yaml
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm tsc --noEmit
+
+      - name: Build
+        run: pnpm build

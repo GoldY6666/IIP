@@ -1,0 +1,27 @@
+{
+  "name": "iip-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tsc": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.59.16",
+    "antd": "5.21.6",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.27.0"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.12",
+    "@types/react-dom": "18.3.1",
+    "@vitejs/plugin-react": "4.3.3",
+    "typescript": "5.6.3",
+    "vite": "5.4.10"
+  }
+}

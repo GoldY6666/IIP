@@ -1,0 +1,84 @@
+-- ============================================================================
+-- IIP · alerts 查询定义
+-- 规格来源：docs/IIP-M1详细开发手册.md §4.4（去重与 resolved 生命周期）/ §4.6（查询清单）
+--
+-- M0 阶段本文件只提供骨架（sqlc 注解 + SQL 文本 + TODO(M1) 标注）；
+-- **M1 已定稿**，两处 TODO(M1) 的结论如下：
+--   - GetAlertByFingerprint —— 语意就是「该指纹的最新一条」，**不加 status 过滤**：
+--     去重判定需要知道最新一条究竟是 firing 还是 resolved，过滤后反而判断不了。
+--   - InsertAlert —— `incident_id` 在 M1 **恒传 NULL**（关联属 M2，M1 不得臆造）。
+--
+-- 注意：本文件的块注释会被 sqlc 原样搬进 internal/db/*.sql.go 的 doc comment，
+-- 因此列表符号必须用 `-` 而非 `*` —— Go 1.19+ 的 gofmt 会把 doc comment 里的
+-- `*` 规范化为 `-`，用 `*` 会让生成物无法通过 `gofmt -l` 门禁。
+--
+-- 命名约定：sqlc 注解 `-- name: <Func> :one|:many|:exec`，生成到 internal/db（package db）。
+-- 表结构来源：migrations/0001_init.up.sql（已冻结）+ 0002（部分唯一索引）。
+-- ============================================================================
+
+-- name: GetAlertByFingerprint :one
+-- 取该指纹**最新一条**告警，供 M1 去重判定（见手册 §4.4）。
+-- 不加 status 过滤：需要据此区分「最新一条是 firing 还是 resolved」。
+--
+-- 排序必须是 starts_at DESC, id DESC —— **id DESC 不能省**。
+-- 同一告警重新起火时，Alertmanager 重发的 startsAt 与首次完全相同，
+-- 于是「已 resolved 的旧行」与「重新起火的 firing 新行」在 starts_at 上并列。
+-- 此时若只按 starts_at 排序，返回哪一行由执行计划决定、未定义：
+-- 实测同一轮运行中两次调用分别取到了 firing 与 resolved 两行，
+-- 结果是 resolved 被误判成「重复 resolved」而跳过，告警永远停在 firing。
+-- 用 id DESC 作 tie-breaker：同一指纹内 id 单调递增，最大者即最近写入的那条。
+SELECT *
+FROM alerts
+WHERE fingerprint = $1
+ORDER BY starts_at DESC, id DESC
+LIMIT 1;
+
+-- name: InsertAlert :one
+-- 持久化归一化后的告警（见手册 §4.2 阶段五 Persist）。
+--
+-- ON CONFLICT 是 M1 的**数据库层去重兜底**：应用层的「先查后写」防不住并发投递，
+-- 由 0002 的部分唯一索引 uq_alerts_fingerprint_firing 保证同一指纹最多一条 firing 行。
+-- 「谓词必须重复写一遍」—— 部分唯一索引作为冲突目标时的硬性要求。
+-- 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
+-- （而不是错误），详见 internal/repository/alerts.go。
+INSERT INTO alerts (
+    fingerprint,
+    source,
+    severity,
+    status,
+    labels,
+    annotations,
+    starts_at,
+    ends_at,
+    raw_payload,
+    incident_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+)
+ON CONFLICT (fingerprint) WHERE status = 'firing' DO NOTHING
+RETURNING *;
+
+-- name: ResolveAlert :exec
+-- M1 的 resolved 生命周期：**更新既有行**，而不是插新行（见手册 §4.4）。
+-- Alertmanager 的 send_resolved: true 会把同一指纹再推一次，status=resolved。
+--
+-- 注意：updated_at 在 0001 中没有触发器，必须显式 NOW()，否则永远停在插入时刻。
+UPDATE alerts
+SET status     = 'resolved',
+    ends_at    = $2,
+    updated_at = NOW()
+WHERE id = $1;
+
+-- name: ListAlertsByIncident :many
+-- 事件详情页展示其关联告警（走 idx_alerts_incident_id）。
+-- M1 不调用（须等 M2 建立关联），保留供 M3 / M5 使用。
+SELECT *
+FROM alerts
+WHERE incident_id = $1
+ORDER BY starts_at DESC;
+
+-- name: GetAlert :one
+-- 支撑 GET /api/v1/alerts/{id}（手册 §3.1 的 P1 项）。
+SELECT *
+FROM alerts
+WHERE id = $1;
