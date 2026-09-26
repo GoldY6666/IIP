@@ -1,7 +1,7 @@
 // Command iip-server 是 IIP 的 HTTP API 服务入口。
 //
-// M0 阶段仅提供 /healthz（真查库）；业务路由在 M1 接入。
-// 规格依据：docs/IIP-M0详细开发计划.md §T0.3 / §T0.4。
+// 提供 /healthz（真查库）与 M1 业务路由：告警 webhook 接入、告警列表查询。
+// 规格依据：docs/IIP-M0详细开发计划.md §T0.3 / §T0.4，docs/IIP-M1详细开发手册.md §3。
 //
 // 额外支持 --healthcheck 自检模式：请求自身的 /healthz 后按结果退出 0/1。
 // 该模式供容器 healthcheck 使用——运行层是 distroless，镜像内没有
@@ -213,6 +213,9 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, webhookMaxBytes int64) h
 	// SQL 在 internal/repository，handler 只负责 HTTP 契约（手册 §4.5）。
 	alertSvc := alert.NewService(repository.NewAlerts(pool), logger)
 	r.Post("/api/v1/alerts/webhook", api.AlertWebhook(alertSvc, webhookMaxBytes, logger))
+
+	// M1：告警列表（手册 §3.1 P1）。只读查询，返回最新 100 条、不做 status 过滤。
+	r.Get("/api/v1/alerts", api.AlertList(alertSvc, logger))
 
 	// M2 起：事件（incident）关联与查询，不在 M1 范围（手册 §2 已列明不做）。
 	// M2: r.Get("/api/v1/incidents", ...)

@@ -45,6 +45,14 @@ func NewService(repo Repository, logger *slog.Logger) *Service {
 	return &Service{repo: repo, logger: logger}
 }
 
+// List 取最新一批告警，直接委托给仓储（排序、过滤策略见 Repository.List 与 SQL 定义）。
+//
+// 放在 Service 而非让 handler 直连 repo：保持 api → alert → repository 的依赖方向，
+// handler 只依赖本包定义的窄接口（见 internal/api 的 AlertQuerier），单测可注入假实现。
+func (s *Service) List(ctx context.Context, limit, offset int32) ([]StoredAlert, error) {
+	return s.repo.List(ctx, limit, offset)
+}
+
 // Ingest 处理一批告警，返回计数结果。
 //
 // 单条失败**不阻断整批**：该条计入 Result.Rejected 并附原因，同批其他告警照常处理。

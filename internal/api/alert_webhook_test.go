@@ -86,6 +86,26 @@ func (f *fakeRepo) Resolve(_ context.Context, id int64, endsAt *time.Time) error
 	return alert.ErrNotFound
 }
 
+// List 仅用于满足 Repository 接口；本文件用例不依赖它（列表逻辑另有专有用例）。
+// 简单规整 limit/offset，顺序不保证（内存 map 迭代本就无序），仅供接口合规。
+func (f *fakeRepo) List(_ context.Context, limit, offset int32) ([]alert.StoredAlert, error) {
+	if f.failErr != nil {
+		return nil, f.failErr
+	}
+	out := make([]alert.StoredAlert, 0, len(f.rows))
+	for _, row := range f.rows {
+		out = append(out, row)
+	}
+	if offset >= int32(len(out)) {
+		return []alert.StoredAlert{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && int32(len(out)) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // --- 请求辅助 ---
 
 // postWebhook 投递一个请求体，返回响应记录器。

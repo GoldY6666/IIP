@@ -70,24 +70,31 @@ type RawAlert struct {
 }
 
 // Alert 是归一化后的领域对象（尚未落库，故不带主键）。
+//
+// 字段带 json tag：列表接口的响应直接序列化本类型（见 internal/api/alert_list.go），
+// 须与手册 §3.1 的契约对齐——snake_case 且与 alerts 表列名一致。
+// （Result 等响应体早已如此；Alert/StoredAlert 之前只用于内部流转，故补上。）
 type Alert struct {
-	Fingerprint string
-	Source      string
-	Severity    string
-	Status      string
-	Labels      json.RawMessage
-	Annotations json.RawMessage
-	StartsAt    time.Time
-	EndsAt      *time.Time
-	RawPayload  json.RawMessage
+	Fingerprint string          `json:"fingerprint"`
+	Source      string          `json:"source"`
+	Severity    string          `json:"severity"`
+	Status      string          `json:"status"`
+	Labels      json.RawMessage `json:"labels"`
+	Annotations json.RawMessage `json:"annotations"`
+	StartsAt    time.Time       `json:"starts_at"`
+	EndsAt      *time.Time      `json:"ends_at"`
+	RawPayload  json.RawMessage `json:"raw_payload"`
 
 	// IncidentID 在 M1 恒为 nil —— 关联属 M2，M1 不得臆造。
-	IncidentID *int64
+	IncidentID *int64 `json:"incident_id"`
 }
 
 // StoredAlert 是已落库的告警（带主键）。
+//
+// Alert 以匿名嵌入方式存在：encoding/json 会把内层字段提升为顶层，
+// 故响应是扁平的 {id, fingerprint, source, ...}，而不是嵌套的 {id, Alert:{...}}。
 type StoredAlert struct {
-	ID int64
+	ID int64 `json:"id"`
 	Alert
 }
 

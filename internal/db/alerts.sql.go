@@ -168,6 +168,57 @@ func (q *Queries) InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert
 	return i, err
 }
 
+const listAlerts = `-- name: ListAlerts :many
+SELECT id, fingerprint, source, severity, status, labels, annotations, starts_at, ends_at, raw_payload, incident_id, created_at, updated_at
+FROM alerts
+ORDER BY starts_at DESC, id DESC
+LIMIT $1 OFFSET $2
+`
+
+type ListAlertsParams struct {
+	Limit  int32 `json:"limit"`
+	Offset int32 `json:"offset"`
+}
+
+// M1 告警列表查询（手册 §3.1 P1 / §4.6）。
+// 返回**最新 N 条、不做 status 过滤**——状态筛选交给前端；后端只保证稳定且与应用层
+// 去重判定一致的排序：starts_at DESC, id DESC。
+// id DESC 作 tie-breaker：starts_at 相同的两行（见 GetAlertByFingerprint 注记，
+// Alertmanager 重发时 startsAt 与首投一致），取 id 大者在前，排序才稳定、可复现。
+func (q *Queries) ListAlerts(ctx context.Context, arg ListAlertsParams) ([]Alert, error) {
+	rows, err := q.db.Query(ctx, listAlerts, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Alert{}
+	for rows.Next() {
+		var i Alert
+		if err := rows.Scan(
+			&i.ID,
+			&i.Fingerprint,
+			&i.Source,
+			&i.Severity,
+			&i.Status,
+			&i.Labels,
+			&i.Annotations,
+			&i.StartsAt,
+			&i.EndsAt,
+			&i.RawPayload,
+			&i.IncidentID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAlertsByIncident = `-- name: ListAlertsByIncident :many
 SELECT id, fingerprint, source, severity, status, labels, annotations, starts_at, ends_at, raw_payload, incident_id, created_at, updated_at
 FROM alerts

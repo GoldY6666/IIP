@@ -25,4 +25,11 @@ type Repository interface {
 
 	// Resolve 把指定行置为 resolved 并写入结束时间（endsAt 为 nil 时由调用方补当前时间）。
 	Resolve(ctx context.Context, id int64, endsAt *time.Time) error
+
+	// List 取最新一批告警（不做 status 过滤），供列表页展示。
+	//
+	// limit/offset 由 handler 层规整（默认 100、上限 1000）后传入；排序由 SQL 决定
+	// （starts_at DESC, id DESC），与应用层去重判定保持一致。返回空切片（非 nil error）
+	// 表示库里确实没有告警——调用方据此区分「查无数据」与「查询出错」。
+	List(ctx context.Context, limit, offset int32) ([]StoredAlert, error)
 }

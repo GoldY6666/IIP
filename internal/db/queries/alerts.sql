@@ -77,6 +77,17 @@ FROM alerts
 WHERE incident_id = $1
 ORDER BY starts_at DESC;
 
+-- name: ListAlerts :many
+-- M1 告警列表查询（手册 §3.1 P1 / §4.6）。
+-- 返回**最新 N 条、不做 status 过滤**——状态筛选交给前端；后端只保证稳定且与应用层
+-- 去重判定一致的排序：starts_at DESC, id DESC。
+-- id DESC 作 tie-breaker：starts_at 相同的两行（见 GetAlertByFingerprint 注记，
+-- Alertmanager 重发时 startsAt 与首投一致），取 id 大者在前，排序才稳定、可复现。
+SELECT id, fingerprint, source, severity, status, labels, annotations, starts_at, ends_at, raw_payload, incident_id, created_at, updated_at
+FROM alerts
+ORDER BY starts_at DESC, id DESC
+LIMIT $1 OFFSET $2;
+
 -- name: GetAlert :one
 -- 支撑 GET /api/v1/alerts/{id}（手册 §3.1 的 P1 项）。
 SELECT *

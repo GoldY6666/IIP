@@ -82,6 +82,26 @@ func (f *fakeRepo) Resolve(_ context.Context, id int64, endsAt *time.Time) error
 	return ErrNotFound
 }
 
+// List 仅用于满足 Repository 接口；本文件用例不依赖它（列表逻辑另有专有用例）。
+// 简单规整 limit/offset，顺序不保证（内存 map 迭代本就无序），仅供接口合规。
+func (f *fakeRepo) List(_ context.Context, limit, offset int32) ([]StoredAlert, error) {
+	if f.failGet != nil {
+		return nil, f.failGet
+	}
+	out := make([]StoredAlert, 0, len(f.rows))
+	for _, row := range f.rows {
+		out = append(out, row)
+	}
+	if offset >= int32(len(out)) {
+		return []StoredAlert{}, nil
+	}
+	out = out[offset:]
+	if limit > 0 && int32(len(out)) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // makePayload 构造带若干条原始告警的 payload。
 func makePayload(topStatus string, rawAlerts ...string) *Payload {
 	alerts := make([]json.RawMessage, 0, len(rawAlerts))

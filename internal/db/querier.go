@@ -49,6 +49,12 @@ type Querier interface {
 	// 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
 	// （而不是错误），详见 internal/repository/alerts.go。
 	InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert, error)
+	// M1 告警列表查询（手册 §3.1 P1 / §4.6）。
+	// 返回**最新 N 条、不做 status 过滤**——状态筛选交给前端；后端只保证稳定且与应用层
+	// 去重判定一致的排序：starts_at DESC, id DESC。
+	// id DESC 作 tie-breaker：starts_at 相同的两行（见 GetAlertByFingerprint 注记，
+	// Alertmanager 重发时 startsAt 与首投一致），取 id 大者在前，排序才稳定、可复现。
+	ListAlerts(ctx context.Context, arg ListAlertsParams) ([]Alert, error)
 	// 事件详情页展示其关联告警（走 idx_alerts_incident_id）。
 	// M1 不调用（须等 M2 建立关联），保留供 M3 / M5 使用。
 	ListAlertsByIncident(ctx context.Context, incidentID pgtype.Int8) ([]Alert, error)

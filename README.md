@@ -176,9 +176,11 @@ start http://127.0.0.1:5173/                # 预期渲染「IIP 控制台 · M0
   并且 teardown 只回收自己启动的进程。
 - `http://127.0.0.1:5173/healthz` 返回的是 SPA 首页 HTML 而非 `ok`——
   Vite 只代理 `/api`，`/healthz` 未配代理会落到 index.html。这不是故障。
-- M1 现开放两个路由：`GET /healthz` 与 `POST /api/v1/alerts/webhook`。
-  其余 `/api/v1/*`（事件列表 / 详情）属 M2，**当前访问返回 404 是预期行为**。
-  webhook 的契约与状态码矩阵见 `docs/IIP-M1详细开发手册.md` §4.1。
+- M1 现开放三个路由：`GET /healthz`、`POST /api/v1/alerts/webhook`、
+  `GET /api/v1/alerts`（告警列表，返回最新 100 条、不做 status 过滤，支持 `?limit=&offset=`，
+  参数缺省/越界自动夹紧）。
+  其余 `/api/v1/*`（**事件**列表 / 详情）属 M2，**当前访问返回 404 是预期行为**。
+  webhook 的契约与状态码矩阵见 `docs/IIP-M1详细开发手册.md` §4.1；列表接口见 §3.1 P1 / §4.6。
 
 手动分步（各自独立终端）：
 
@@ -316,6 +318,7 @@ M1 的完成定义见 `docs/IIP-M1详细开发手册.md` §八。当前状态（
 | M0 回归 `scripts/verify-runtime.py` | **PASS（38/38，OPEN-8 已修正）** | 原唯一失败项为 `verify-runtime.py` 第 292 行**硬编码**的 M0 时代版本断言 `out == "1\|f"`（彼时只有 0001 一个迁移）；M1 新增 0002 后版本应为 2 且 `dirty=false`（迁移干净完成），属**断言过期而非实现回归**。已按建议改为**动态校验**「版本 = `migrations/` 下最大迁移版本号」（OPEN-8 关闭）。注：本机无 5433 本地 PG、无法重跑该脚本，逻辑已静态核对，待有 PG 时复验。 |
 | `docs/decisions.md` 的 OPEN-1 / OPEN-2 已裁定并关闭 | **PASS** | 均已置 RESOLVED 并补齐 Resolution |
 | README 新增「M1 验收状态」表 | **PASS** | 本表 |
+| `GET /api/v1/alerts` 告警列表接口 + 前端列表页 | **PASS** | 后端新增 `ListAlerts`（sqlc 生成）/ `Repository.List` / Service 转发 / handler `AlertList`（默认 100 条、`?limit=&offset=` 参数夹紧）/ 路由；补 `Alert/StoredAlert` 的 json tag（原缺 tag 致 PascalCase、与前端契约不符，已修）；前端 `web/src/api/alerts.ts` + `pages/Alerts.tsx`（antd Table + 「发送示例告警」按钮）。端到端实跑：healthz 200 → 列表返回既有告警 → POST 示例告警 200 accepted=1 → 列表 count +1、firing 行 `ends_at=null` 渲染「持续中」、`starts_at DESC` 排序正确、字段扁平化正确 |
 | `go.mod` 无新增依赖 | **PASS** | require 仍为 chi / golang-migrate / pgx / koanf / pflag；M1 只用标准库（SHA256 指纹、`http.MaxBytesReader` 限流） |
 
 **本轮实测发现并修复的缺陷**（详见 `docs/decisions.md` ADR-007）：

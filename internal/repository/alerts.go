@@ -91,6 +91,25 @@ func (a *Alerts) Resolve(ctx context.Context, id int64, endsAt *time.Time) error
 	return nil
 }
 
+// List 取最新一批告警（starts_at DESC, id DESC），不做 status 过滤。
+//
+// 空结果返回 ([]StoredAlert{}, nil) 而非 (nil, nil)：保持「空切片」语义，
+// 避免调用方对 nil 切片做 len() 时误以为出错，也便于前端直接 map。
+func (a *Alerts) List(ctx context.Context, limit, offset int32) ([]alert.StoredAlert, error) {
+	rows, err := a.queries.ListAlerts(ctx, db.ListAlertsParams{
+		Limit:  limit,
+		Offset: offset,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("repository: 查询告警列表失败: %w", err)
+	}
+	out := make([]alert.StoredAlert, 0, len(rows))
+	for i := range rows {
+		out = append(out, toStoredAlert(&rows[i]))
+	}
+	return out, nil
+}
+
 // toStoredAlert 把 sqlc 生成的行映射为领域对象。
 //
 // 参数取指针而非值：db.Alert 含若干 json.RawMessage 与 pgtype 字段，体积近 300 字节，
