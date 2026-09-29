@@ -1,0 +1,18 @@
+# IIP 服务依赖拓扑（M2 关联引擎 · DependencySimilarity 用）
+#
+# 格式：services.<服务名> = [其依赖的服务名...]
+#   - 边视为**无向**：`checkout: [payment]` 与 `payment: [checkout]` 等价。
+#   - 评分规则（手册 §4.2）：存在直接依赖边 → 0.9；有共同邻居 → 0.5；否则 0。
+#   - 本文件为**示例**，请按你的真实环境替换；也可用 IIP_TOPOLOGY_FILE 指向别处。
+#   - 文件缺失或为空：不报错，依赖维退化为恒 0（关联仍按其余四维工作）。
+#
+# 规格依据：docs/IIP-M2详细开发手册.md §4.5
+
+services:
+  # 接入层依赖核心交易链路
+  frontend: [checkout, payment]
+  # 交易链路：checkout → payment → mysql
+  checkout: [payment]
+  payment: [mysql]
+  # 数据层（无下游）
+  mysql: []

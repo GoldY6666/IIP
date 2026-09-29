@@ -1,0 +1,13 @@
+{
+  "name": "unrelated",
+  "description": "互不相关的杂告警：不同服务、不同命名空间、时间彼此不重叠、标签无交集，期望互不合并（全为单元素组）",
+  "topology": {},
+  "expected_groups": [[0], [1], [2], [3], [4]],
+  "alerts": [
+    {"alertname": "A1", "service": "alpha", "namespace": "team-a", "severity": "info", "labels": {"alertname": "A1", "service": "alpha", "namespace": "team-a", "tier": "one"}, "starts_at": "2026-09-24T10:00:00Z", "ends_at": "2026-09-24T10:05:00Z"},
+    {"alertname": "B1", "service": "beta", "namespace": "team-b", "severity": "info", "labels": {"alertname": "B1", "service": "beta", "namespace": "team-b", "tier": "two"}, "starts_at": "2026-09-24T10:30:00Z", "ends_at": "2026-09-24T10:35:00Z"},
+    {"alertname": "C1", "service": "gamma", "namespace": "team-c", "severity": "info", "labels": {"alertname": "C1", "service": "gamma", "namespace": "team-c", "tier": "three"}, "starts_at": "2026-09-24T11:00:00Z", "ends_at": "2026-09-24T11:05:00Z"},
+    {"alertname": "D1", "service": "delta", "namespace": "team-d", "severity": "info", "labels": {"alertname": "D1", "service": "delta", "namespace": "team-d", "tier": "four"}, "starts_at": "2026-09-24T11:30:00Z", "ends_at": "2026-09-24T11:35:00Z"},
+    {"alertname": "E1", "service": "epsilon", "namespace": "team-e", "severity": "info", "labels": {"alertname": "E1", "service": "epsilon", "namespace": "team-e", "tier": "five"}, "starts_at": "2026-09-24T12:00:00Z", "ends_at": "2026-09-24T12:05:00Z"}
+  ]
+}

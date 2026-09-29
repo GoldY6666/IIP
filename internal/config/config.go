@@ -41,6 +41,13 @@ type Config struct {
 	// 必须有上限：该端点对外暴露，没有上限时一个超大请求体就能把服务内存吃满。
 	// 规格依据：docs/IIP-M1详细开发手册.md §4.7。
 	WebhookMaxBytes int64 // IIP_WEBHOOK_MAX_BYTES，默认 1048576（1 MiB）
+
+	// TopologyFile 是服务依赖拓扑文件路径（M2 的 DependencySimilarity 用）。
+	// 文件不存在不报错，依赖维退化为恒 0。规格依据：docs/IIP-M2详细开发手册.md §4.5。
+	TopologyFile string // IIP_TOPOLOGY_FILE，默认 "config/topology.yaml"
+
+	// CorrelationEnabled 是 M2 关联引擎总开关；false 时 webhook 落库后不关联。
+	CorrelationEnabled bool // IIP_CORRELATION_ENABLED，默认 true
 }
 
 // 内置默认值集中定义，便于单测断言。
@@ -53,6 +60,12 @@ const (
 	// DefaultWebhookMaxBytes 对 Alertmanager 单批 payload 的常见体量留有充裕余量，
 	// 同时远小于「一请求打爆内存」的量级。
 	DefaultWebhookMaxBytes int64 = 1048576
+
+	// DefaultTopologyFile 是默认拓扑文件路径（相对进程工作目录）。
+	DefaultTopologyFile = "config/topology.yaml"
+
+	// DefaultCorrelationEnabled 默认开启关联：M2 的核心能力，不应默认静默。
+	DefaultCorrelationEnabled = true
 )
 
 // Load 按优先级加载配置。
@@ -70,6 +83,8 @@ func Load(args []string) (*Config, error) {
 	fs.Duration("worker-poll", DefaultWorkerPoll, "worker 轮询间隔")
 	fs.Bool("db-poll-only", DefaultDBPollOnly, "禁用 Redis，仅用 DB polling")
 	fs.Int64("webhook-max-bytes", DefaultWebhookMaxBytes, "告警 webhook 请求体上限（字节），超限返回 413")
+	fs.String("topology-file", DefaultTopologyFile, "服务依赖拓扑文件路径（M2 依赖相似度用）")
+	fs.Bool("correlation-enabled", DefaultCorrelationEnabled, "M2 关联引擎总开关")
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -106,12 +121,14 @@ func Load(args []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		HTTPAddr:        k.String("http-addr"),
-		PGURL:           k.String("pg-url"),
-		LogLevel:        k.String("log-level"),
-		WorkerPoll:      k.Duration("worker-poll"),
-		DBPollOnly:      k.Bool("db-poll-only"),
-		WebhookMaxBytes: k.Int64("webhook-max-bytes"),
+		HTTPAddr:           k.String("http-addr"),
+		PGURL:              k.String("pg-url"),
+		LogLevel:           k.String("log-level"),
+		WorkerPoll:         k.Duration("worker-poll"),
+		DBPollOnly:         k.Bool("db-poll-only"),
+		WebhookMaxBytes:    k.Int64("webhook-max-bytes"),
+		TopologyFile:       k.String("topology-file"),
+		CorrelationEnabled: k.Bool("correlation-enabled"),
 	}
 
 	if err := cfg.Validate(); err != nil {

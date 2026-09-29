@@ -11,6 +11,16 @@ import (
 )
 
 type Querier interface {
+	// M2 关联引擎：Incident 创建、候选集查询、关联写入。
+	// 规格依据：docs/IIP-M2详细开发手册.md §4.3 / §4.7。
+	// NEW 档：为一条无法与既有 Incident 关联的 firing 告警新建 Incident。
+	// status 固定 'open'（M3 状态机负责后续流转）；service 取自告警 labels.service。
+	CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error)
+	// 历史相似度的数据源：统计两个 fingerprint 在「同一 Incident」中的共现比例。
+	//   co    = 同时包含两者的 Incident 数
+	//   total = 包含任一者的 Incident 数（并集）
+	// 零历史（total=0）时调用方返回 0.0。
+	FingerprintCoOccurrence(ctx context.Context, arg FingerprintCoOccurrenceParams) (FingerprintCoOccurrenceRow, error)
 	// 支撑 GET /api/v1/alerts/{id}（手册 §3.1 的 P1 项）。
 	GetAlert(ctx context.Context, id int64) (Alert, error)
 	// ============================================================================
@@ -41,6 +51,10 @@ type Querier interface {
 	// 结果是 resolved 被误判成「重复 resolved」而跳过，告警永远停在 firing。
 	// 用 id DESC 作 tie-breaker：同一指纹内 id 单调递增，最大者即最近写入的那条。
 	GetAlertByFingerprint(ctx context.Context, fingerprint string) (Alert, error)
+	// M2 关联引擎：配置读写 + 历史共现查询。
+	// 规格依据：docs/IIP-M2详细开发手册.md §4.4 / §4.7。
+	// 取单行配置（name='default'）。零行时调用方回退到内置默认值。
+	GetCorrelationConfig(ctx context.Context) (CorrelationRule, error)
 	// 持久化归一化后的告警（见手册 §4.2 阶段五 Persist）。
 	//
 	// ON CONFLICT 是 M1 的**数据库层去重兜底**：应用层的「先查后写」防不住并发投递，
@@ -49,6 +63,10 @@ type Querier interface {
 	// 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
 	// （而不是错误），详见 internal/repository/alerts.go。
 	InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert, error)
+	// 关联一条告警到 Incident。(incident_id, alert_id) 为主键，重复链接静默跳过（幂等）。
+	// correlation_score 为 0.0000-1.0000；NEW 档传 NULL（无关联对象）。
+	// needs_review = true 表示 REVIEW 档，待人工确认。
+	LinkAlertToIncident(ctx context.Context, arg LinkAlertToIncidentParams) error
 	// M1 告警列表查询（手册 §3.1 P1 / §4.6）。
 	// 返回**最新 N 条、不做 status 过滤**——状态筛选交给前端；后端只保证稳定且与应用层
 	// 去重判定一致的排序：starts_at DESC, id DESC。
@@ -58,11 +76,20 @@ type Querier interface {
 	// 事件详情页展示其关联告警（走 idx_alerts_incident_id）。
 	// M1 不调用（须等 M2 建立关联），保留供 M3 / M5 使用。
 	ListAlertsByIncident(ctx context.Context, incidentID pgtype.Int8) ([]Alert, error)
+	// 取所有 open / investigating 的 Incident 及其已关联告警（供逐对评分）。
+	// 每行是「一条已关联告警」；调用方按 incident_id 聚合。
+	// ends_at 可能为 NULL（仍 firing），由 Go 侧按当前时刻兜底。
+	ListOpenIncidentsWithAlerts(ctx context.Context) ([]ListOpenIncidentsWithAlertsRow, error)
 	// M1 的 resolved 生命周期：**更新既有行**，而不是插新行（见手册 §4.4）。
 	// Alertmanager 的 send_resolved: true 会把同一指纹再推一次，status=resolved。
 	//
 	// 注意：updated_at 在 0001 中没有触发器，必须显式 NOW()，否则永远停在插入时刻。
 	ResolveAlert(ctx context.Context, arg ResolveAlertParams) error
+	// 回写 alerts.incident_id（反规范化指针），便于后续按 incident 直查告警。
+	SetAlertIncident(ctx context.Context, arg SetAlertIncidentParams) error
+	// 写单行配置：存在即更新 rule_config，不存在则插入（幂等）。
+	// 允许通过 enabled 关闭整个关联引擎。
+	UpsertCorrelationConfig(ctx context.Context, arg UpsertCorrelationConfigParams) (CorrelationRule, error)
 }
 
 var _ Querier = (*Queries)(nil)

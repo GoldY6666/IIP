@@ -1,0 +1,15 @@
+{
+  "name": "cascade",
+  "description": "跨服务级联：checkout→payment→mysql 依赖链上的同类告警（同命名空间、时间相邻），期望聚为 1 组；另有无关的 search 磁盘告警应独立成组",
+  "topology": {
+    "checkout": ["payment"],
+    "payment": ["mysql"]
+  },
+  "expected_groups": [[0, 1, 2], [3]],
+  "alerts": [
+    {"alertname": "LatencyHigh", "service": "checkout", "namespace": "prod", "severity": "critical", "labels": {"alertname": "LatencyHigh", "service": "checkout", "namespace": "prod", "tier": "web"}, "starts_at": "2026-09-24T10:00:00Z", "ends_at": "2026-09-24T10:10:00Z"},
+    {"alertname": "LatencyHigh", "service": "payment", "namespace": "prod", "severity": "critical", "labels": {"alertname": "LatencyHigh", "service": "payment", "namespace": "prod", "tier": "web"}, "starts_at": "2026-09-24T10:01:00Z", "ends_at": "2026-09-24T10:11:00Z"},
+    {"alertname": "LatencyHigh", "service": "mysql", "namespace": "prod", "severity": "critical", "labels": {"alertname": "LatencyHigh", "service": "mysql", "namespace": "prod", "tier": "web"}, "starts_at": "2026-09-24T10:02:00Z", "ends_at": "2026-09-24T10:12:00Z"},
+    {"alertname": "DiskFull", "service": "search", "namespace": "staging", "severity": "warning", "labels": {"alertname": "DiskFull", "service": "search", "namespace": "staging", "tier": "data"}, "starts_at": "2026-09-24T11:40:00Z", "ends_at": "2026-09-24T11:50:00Z"}
+  ]
+}

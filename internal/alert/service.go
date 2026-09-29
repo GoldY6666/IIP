@@ -25,15 +25,27 @@ type itemOutcome struct {
 	reason string
 }
 
+// Correlator 是 M2 关联引擎在 ingest 完成后的挂载点（由 correlation.Service 实现）。
+//
+// 接口定义在**消费方**（本包），使 internal/alert 不反向依赖 internal/correlation，
+// 依赖方向仍是 alert ← correlation（只向下）。
+type Correlator interface {
+	CorrelateAlerts(ctx context.Context, alerts []StoredAlert) error
+}
+
 // Service 编排 M1 的五阶段流水线：
 //
 //	Validate → Normalize → Fingerprint → Deduplicate → Persist
 //
 // 它只做编排与计数：HTTP 解析在 internal/api，SQL 在 internal/repository。
 // 这样一层的服务就能被完整单测覆盖（注入假 Repository 即可）。
+//
+// M2 起，落库成功的新 firing 告警会顺带触发关联（correlator）；
+// 未注入 correlator 时行为与 M1 完全一致。
 type Service struct {
-	repo   Repository
-	logger *slog.Logger
+	repo       Repository
+	logger     *slog.Logger
+	correlator Correlator
 }
 
 // NewService 构造 Service。logger 传 nil 时退化为 slog.Default()，
@@ -43,6 +55,14 @@ func NewService(repo Repository, logger *slog.Logger) *Service {
 		logger = slog.Default()
 	}
 	return &Service{repo: repo, logger: logger}
+}
+
+// SetCorrelator 注入 M2 关联引擎。传 nil 等价于关闭关联。
+//
+// 用 setter 而非改造 NewService 签名：既保持 M1 既有调用/测试不变，
+// 也让关联成为可选装配（未装配时行为与 M1 一致）。
+func (s *Service) SetCorrelator(c Correlator) {
+	s.correlator = c
 }
 
 // List 取最新一批告警，直接委托给仓储（排序、过滤策略见 Repository.List 与 SQL 定义）。
@@ -64,14 +84,36 @@ func (s *Service) Ingest(ctx context.Context, p *Payload) (Result, error) {
 		return res, errors.New("payload 为空")
 	}
 
+	// 收集本次**新落库的 firing 告警**，供 M2 关联使用。
+	var newFiring []StoredAlert
 	for i, raw := range p.Alerts {
-		outcome, err := s.ingestOne(ctx, raw, p.Status)
+		outcome, stored, err := s.ingestOne(ctx, raw, p.Status)
 		if err != nil {
 			return res, fmt.Errorf("处理第 %d 条告警失败: %w", i, err)
 		}
+		if stored != nil {
+			newFiring = append(newFiring, *stored)
+		}
 		res.record(i, outcome)
 	}
+
+	s.correlate(ctx, newFiring)
 	return res, nil
+}
+
+// correlate 触发 M2 关联；**失败只记日志，绝不冒泡**。
+//
+// 关联是告警接入的下游增强：若它出错导致 webhook 回 503，Alertmanager 会重投，
+// 反而放大风暴。宁可这一轮不关联，也不能让接入链路受影响（手册 §4.3 铁律）。
+func (s *Service) correlate(ctx context.Context, alerts []StoredAlert) {
+	if s.correlator == nil || len(alerts) == 0 {
+		return
+	}
+	if err := s.correlator.CorrelateAlerts(ctx, alerts); err != nil {
+		s.logger.Error("告警关联失败（不影响接入）",
+			slog.String("error", err.Error()),
+			slog.Int("alert_count", len(alerts)))
+	}
 }
 
 // record 把单条结论累加进 Result，并保留 rejected 的原因。
@@ -93,20 +135,23 @@ func (r *Result) record(index int, outcome itemOutcome) {
 //
 // 返回的 error 仅表示**存储层故障**（应升级为整批失败）；字段级问题一律
 // 返回 outcomeRejected + nil，从而不牵连同批其他告警。
-func (s *Service) ingestOne(ctx context.Context, raw json.RawMessage, topStatus string) (itemOutcome, error) {
+//
+// 第二个返回值仅在「本批次新插入了一行」时非 nil（供 M2 关联使用）；
+// 跳过 / 更新 / 拒绝的情形均为 nil。
+func (s *Service) ingestOne(ctx context.Context, raw json.RawMessage, topStatus string) (itemOutcome, *StoredAlert, error) {
 	// 阶段一：解码 + 字段级校验
 	rawAlert, err := DecodeRawAlert(raw)
 	if err != nil {
-		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil
+		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil, nil
 	}
 	if err = ValidateAlert(&rawAlert); err != nil {
-		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil
+		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil, nil
 	}
 
 	// 阶段二 + 三：归一化（内部即用 GenerateFingerprint 计算指纹）
 	normalized, warnings, err := Normalize(&rawAlert, raw, topStatus)
 	if err != nil {
-		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil
+		return itemOutcome{kind: outcomeRejected, reason: err.Error()}, nil, nil
 	}
 	for _, w := range warnings {
 		s.logger.Warn("告警归一化提示",
@@ -119,37 +164,37 @@ func (s *Service) ingestOne(ctx context.Context, raw json.RawMessage, topStatus 
 }
 
 // persist 实现手册 §4.4 的分支表：按「入站状态 × 库中最新一条状态」决定动作。
-func (s *Service) persist(ctx context.Context, a *Alert) (itemOutcome, error) {
+func (s *Service) persist(ctx context.Context, a *Alert) (itemOutcome, *StoredAlert, error) {
 	latest, err := s.repo.LatestByFingerprint(ctx, a.Fingerprint)
 	if errors.Is(err, ErrNotFound) {
 		return s.persistWithoutHistory(ctx, a)
 	}
 	if err != nil {
-		return itemOutcome{}, err
+		return itemOutcome{}, nil, err
 	}
 	return s.persistAgainstHistory(ctx, a, &latest)
 }
 
 // persistWithoutHistory 处理「该指纹在库中没有任何历史行」。
-func (s *Service) persistWithoutHistory(ctx context.Context, a *Alert) (itemOutcome, error) {
+func (s *Service) persistWithoutHistory(ctx context.Context, a *Alert) (itemOutcome, *StoredAlert, error) {
 	if a.Status == StatusResolved {
 		// 孤立 resolved：M1 上线前该告警已在起火，或上游乱序/重复投递。
 		// 不插入「只有结束、没有开始」的行——它会污染时间线，也无法参与后续关联。
 		s.logger.Warn("收到无对应 firing 的 resolved 告警，已跳过",
 			slog.String("fingerprint", a.Fingerprint))
-		return itemOutcome{kind: outcomeSkipped}, nil
+		return itemOutcome{kind: outcomeSkipped}, nil, nil
 	}
 	return s.insert(ctx, a)
 }
 
 // persistAgainstHistory 处理「库中已有历史行」的三种组合。
-func (s *Service) persistAgainstHistory(ctx context.Context, a *Alert, latest *StoredAlert) (itemOutcome, error) {
+func (s *Service) persistAgainstHistory(ctx context.Context, a *Alert, latest *StoredAlert) (itemOutcome, *StoredAlert, error) {
 	switch a.Status {
 	case StatusFiring:
 		if latest.Status == StatusFiring {
 			// 同一指纹的 firing 已在库中——V1.0 §4.2 的「跳过」。
 			s.logger.Debug("重复的 firing 告警，已跳过", slog.String("fingerprint", a.Fingerprint))
-			return itemOutcome{kind: outcomeSkipped}, nil
+			return itemOutcome{kind: outcomeSkipped}, nil, nil
 		}
 		// 已 resolved 的旧行之后重新起火：插新行，保留历史（否则会覆盖掉故障记录）。
 		return s.insert(ctx, a)
@@ -157,7 +202,7 @@ func (s *Service) persistAgainstHistory(ctx context.Context, a *Alert, latest *S
 	case StatusResolved:
 		if latest.Status != StatusFiring {
 			s.logger.Debug("重复的 resolved 告警，已跳过", slog.String("fingerprint", a.Fingerprint))
-			return itemOutcome{kind: outcomeSkipped}, nil
+			return itemOutcome{kind: outcomeSkipped}, nil, nil
 		}
 		endsAt := a.EndsAt
 		if endsAt == nil {
@@ -166,36 +211,37 @@ func (s *Service) persistAgainstHistory(ctx context.Context, a *Alert, latest *S
 			endsAt = &now
 		}
 		if err := s.repo.Resolve(ctx, latest.ID, endsAt); err != nil {
-			return itemOutcome{}, err
+			return itemOutcome{}, nil, err
 		}
 		s.logger.Info("告警已置为 resolved",
 			slog.Int64("alert_id", latest.ID),
 			slog.String("fingerprint", a.Fingerprint))
-		return itemOutcome{kind: outcomeUpdated}, nil
+		return itemOutcome{kind: outcomeUpdated}, nil, nil
 
 	default:
 		// ValidateAlert 已把 status 限定为 firing / resolved，此处纯属防御。
 		return itemOutcome{
 			kind:   outcomeRejected,
 			reason: fmt.Sprintf("不支持的 status: %q", a.Status),
-		}, nil
+		}, nil, nil
 	}
 }
 
 // insert 落库；命中唯一约束被跳过时计入 skipped（并发去重兜底生效的信号）。
-func (s *Service) insert(ctx context.Context, a *Alert) (itemOutcome, error) {
+func (s *Service) insert(ctx context.Context, a *Alert) (itemOutcome, *StoredAlert, error) {
 	stored, inserted, err := s.repo.Insert(ctx, a)
 	if err != nil {
-		return itemOutcome{}, err
+		return itemOutcome{}, nil, err
 	}
 	if !inserted {
 		s.logger.Warn("插入被唯一约束跳过（并发去重兜底生效）",
 			slog.String("fingerprint", a.Fingerprint))
-		return itemOutcome{kind: outcomeSkipped}, nil
+		return itemOutcome{kind: outcomeSkipped}, nil, nil
 	}
 	s.logger.Info("告警已落库",
 		slog.Int64("alert_id", stored.ID),
 		slog.String("fingerprint", a.Fingerprint),
 		slog.String("severity", a.Severity))
-	return itemOutcome{kind: outcomeAccepted}, nil
+	// 返回落库行（带 ID）：它是 M2 关联的输入。
+	return itemOutcome{kind: outcomeAccepted}, &stored, nil
 }

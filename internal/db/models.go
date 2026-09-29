@@ -79,6 +79,7 @@ type IncidentAlert struct {
 	AlertID          int64              `json:"alert_id"`
 	CorrelatedAt     pgtype.Timestamptz `json:"correlated_at"`
 	CorrelationScore pgtype.Numeric     `json:"correlation_score"`
+	NeedsReview      bool               `json:"needs_review"`
 }
 
 type Timeline struct {

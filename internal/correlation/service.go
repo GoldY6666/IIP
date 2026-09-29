@@ -1,0 +1,210 @@
+package correlation
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/yu/iip/internal/alert"
+)
+
+// Result 是单条告警的关联结论。
+type Result struct {
+	Action     string  // merge / review / new / none
+	IncidentID int64   // 命中或新建的 Incident；none 时为 0
+	Score      float64 // 关联分数；NEW 档为 0
+}
+
+// Service 编排关联：读配置 → 取候选 → 逐对打分 → 三档决策 → 落库。
+//
+// 依赖方向：api → correlation → repository → db，与 M1 的 internal/alert 一致。
+type Service struct {
+	incidents IncidentStore
+	config    ConfigStore
+	topo      *Topology
+	logger    *slog.Logger
+}
+
+// NewService 构造关联服务。logger 为 nil 时退化为 slog.Default()。
+func NewService(incidents IncidentStore, cfgStore ConfigStore, topo *Topology, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Service{incidents: incidents, config: cfgStore, topo: topo, logger: logger}
+}
+
+// CorrelateAlerts 对一批「新落库的告警」做关联（webhook persist 成功后调用）。
+//
+// 只处理 status='firing'：resolved 不建/不并事件（其生命周期归 M3 状态机）。
+//
+// 返回 error 仅表示**存储层故障**。调用方（handler）须只记日志——关联失败
+// 绝不能让 webhook 失败，否则会触发 Alertmanager 重投、放大风暴（手册 §4.3 铁律）。
+func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAlert) error {
+	if len(alerts) == 0 {
+		return nil
+	}
+
+	cfg, err := s.config.GetConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("读取关联配置失败: %w", err)
+	}
+	if !cfg.Enabled {
+		return nil
+	}
+
+	candidates, err := s.incidents.ListOpenIncidentAlerts(ctx)
+	if err != nil {
+		return fmt.Errorf("读取候选事件失败: %w", err)
+	}
+
+	// 按 Incident 聚合候选告警；批次内新建/合并的事件会实时并入，使同批告警可互相累积。
+	byIncident := make(map[int64][]AlertView)
+	for _, c := range candidates {
+		byIncident[c.IncidentID] = append(byIncident[c.IncidentID], c.View)
+	}
+
+	ref := time.Now().UTC()
+	memo := make(map[string]float64)
+	hist := func(fpA, fpB string) float64 { return s.coOccurrence(ctx, memo, fpA, fpB) }
+	scorer := NewScorer(cfg, s.topo, hist, ref)
+
+	for _, a := range alerts {
+		if a.Status != alert.StatusFiring {
+			continue
+		}
+		v := NewAlertView(a)
+		res, err := s.correlateOne(ctx, byIncident, scorer, cfg, v)
+		if err != nil {
+			return fmt.Errorf("告警 %d 关联失败: %w", v.ID, err)
+		}
+		s.logger.Info("告警关联完成",
+			slog.String("action", res.Action),
+			slog.Int64("alert_id", v.ID),
+			slog.Int64("incident_id", res.IncidentID),
+			slog.Float64("score", res.Score))
+	}
+	return nil
+}
+
+// correlateOne 对单条告警视图执行「取最大分 → 决策 → 落库」。
+func (s *Service) correlateOne(
+	ctx context.Context,
+	byIncident map[int64][]AlertView,
+	scorer *Scorer,
+	cfg Config,
+	v AlertView,
+) (Result, error) {
+	bestScore := 0.0
+	bestIncident := int64(0)
+	for incID, members := range byIncident {
+		maxForIncident := 0.0
+		for _, existing := range members {
+			if sc := scorer.Score(v, existing); sc > maxForIncident {
+				maxForIncident = sc
+			}
+		}
+		if maxForIncident > bestScore {
+			bestScore = maxForIncident
+			bestIncident = incID
+		}
+	}
+
+	action := Decide(bestScore, cfg.Thresholds)
+	if bestIncident == 0 {
+		action = ActionNew // 无候选事件，必然新建（避免 0 分被判成 REVIEW）
+	}
+
+	switch action {
+	case ActionMerge:
+		if err := s.link(ctx, bestIncident, v, &bestScore, false); err != nil {
+			return Result{}, err
+		}
+		byIncident[bestIncident] = append(byIncident[bestIncident], v)
+		return Result{Action: ActionMerge, IncidentID: bestIncident, Score: bestScore}, nil
+
+	case ActionReview:
+		if err := s.link(ctx, bestIncident, v, &bestScore, true); err != nil {
+			return Result{}, err
+		}
+		byIncident[bestIncident] = append(byIncident[bestIncident], v)
+		return Result{Action: ActionReview, IncidentID: bestIncident, Score: bestScore}, nil
+
+	default:
+		inc, err := s.incidents.CreateIncident(ctx, Incident{
+			Title:     incidentTitle(v),
+			Severity:  v.Severity,
+			Service:   v.Service,
+			StartedAt: v.StartsAt,
+		})
+		if err != nil {
+			return Result{}, fmt.Errorf("新建事件失败: %w", err)
+		}
+		if err := s.link(ctx, inc.ID, v, nil, false); err != nil {
+			return Result{}, err
+		}
+		byIncident[inc.ID] = append(byIncident[inc.ID], v)
+		return Result{Action: ActionNew, IncidentID: inc.ID, Score: 0}, nil
+	}
+}
+
+// link 建立关联边并回写告警的 incident_id 反规范化指针。
+func (s *Service) link(ctx context.Context, incidentID int64, v AlertView, score *float64, needsReview bool) error {
+	if err := s.incidents.LinkAlertToIncident(ctx, incidentID, v.ID, score, needsReview); err != nil {
+		return fmt.Errorf("关联告警 %d → 事件 %d 失败: %w", v.ID, incidentID, err)
+	}
+	if err := s.incidents.SetAlertIncident(ctx, v.ID, incidentID); err != nil {
+		return fmt.Errorf("回写告警 %d 的 incident_id 失败: %w", v.ID, err)
+	}
+	return nil
+}
+
+// coOccurrence 带批次内记忆的历史共现比例（同一对指纹只查一次库）。
+func (s *Service) coOccurrence(ctx context.Context, memo map[string]float64, fpA, fpB string) float64 {
+	if fpA == "" || fpB == "" || fpA == fpB {
+		return 0
+	}
+	key := fpA + "|" + fpB
+	if fpA > fpB {
+		key = fpB + "|" + fpA
+	}
+	if v, ok := memo[key]; ok {
+		return v
+	}
+	co, total, err := s.config.CoOccurrence(ctx, fpA, fpB)
+	ratio := 0.0
+	if err != nil {
+		// 历史维只是加分项，查询失败不应让整条关联失败；按 0 计并告警。
+		s.logger.Warn("历史共现查询失败，按 0 计",
+			slog.String("error", err.Error()),
+			slog.String("fingerprint_a", fpA),
+			slog.String("fingerprint_b", fpB))
+	} else if total > 0 {
+		ratio = co / total
+	}
+	memo[key] = ratio
+	return ratio
+}
+
+// incidentTitle 由告警派生事件标题：优先 alertname，附 service/namespace 便于辨识。
+func incidentTitle(v AlertView) string {
+	name := strings.TrimSpace(v.Labels["alertname"])
+	if name == "" {
+		name = "未命名告警"
+	}
+	switch {
+	case v.Service != "":
+		return name + " (" + v.Service + ")"
+	case v.Namespace != "":
+		return name + " (" + v.Namespace + ")"
+	case v.Fingerprint != "":
+		fp := v.Fingerprint
+		if len(fp) > 12 {
+			fp = fp[:12]
+		}
+		return name + " #" + fp
+	default:
+		return name
+	}
+}

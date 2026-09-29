@@ -1,0 +1,130 @@
+package repository
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/yu/iip/internal/correlation"
+	"github.com/yu/iip/internal/db"
+)
+
+// Incidents 是基于 PostgreSQL 的 correlation.IncidentStore 实现。
+type Incidents struct {
+	queries *db.Queries
+}
+
+// 编译期断言：必须满足关联引擎定义的仓储接口。
+var _ correlation.IncidentStore = (*Incidents)(nil)
+
+// NewIncidents 构造仓储。conn 取 db.DBTX，与 NewAlerts 一致（可接连接池或事务）。
+func NewIncidents(conn db.DBTX) *Incidents {
+	return &Incidents{queries: db.New(conn)}
+}
+
+// CreateIncident 新建 Incident（NEW 档）。
+func (r *Incidents) CreateIncident(ctx context.Context, in correlation.Incident) (correlation.Incident, error) {
+	row, err := r.queries.CreateIncident(ctx, db.CreateIncidentParams{
+		Title:     in.Title,
+		Severity:  in.Severity,
+		Service:   textOrNull(in.Service),
+		StartedAt: timestamp(in.StartedAt),
+	})
+	if err != nil {
+		return correlation.Incident{}, fmt.Errorf("repository: 新建事件失败: %w", err)
+	}
+	return correlation.Incident{
+		ID:        row.ID,
+		Title:     row.Title,
+		Severity:  row.Severity,
+		Status:    row.Status,
+		Service:   textOrEmpty(row.Service),
+		StartedAt: row.StartedAt.Time,
+	}, nil
+}
+
+// ListOpenIncidentAlerts 取所有 open / investigating Incident 的已关联告警。
+func (r *Incidents) ListOpenIncidentAlerts(ctx context.Context) ([]correlation.CandidateAlert, error) {
+	rows, err := r.queries.ListOpenIncidentsWithAlerts(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("repository: 查询候选事件告警失败: %w", err)
+	}
+	out := make([]correlation.CandidateAlert, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		labels := correlation.ParseLabels(row.AlertLabels)
+		out = append(out, correlation.CandidateAlert{
+			IncidentID: row.IncidentID,
+			View: correlation.AlertView{
+				ID:          row.AlertID,
+				Fingerprint: row.AlertFingerprint,
+				Severity:    row.AlertSeverity,
+				Service:     labels["service"],
+				Namespace:   labels["namespace"],
+				Labels:      labels,
+				StartsAt:    row.AlertStartsAt.Time,
+				EndsAt:      fromNullableTimestamp(row.AlertEndsAt),
+			},
+		})
+	}
+	return out, nil
+}
+
+// LinkAlertToIncident 建立关联边（幂等）。score 为 nil 表示 NEW 档（无关联对象）。
+func (r *Incidents) LinkAlertToIncident(ctx context.Context, incidentID, alertID int64, score *float64, needsReview bool) error {
+	err := r.queries.LinkAlertToIncident(ctx, db.LinkAlertToIncidentParams{
+		IncidentID:  incidentID,
+		AlertID:     alertID,
+		NeedsReview: needsReview,
+		Score:       numericFromFloatPtr(score),
+	})
+	if err != nil {
+		return fmt.Errorf("repository: 关联事件-告警失败: %w", err)
+	}
+	return nil
+}
+
+// SetAlertIncident 回写 alerts.incident_id。
+func (r *Incidents) SetAlertIncident(ctx context.Context, alertID, incidentID int64) error {
+	err := r.queries.SetAlertIncident(ctx, db.SetAlertIncidentParams{
+		ID:         alertID,
+		IncidentID: pgtype.Int8{Int64: incidentID, Valid: true},
+	})
+	if err != nil {
+		return fmt.Errorf("repository: 回写告警 incident_id 失败: %w", err)
+	}
+	return nil
+}
+
+// textOrNull 把空串映射为 SQL NULL。
+func textOrNull(s string) pgtype.Text {
+	if s == "" {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: s, Valid: true}
+}
+
+// textOrEmpty 是 textOrNull 的逆运算。
+func textOrEmpty(t pgtype.Text) string {
+	if !t.Valid {
+		return ""
+	}
+	return t.String
+}
+
+// numericFromFloatPtr 把 *float64 转成 pgtype.Numeric（nil → SQL NULL）。
+//
+// 走字符串路径而非直接 Scan(float64)：Numeric.Scan 对 string 的支持最稳妥，
+// 避免不同 pgx 版本对 float64 处理的差异。保留 4 位小数，与列精度 DECIMAL(5,4) 对齐。
+func numericFromFloatPtr(f *float64) pgtype.Numeric {
+	if f == nil {
+		return pgtype.Numeric{}
+	}
+	var n pgtype.Numeric
+	if err := n.Scan(strconv.FormatFloat(*f, 'f', 4, 64)); err != nil {
+		return pgtype.Numeric{}
+	}
+	return n
+}

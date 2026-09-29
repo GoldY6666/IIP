@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：M0 已完成（项目骨架与环境搭建，零业务逻辑）；M1（告警接入与持久化）已完成并端到端验证**——告警接收链路打通、真实 Alertmanager 推送通过、去重/幂等/resolved 全生命周期通过（含 ADR-007 修复），OPEN-8 过期断言已修正。M0 只交付可运行的地基——monorepo 骨架、数据库迁移、本地编排、CI 流水线；M1 在其上接入告警接收与落库，仍不包含关联算法（M2+）或前端业务页面（M3+）。
+> **当前阶段：M2（关联引擎）已完成并通过真库验收**——M0 交付可运行的地基（monorepo 骨架、数据库迁移、本地编排、CI 流水线）；M1 接入告警接收与落库（含 ADR-007 修复）；M2 在其上实现五维加权评分 + 三档决策的关联引擎，把同根因告警自动聚合为 Incident（详见下文「M2 验收状态」）。**唯一未完成项是容器链路的实测**：本机 Docker daemon 未运行，`docs/IIP-M2详细开发手册.md` §八 的镜像内内容物已用交叉编译 + ELF 解析等价验证，容器实测如实标注为 BLOCKED，未修饰为通过。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -176,11 +176,14 @@ start http://127.0.0.1:5173/                # 预期渲染「IIP 控制台 · M0
   并且 teardown 只回收自己启动的进程。
 - `http://127.0.0.1:5173/healthz` 返回的是 SPA 首页 HTML 而非 `ok`——
   Vite 只代理 `/api`，`/healthz` 未配代理会落到 index.html。这不是故障。
-- M1 现开放三个路由：`GET /healthz`、`POST /api/v1/alerts/webhook`、
+- M2 起开放五个路由：`GET /healthz`、`POST /api/v1/alerts/webhook`、
   `GET /api/v1/alerts`（告警列表，返回最新 100 条、不做 status 过滤，支持 `?limit=&offset=`，
-  参数缺省/越界自动夹紧）。
-  其余 `/api/v1/*`（**事件**列表 / 详情）属 M2，**当前访问返回 404 是预期行为**。
-  webhook 的契约与状态码矩阵见 `docs/IIP-M1详细开发手册.md` §4.1；列表接口见 §3.1 P1 / §4.6。
+  参数缺省/越界自动夹紧）、`GET /api/v1/correlation/config`、
+  `PUT /api/v1/correlation/config`（关联权重/阈值，支持部分更新，写入即生效免重启）。
+  其余 `/api/v1/*`（**事件**列表 / 详情）属 **M3**，**当前访问返回 404 是预期行为**
+  ——M2 手册 §3.2 已将「Incident 查询 API」明确列为 Out-of-Scope。
+  webhook 的契约与状态码矩阵见 `docs/IIP-M1详细开发手册.md` §4.1；列表接口见 §3.1 P1 / §4.6；
+  配置接口的状态码矩阵（400 / 413 / 422 / 503）见 `docs/IIP-M2详细开发手册.md` §4.4。
 
 手动分步（各自独立终端）：
 
@@ -331,3 +334,44 @@ M1 的完成定义见 `docs/IIP-M1详细开发手册.md` §八。当前状态（
 
 > 本表同样遵循「任何一项不通过如实标注，不修饰为通过」（AGENTS.md 约束 5 / 12）。
 > 集成测试依赖环境变量 `IIP_TEST_PG_URL`（未设置时相关用例 `t.Skip`，**不会**把「没库」伪装成通过）。
+
+---
+
+## M2 验收状态（如实标注）
+
+M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（2026-09-26 实跑）：
+
+| 验收项 | 状态 | 说明 |
+|--------|------|------|
+| 五维评分 + 三档决策实现，`correlation` 包单测全绿 | **PASS** | `internal/correlation` 新增 9 个实现文件 + 7 个测试文件。权重 Time 0.25 / Service 0.25 / Label 0.20 / Dependency 0.20 / Historical 0.10；阈值 MERGE ≥0.80、REVIEW ≥0.50、否则 NEW，边界一律取「大于等于」 |
+| 权重/阈值存于 `correlation_rules` 单行，GET/PUT 配置 API 可用，非法配置 422 | **PASS** | 迁移 0003 种子 `name='default'` 单行；`internal/api/correlation_config_test.go` 12 项 HTTP 契约用例，逐项锁定 400 / 413 / 422 / 503 四种错误码的**可判别性**（请求不成形 → 400；语义非法 → 422；存储故障 → 503） |
+| 改配置后无需重启即对下一条告警生效 | **PASS** | `TestCorrelateAlertsEndToEnd` 真库实跑：`PutConfig(enabled=false)` 后下一条同服务告警不再建事件、不回写 `incident_id`，事件数保持不变 |
+| Replay 三场景：精确率 100% / 召回率 ≥90% / 杂告警不误合并 | **PASS** | scenario1 单服务风暴 202 条（200 风暴 + 2 跨域噪声）→ 3 组；scenario2 跨服务级联 4 → 2 组；scenario3 互不相关 5 → 5 组。**三场景精确率与召回率均为 1.0000**（19900 / 3 / 0 对同组对逐一比对，非仅看组数）；另断言「最大组恰含 200 条」以防「全并成一组」式的假达标 |
+| `correlation` 包测试覆盖率 ≥90% | **PASS** | **96.4%**（`go test -cover`）。`internal/repository` 在真库下 82.5%，`internal/alert` 91.1% |
+| 1000 条告警回放耗时 <60s | **PASS** | 实测 **466 ms**（预算 60s，留 128× 余量）；同规模另有 `BenchmarkClusterInMemory1000` 便于后续调参对比 |
+| 迁移 0003 up→down→up 三连通过；`needs_review` 列与 default 配置行就位 | **PASS** | 真库实跑（`IIP_TEST_PG_URL`），**跳过用例数 = 0**。`TestMigrateUpDownUp` 走全量 up→down-all→up 并逐步断言版本号与**两个**索引；`TestCorrelationM2Migration` 用 `Steps(-1)` **只回滚 0003**，从而真正验证 0003 的 down 删掉了 `needs_review` 列与种子行（全量回滚会把 0001 的表一起删掉，那样「行不存在」是必然的，测不出漏删） |
+| webhook 落库后同步关联生效；关联失败不影响 HTTP 200 | **PASS** | `internal/alert` 挂载 `Correlator`（接口定义在消费方，依赖方向仍 `alert ← correlation`）；`TestIngestSwallowsCorrelatorError` 钉死「关联报错只记日志，不冒泡」——否则 Alertmanager 会重投并放大风暴 |
+| `go build ./...` / `go vet ./...` / `go test ./...` / `gofmt` 全绿 | **PASS** | 四项 rc=0；另在**真库模式**下重跑 `go test ./...` 全绿（8 个包，0 跳过） |
+| `go.mod` 无新增依赖 | **PASS** | require 仍为 chi / golang-migrate / pgx / koanf / pflag + `gopkg.in/yaml.v3`。YAML 库**并非新增**：它本就是 koanf 的间接依赖且已在 `go.mod` 中，M2 用到拓扑解析后升级为**直接**依赖，`go.sum` 未新增任何模块（OPEN-M2-1 由此关闭） |
+| 镜像内内容物（交叉编译 + ELF 静态链接 + 0003 已嵌入） | **PASS** | `scripts/check-binaries.py` 全项通过：iip-server 11.33 MB / iip-worker 8.77 MB，均 `PT_INTERP` 缺失 + 无 libc/libpthread/libdl 引用 = 真静态；版本串 `0.0-m2` 注入生效；server 含 0003 迁移与 `idx_incident_alerts_needs_review`，worker 按预期被死代码消除剥离 |
+| 容器链路实测（`docker build` → `compose up` → 健康收敛） | **BLOCKED** | 本机 Docker daemon 未运行（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在）。**未验证 ≠ 通过**，故如实标 BLOCKED，不计入 PASS |
+| README 新增「M2 验收状态」表；`docs/decisions.md` 记录 M2 决策 | **PASS** | 本表 + ADR-008 / ADR-009 / ADR-010 |
+
+**本轮实测发现并修复的缺陷**（详见 `docs/decisions.md` ADR-008）：
+
+`CalculateScore` 直接把五维加权和作为判定依据。但默认 `merge` 阈值 0.80 与
+「时间 1 + 服务 1 + 标签 1 + 历史 1」的**数学结果恰好相等**，而 IEEE 754 下
+`0.25 + 0.25 + 0.20 + 0.10` 算出来是 `0.7999999999999999`（比 0.80 少 1 ulp），
+于是数学上恰好达阈、按 V1.0 §5.3 的 `>=` 语义应判 MERGE 的组合**被误判为 REVIEW**。
+已改为在 `CalculateScore` 出口统一量化到 6 位小数，并新增
+`TestCalculateScoreThresholdBoundary` 钉死该边界（该用例同时断言未量化的原始浮点值确实低于阈值，
+防止将来有人删掉量化后又以为测试多余）。
+
+> 另外修正两处自身的测试缺陷，一并记录以免重蹈：
+> ① 迁移用例里用 **map 遍历**累加权重和——Go 的 map 迭代顺序随机而浮点求和对顺序敏感，
+> 导致该断言时红时绿（曾出现「同一份代码单包跑 FAIL、全量跑 PASS」）；已改为切片固定顺序 + 容差。
+> ② `check-binaries.py` 的迁移标记只含 0001/0002，新增的 0003 漏在校验之外；
+> 已补 `0003_correlation_m2.up.sql` 与 `idx_incident_alerts_needs_review` 两条标记。
+
+> 复现方式：真库验收用 `python D:\_iip_setup\m2_pg_gate.py`（单次调用内起库 → 跑真库用例 → 回收，
+> 报告落在 `D:\_iip_setup\_m2_pg_gate_report.txt`）。

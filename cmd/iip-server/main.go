@@ -1,7 +1,9 @@
 // Command iip-server 是 IIP 的 HTTP API 服务入口。
 //
-// 提供 /healthz（真查库）与 M1 业务路由：告警 webhook 接入、告警列表查询。
-// 规格依据：docs/IIP-M0详细开发计划.md §T0.3 / §T0.4，docs/IIP-M1详细开发手册.md §3。
+// 提供 /healthz（真查库）与业务路由：告警 webhook 接入、告警列表查询（M1）、
+// 关联配置读写（M2）。
+// 规格依据：docs/IIP-M0详细开发计划.md §T0.3 / §T0.4，
+// docs/IIP-M1详细开发手册.md §3，docs/IIP-M2详细开发手册.md §4.9 / §4.10。
 //
 // 额外支持 --healthcheck 自检模式：请求自身的 /healthz 后按结果退出 0/1。
 // 该模式供容器 healthcheck 使用——运行层是 distroless，镜像内没有
@@ -27,6 +29,7 @@ import (
 	"github.com/yu/iip/internal/alert"
 	"github.com/yu/iip/internal/api"
 	"github.com/yu/iip/internal/config"
+	"github.com/yu/iip/internal/correlation"
 	"github.com/yu/iip/internal/logging"
 	appmw "github.com/yu/iip/internal/middleware"
 	"github.com/yu/iip/internal/repository"
@@ -163,7 +166,7 @@ func run() error {
 	logger.Info("数据库迁移完成")
 
 	// 5) 路由装配
-	r := newRouter(logger, pool, cfg.WebhookMaxBytes)
+	r := newRouter(logger, pool, cfg)
 
 	// 6) HTTP 服务
 	srv := &http.Server{
@@ -198,7 +201,7 @@ func run() error {
 }
 
 // newRouter 装配中间件与路由。业务逻辑不得写入此处（AGENTS.md 约束 2）。
-func newRouter(logger *slog.Logger, pool *pgxpool.Pool, webhookMaxBytes int64) http.Handler {
+func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http.Handler {
 	r := chi.NewRouter()
 	r.Use(
 		chimw.RequestID,
@@ -209,17 +212,41 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, webhookMaxBytes int64) h
 
 	r.Get("/healthz", handleHealthz(pool))
 
+	// 关联引擎（M2）：拓扑 + 配置仓储 + 服务。此处只装配，评分/决策在 internal/correlation。
+	topo, err := correlation.LoadTopology(cfg.TopologyFile)
+	if err != nil {
+		// 拓扑解析失败不应让服务起不来：记 WARN 并以空拓扑运行（依赖维恒 0）。
+		logger.Warn("加载服务拓扑失败，依赖相似度将恒为 0",
+			slog.String("error", err.Error()),
+			slog.String("topology_file", cfg.TopologyFile))
+		topo = &correlation.Topology{}
+	} else if topo.Size() == 0 {
+		logger.Warn("服务拓扑为空，依赖相似度将恒为 0",
+			slog.String("topology_file", cfg.TopologyFile))
+	}
+
+	cfgStore := repository.NewCorrelationConfig(pool)
+	corrSvc := correlation.NewService(repository.NewIncidents(pool), cfgStore, topo, logger)
+
 	// M1：告警接入。此处只有装配——五阶段流水线在 internal/alert，
 	// SQL 在 internal/repository，handler 只负责 HTTP 契约（手册 §4.5）。
 	alertSvc := alert.NewService(repository.NewAlerts(pool), logger)
-	r.Post("/api/v1/alerts/webhook", api.AlertWebhook(alertSvc, webhookMaxBytes, logger))
+	// M2：落库后同步关联（手册 §4.10）。开关关闭时不注入，行为退回 M1。
+	if cfg.CorrelationEnabled {
+		alertSvc.SetCorrelator(corrSvc)
+	}
+	r.Post("/api/v1/alerts/webhook", api.AlertWebhook(alertSvc, cfg.WebhookMaxBytes, logger))
 
 	// M1：告警列表（手册 §3.1 P1）。只读查询，返回最新 100 条、不做 status 过滤。
 	r.Get("/api/v1/alerts", api.AlertList(alertSvc, logger))
 
-	// M2 起：事件（incident）关联与查询，不在 M1 范围（手册 §2 已列明不做）。
-	// M2: r.Get("/api/v1/incidents", ...)
-	// M2: r.Get("/api/v1/incidents/{id}", ...)
+	// M2：关联配置读写（手册 §4.4）。改后免重启即生效。
+	r.Get("/api/v1/correlation/config", api.CorrelationConfigGet(cfgStore, logger))
+	r.Put("/api/v1/correlation/config", api.CorrelationConfigPut(cfgStore, logger))
+
+	// M3 起：事件（incident）查询与生命周期，不在 M2 范围（手册 §3.2 已列明不做）。
+	// M3: r.Get("/api/v1/incidents", ...)
+	// M3: r.Get("/api/v1/incidents/{id}", ...)
 
 	return r
 }

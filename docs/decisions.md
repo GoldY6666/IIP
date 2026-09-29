@@ -174,6 +174,98 @@
 
 ---
 
+## ADR-008：关联评分在出口统一量化到 6 位小数
+
+- **Background**:
+  五维加权评分的结果直接用于三档阈值判定（`score >= merge` → MERGE）。
+  V1.0 §5.1 的权重是两位小数（0.25 / 0.25 / 0.20 / 0.20 / 0.10），
+  默认 `merge` 阈值恰好是 0.80。
+- **缺陷实测证据（M2 实现期）**:
+  「时间 1 + 服务 1 + 标签 1 + 依赖 0 + 历史 1」这一组合的**数学结果是恰好 0.80**，
+  按 §5.3 的 `>=` 语义应判 MERGE。但 IEEE 754 下
+  `0.25 + 0.25 + 0.20 + 0.10` = `0.7999999999999999`（**比 0.80 少 1 ulp**），
+  于是该组合被判成 REVIEW——即「完美匹配的告警仍需人工确认」。
+  这不是假想：两条单测（合并档与历史加分）在真跑时立即转红，实测值
+  `0.7999999999999999`、`score >= 0.8` 为 `False`。
+- **Options**:
+  1. 在 `Decide` 里加容差（`score >= merge - ε`）
+  2. 把总分量化到 4 位小数（等于权重的精度）
+  3. 把总分量化到 6 位小数
+- **Decision**: 采用 **方案 3**，在 `CalculateScore` 出口做一次 `math.Round(score*1e6)/1e6`。
+  方案 2 不可行——时间维是「重叠 / 时长」、标签维是 Jaccard，都是**比值（有理数）**，
+  总分本身可以有远超 4 位的小数，量化到 4 位会丢弃真实信息（最大 5e-5）。
+  方案 1 只治判定、不治数值：日志与 `DECIMAL(5,4)` 落库仍会显示 `0.7999…`，
+  且容差值是拍脑袋的。方案 3 把误差压到 5e-7，远低于任何有意义的判定分辨率
+  （阈值间隔 0.30），且**一处修改同时让日志、落库与判定三处自洽**。
+- **Consequences**:
+  - 正面：数学上恰好达阈的组合判定确定、可复现；分数字符串化后不再出现 `0.7999999999999999` 这类噪声。
+  - 负面：引入了 5e-7 的量化误差，理论上会把 `0.7999996` 这样「本该 REVIEW」的值抬成 MERGE。
+    评估结论是可接受——阈值本身由人以两位小数的精度设定，6 位量化的误差比设定本身的模糊度小 5 个数量级。
+  - **回归护栏**：新增 `TestCalculateScoreThresholdBoundary`，同时断言
+    「得分严格等于阈值」与「未量化的原始浮点值确实低于阈值」（后者防止将来有人删掉量化后又以为该用例多余）。
+  - Replay 三场景的得分（0.675 / 0.57 / 0.775 / 0）均不落在阈值边界上，量化未改变任何既有结论。
+
+---
+
+## ADR-009：REVIEW 档以 `incident_alerts.needs_review` 列落库（关闭 OPEN-M2-2）
+
+- **Background**:
+  三档决策中，REVIEW 档（0.50 ≤ score < 0.80）在 M2 阶段**不建/不并事件**是不合适的
+  ——它确实高度疑似同源，只是证据不足以自动确认。手册 §3.2 明确
+  「人工确认队列 UI 与合并/拒绝操作属 M3；M2 只**落库标记** REVIEW」。
+  因此需要一种方式把「这条关联边待人工确认」持久化下来，供 M3 消费。
+- **Options**:
+  1. 新增 `incident_alerts.needs_review BOOLEAN`
+  2. 复用 `correlation_score`：小于阈值即视为待确认（不加列）
+  3. 新增独立的 `pending_correlations` 表
+- **Decision**: 采用 **方案 1**（迁移 0003）。
+  - 方案 2 被否决：判定依赖阈值，而阈值是**可热改配置**（手册验收项）。
+    一旦运维把 `merge` 从 0.80 调到 0.70，历史行的「是否待确认」会随当前配置**漂移**，
+    人工队列的内容会在配置变更后莫名其妙地变化——这是不可接受的语义。
+    显式落列把「当时的判定」固化下来，与后续配置解耦。
+  - 方案 3 被否决：会与 `incident_alerts` 形成「同一事实两处存储」，
+    需要额外的一致性维护；且 M3 真正需要的是「这条边待确认」这一属性，不是一张新表。
+  - 配套：0003 另建**部分索引** `idx_incident_alerts_needs_review ... WHERE needs_review`。
+    队列查询只关心待确认的行，部分索引比全列索引小得多。
+- **Consequences**:
+  - 正面：M3 可用一条 `WHERE needs_review` 查出队列；判定与配置解耦。
+  - 负面：`incident_alerts` 增列——但 0001 已冻结、0003 走 `ADD COLUMN IF NOT EXISTS`，
+    对既有数据是 `NOT NULL DEFAULT FALSE`，无需回填。
+  - 幂等语义已锁定：`LinkAlertToIncident` 用 `ON CONFLICT DO NOTHING`，
+    因此**首次判定优先**——同一条边被重复投递时不会把已决结果改写
+    （`TestLinkAlertToIncidentIsIdempotentFirstWins` 钉死：先 MERGE(0.85, false) 再 REVIEW(0.60, true) 后，库里仍是 0.85 / false）。
+  - 真库验证：`TestCorrelationM2Migration` 用 `Steps(-1)` 只回滚 0003，确认列与种子行均被删除、0002 的索引不受影响。
+
+---
+
+## ADR-010：关联配置 API 拒绝未知字段
+
+- **Background**:
+  `PUT /api/v1/correlation/config` 的实现是「以当前配置为底、用请求体覆盖所提供字段」
+  （支持部分更新）。若直接 `json.Unmarshal`，JSON 中的**未知字段会被静默忽略**。
+- **缺陷分析（M2 实现期，编码阶段发现而非线上）**:
+  配置键名打错（`{"threshods":{"merge":0.9}}`、`{"weights":{"servcie":0.25}}`）
+  会得到 **HTTP 200 + 配置实际未变**。对配置类接口而言这是最难排查的一类故障：
+  调用方看到成功，行为却毫无变化，且没有任何日志或错误可供追查。
+  既有的 `Validate()` 拦不住它——权重压根没被解析，校验自然通过。
+- **Options**:
+  1. 保持静默忽略（JSON 默认行为）
+  2. `Decoder.DisallowUnknownFields()`，未知字段 → 400
+  3. 只对顶层未知字段告警，嵌套层忽略
+- **Decision**: 采用 **方案 2**。未知字段属于「请求体不成形」，语义上是 400 而非 422
+  （422 留给「成形但语义非法」，例如权重和不为 1）。
+  方案 3 被否决：恰恰是嵌套层（`weights` / `thresholds` 内部）的键名最容易打错。
+- **Consequences**:
+  - 正面：拼错键名立刻得到可读的 400 与具体字段名；配置接口不再有「静默无事发生」这一状态。
+  - 负面：客户端无法再顺手携带额外字段（例如自定义元数据）。评估为可接受——
+    该端点的契约是固定的一组权重/阈值，没有扩展字段的正当用途。
+  - **兼容性护栏**：新增 `TestCorrelationConfigPutC11_GetThenPutRoundTrip`，
+    断言「GET 的输出原样 PUT 回去必须 200」。前端最常见的用法就是读-改-写，
+    这条用例专门防「GET 多输出一个字段导致 PUT 400」这类由本决策引入的回归。
+  - `TestCorrelationConfigPutC07_UnknownFieldIs400` 覆盖三组拼写错误（顶层与嵌套）。
+
+---
+
 ## 待人工确认汇总
 
 | ADR | 决策 | 状态 |
@@ -185,6 +277,9 @@
 | ADR-005 | 多阶段构建 + distroless 运行层 + `--healthcheck` 自检 | 待人工确认 |
 | ADR-006 | 应用组用 compose profiles 隔离 | 待人工确认 |
 | ADR-007 | 去重查询排序以 `id DESC` 收尾 | 已实施（M1 实测修复，非待确认项） |
+| ADR-008 | 关联评分统一量化到 6 位小数 | 已实施（M2 实测修复：0.80 边界被浮点毛刺误判为 REVIEW） |
+| ADR-009 | REVIEW 档落 `incident_alerts.needs_review` 列 | 已实施（M2；关闭 OPEN-M2-2） |
+| ADR-010 | 配置 API 拒绝未知字段 | 已实施（M2；防「拼错键名回 200 却什么也没改」） |
 
 ---
 
@@ -199,6 +294,11 @@
 | 2026-09-25 | T0.6 扩展 | Docker Desktop 下 `daemon.json` 的镜像源配置无法从外部修改 | Docker Desktop（WSL2 后端）以 GUI 内的配置为 `daemon.json` 权威来源，会回写覆盖外部手改。本次尝试写入三源（DaoCloud + 1Panel + 轩辕），`docker info` 始终只显示一个源 | 不依赖镜像源：改用「预拉取 + 重打标签」（`scripts/prepull-mirror.py`），构建全程零网络。若确需多源，由用户在 GUI 的 Docker Engine 编辑器里改 | 需要 GUI 操作，AI 无法代劳；且当前方案已不阻塞验收 | 出现「预拉取不可行、必须依赖在线多源」的场景时 | OPEN | — |
 | 2026-09-25 | M1 启动 | 新迁移的版本号用 `0002_` 还是沿用文档写的 `0003_` | `AGENTS.md` 约束 10 与 `docs/migration-notes.md:19` 均写「后续只能新增 `0003_*.sql`」，但 **0002 从未存在**——`migration-notes.md:15-17` 说明 down 与 up 共用版本号 0001。该「0003」源自 M0 计划原文的「0001_init.sql + 0002_*.down.sql」假设，属**文档自身笔误** | 倾向 `0002_`（保持连续）。`golang-migrate` 不要求版本号连续，两者都能跑；差别只在可读性——不连续的号会让人反问「0002 去哪了」 | 仅缺裁定，无外部条件 | 技术负责人裁定后 | **RESOLVED**（2026-09-25） | 裁定采用 `0002_`。已建 `migrations/0002_alerts_fingerprint_firing_uq.up.sql` / `.down.sql`；up→down→up 三连在真库验证通过（`migrations/migrate_test.go` 的 `TestMigrateUpDownUp`，每步均断言版本号与索引存在性，非仅看命令返回码）。`docs/migration-notes.md:19` 与 `AGENTS.md` 约束 10 中的「0003」确认为文档笔误（0002 从未存在，down 与 up 曾共用 0001），已登记待改 |
 | 2026-09-25 | M1 启动 | `sqlc generate` 的生成物（`internal/db/db.go` / `models.go` / `alerts.sql.go`）是否提交进仓库 | `sqlc.yaml:6` 明确「M0 只落配置与查询骨架，**不生成任何 Go 产物**」，故 `internal/db/` 目前只有 `queries/`。M1 起必须生成，但生成物是否入库需定 | 倾向**入库**：CI 与 `docker build` 就不必安装 sqlc CLI，构建可复现、无工具链漂移；代价是生成物需随查询变更同步提交 | 技术负责人裁定 | 裁定后 | **RESOLVED**（2026-09-25） | 裁定**入库**。`internal/db/{db,models,alerts.sql,querier}.go` 已由 sqlc v1.27.0 生成并提交。收益：CI 与 `docker build` 不必安装 sqlc CLI，构建可复现、无工具链版本漂移。代价（已如实记录）：查询变更后必须同步执行 `sqlc generate` 再提交，否则生成物与查询漂移；该纪律已写入手册 §4.6 与 `sqlc.yaml` 注释。另需注意——Windows 版 sqlc 为 MinGW 构建，需 `libwinpthread-1.dll` 与可执行文件同目录才能运行 |
+| 2026-09-26 | M2 开工（手册 §10 OPEN-M2-1） | 拓扑解析需要 YAML 库，是否违反「`go.mod` 无新增依赖」的验收项 | M2 手册 §八 明确要求 `go.mod` 无新增依赖，但 §4.5 又要求用 YAML 承载服务拓扑 | 倾向引入 `gopkg.in/yaml.v3` 并评估 `go.sum` 是否新增模块 | 无（查证即可裁定） | 查清 yaml.v3 是否为既有间接依赖 | **RESOLVED**（2026-09-26） | `gopkg.in/yaml.v3 v3.0.1` **本就是 koanf 的间接依赖且已在 `go.mod` 中**，M2 使用后升级为直接依赖，`go.sum` 未新增任何模块。故验收项「无新增依赖」成立（严格表述：无新增**模块**；require 列表新增一行 yaml.v3 的直接引用）。另：`LoadTopology` 对缺文件返回空拓扑且**不报错**，使「没有拓扑也能跑」成为默认行为，与「拓扑是可选增强」的设计一致 |
+| 2026-09-26 | M2 开工（手册 §10 OPEN-M2-2） | REVIEW 档（0.50 ≤ score < 0.80）在 M2 阶段如何持久化 | M2 手册 §3.2 规定「M2 只落库标记 REVIEW，确认队列 UI 属 M3」 | 倾向在 `incident_alerts` 增 `needs_review` 列 | 无 | 裁定后 | **RESOLVED**（2026-09-26） | 采用 `needs_review BOOLEAN NOT NULL DEFAULT FALSE` + 部分索引。曾考虑「不加列、用 score < 当前阈值 反推」，因阈值可热改会导致历史判定随配置漂移而否决。详见 ADR-009 |
+| 2026-09-26 | M2 验收 | M2 镜像的**容器链路**实测（`docker build` → `compose up` → 健康收敛 → 库内 `incident_alerts` 核对） | 手册 §八 的镜像内容物已等价验证（交叉编译 + ELF 解析：真静态、版本串注入、0003 已嵌入）；宿主机真库链路已全绿（21 项断言，0 跳过） | 待 Docker daemon 可用后按 `scripts/verify-runtime.py` 既有流程补验 | 本机 Docker daemon 未运行（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在）。此前 M0/v1 阶段的容器链路曾实测通过（见上方 2026-09-25 已关闭项），本次是**同一链路的 M2 版本待复验**，非回归 | Docker Desktop 启动后 | OPEN | 未验证 ≠ 通过，故不计入 M2 的 PASS 项 |
+| 2026-09-26 | M2 验收 | K8s 服务拓扑自动发现是否需在 M2 补做 | 手册 §3.2 的触发条件写明「若 Replay 中依赖维全 0 再补」 | 触发条件**未成立**，无需补做 | 无 | 触发条件成立时（依赖维在 Replay 中恒 0） | **RESOLVED**（2026-09-26） | Replay 的 scenario2（跨服务级联）与 scenario1（单服务风暴）均实际用到依赖维：前者靠 `checkout↔payment` 直接边拿到 0.9，后者靠 `CommonNeighbors(checkout, checkout)` 拿到 0.5。依赖维不是空转，§3.2 的触发条件明确未成立 |
+| 2026-09-26 | M2 验收 | 事件（Incident）列表/详情 API 与前端页面何时做 | M2 手册 §3.2 已列为 Out-of-Scope（属 M3 T3.1） | README 中原写「事件列表属 M2，404 是预期行为」已随 M2 落地而**过期**，本次一并更正为 M3 | M3 排期 | M3 开工后 | OPEN | 本次只做文档更正，不改代码 |
 
 > 确认方式：技术负责人在 `docs/IIP-M0-AI开发计划.md` §P2「你 review」栏的四个关注点
 > （表数索引数对照、DECIMAL(5,4) 精度、ON DELETE CASCADE 范围、feedback 表字段是否够 M2 用）

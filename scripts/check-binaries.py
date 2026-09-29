@@ -52,6 +52,10 @@ MIG_MARKERS = [
     (b"CREATE TABLE alerts", "alerts 建表语句"),
     (b"CREATE TABLE incidents", "incidents 建表语句"),
     (b"chk_alerts_status", "CHECK 约束名"),
+    # M2（0003）：新增迁移必须一并纳入校验，否则「忘了把新迁移打进二进制」
+    # 只会在容器首次启动跑迁移时才暴露。
+    (b"0003_correlation_m2.up.sql", "M2 迁移文件名"),
+    (b"idx_incident_alerts_needs_review", "M2 部分索引名"),
 ]
 
 ROLE_SPEC = [

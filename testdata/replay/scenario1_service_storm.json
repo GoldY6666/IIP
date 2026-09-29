@@ -1,0 +1,3255 @@
+{
+  "name": "service_storm",
+  "description": "单服务告警风暴：200 条同服务(checkout)同规则(LatencyHigh)同命名空间、时间窗高度重叠的告警，期望聚为 1 组；另 2 条跨域噪声（search 磁盘 / gateway 证书）各自独立成组，用于验证精确率不被稀释",
+  "topology": {
+    "checkout": [
+      "payment"
+    ],
+    "payment": [
+      "mysql"
+    ],
+    "search": [
+      "elasticsearch"
+    ]
+  },
+  "expected_groups": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99,
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109,
+      110,
+      111,
+      112,
+      113,
+      114,
+      115,
+      116,
+      117,
+      118,
+      119,
+      120,
+      121,
+      122,
+      123,
+      124,
+      125,
+      126,
+      127,
+      128,
+      129,
+      130,
+      131,
+      132,
+      133,
+      134,
+      135,
+      136,
+      137,
+      138,
+      139,
+      140,
+      141,
+      142,
+      143,
+      144,
+      145,
+      146,
+      147,
+      148,
+      149,
+      150,
+      151,
+      152,
+      153,
+      154,
+      155,
+      156,
+      157,
+      158,
+      159,
+      160,
+      161,
+      162,
+      163,
+      164,
+      165,
+      166,
+      167,
+      168,
+      169,
+      170,
+      171,
+      172,
+      173,
+      174,
+      175,
+      176,
+      177,
+      178,
+      179,
+      180,
+      181,
+      182,
+      183,
+      184,
+      185,
+      186,
+      187,
+      188,
+      189,
+      190,
+      191,
+      192,
+      193,
+      194,
+      195,
+      196,
+      197,
+      198,
+      199
+    ],
+    [
+      200
+    ],
+    [
+      201
+    ]
+  ],
+  "alerts": [
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-000"
+      },
+      "starts_at": "2026-09-24T10:00:00Z",
+      "ends_at": "2026-09-24T10:10:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-001"
+      },
+      "starts_at": "2026-09-24T10:00:03Z",
+      "ends_at": "2026-09-24T10:10:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-002"
+      },
+      "starts_at": "2026-09-24T10:00:06Z",
+      "ends_at": "2026-09-24T10:10:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-003"
+      },
+      "starts_at": "2026-09-24T10:00:09Z",
+      "ends_at": "2026-09-24T10:10:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-004"
+      },
+      "starts_at": "2026-09-24T10:00:12Z",
+      "ends_at": "2026-09-24T10:10:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-005"
+      },
+      "starts_at": "2026-09-24T10:00:15Z",
+      "ends_at": "2026-09-24T10:10:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-006"
+      },
+      "starts_at": "2026-09-24T10:00:18Z",
+      "ends_at": "2026-09-24T10:10:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-007"
+      },
+      "starts_at": "2026-09-24T10:00:21Z",
+      "ends_at": "2026-09-24T10:10:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-008"
+      },
+      "starts_at": "2026-09-24T10:00:24Z",
+      "ends_at": "2026-09-24T10:10:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-009"
+      },
+      "starts_at": "2026-09-24T10:00:27Z",
+      "ends_at": "2026-09-24T10:10:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-010"
+      },
+      "starts_at": "2026-09-24T10:00:30Z",
+      "ends_at": "2026-09-24T10:10:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-011"
+      },
+      "starts_at": "2026-09-24T10:00:33Z",
+      "ends_at": "2026-09-24T10:10:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-012"
+      },
+      "starts_at": "2026-09-24T10:00:36Z",
+      "ends_at": "2026-09-24T10:10:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-013"
+      },
+      "starts_at": "2026-09-24T10:00:39Z",
+      "ends_at": "2026-09-24T10:10:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-014"
+      },
+      "starts_at": "2026-09-24T10:00:42Z",
+      "ends_at": "2026-09-24T10:10:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-015"
+      },
+      "starts_at": "2026-09-24T10:00:45Z",
+      "ends_at": "2026-09-24T10:10:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-016"
+      },
+      "starts_at": "2026-09-24T10:00:48Z",
+      "ends_at": "2026-09-24T10:10:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-017"
+      },
+      "starts_at": "2026-09-24T10:00:51Z",
+      "ends_at": "2026-09-24T10:10:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-018"
+      },
+      "starts_at": "2026-09-24T10:00:54Z",
+      "ends_at": "2026-09-24T10:10:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-019"
+      },
+      "starts_at": "2026-09-24T10:00:57Z",
+      "ends_at": "2026-09-24T10:10:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-020"
+      },
+      "starts_at": "2026-09-24T10:01:00Z",
+      "ends_at": "2026-09-24T10:11:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-021"
+      },
+      "starts_at": "2026-09-24T10:01:03Z",
+      "ends_at": "2026-09-24T10:11:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-022"
+      },
+      "starts_at": "2026-09-24T10:01:06Z",
+      "ends_at": "2026-09-24T10:11:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-023"
+      },
+      "starts_at": "2026-09-24T10:01:09Z",
+      "ends_at": "2026-09-24T10:11:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-024"
+      },
+      "starts_at": "2026-09-24T10:01:12Z",
+      "ends_at": "2026-09-24T10:11:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-025"
+      },
+      "starts_at": "2026-09-24T10:01:15Z",
+      "ends_at": "2026-09-24T10:11:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-026"
+      },
+      "starts_at": "2026-09-24T10:01:18Z",
+      "ends_at": "2026-09-24T10:11:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-027"
+      },
+      "starts_at": "2026-09-24T10:01:21Z",
+      "ends_at": "2026-09-24T10:11:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-028"
+      },
+      "starts_at": "2026-09-24T10:01:24Z",
+      "ends_at": "2026-09-24T10:11:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-029"
+      },
+      "starts_at": "2026-09-24T10:01:27Z",
+      "ends_at": "2026-09-24T10:11:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-030"
+      },
+      "starts_at": "2026-09-24T10:01:30Z",
+      "ends_at": "2026-09-24T10:11:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-031"
+      },
+      "starts_at": "2026-09-24T10:01:33Z",
+      "ends_at": "2026-09-24T10:11:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-032"
+      },
+      "starts_at": "2026-09-24T10:01:36Z",
+      "ends_at": "2026-09-24T10:11:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-033"
+      },
+      "starts_at": "2026-09-24T10:01:39Z",
+      "ends_at": "2026-09-24T10:11:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-034"
+      },
+      "starts_at": "2026-09-24T10:01:42Z",
+      "ends_at": "2026-09-24T10:11:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-035"
+      },
+      "starts_at": "2026-09-24T10:01:45Z",
+      "ends_at": "2026-09-24T10:11:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-036"
+      },
+      "starts_at": "2026-09-24T10:01:48Z",
+      "ends_at": "2026-09-24T10:11:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-037"
+      },
+      "starts_at": "2026-09-24T10:01:51Z",
+      "ends_at": "2026-09-24T10:11:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-038"
+      },
+      "starts_at": "2026-09-24T10:01:54Z",
+      "ends_at": "2026-09-24T10:11:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-039"
+      },
+      "starts_at": "2026-09-24T10:01:57Z",
+      "ends_at": "2026-09-24T10:11:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-040"
+      },
+      "starts_at": "2026-09-24T10:02:00Z",
+      "ends_at": "2026-09-24T10:12:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-041"
+      },
+      "starts_at": "2026-09-24T10:02:03Z",
+      "ends_at": "2026-09-24T10:12:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-042"
+      },
+      "starts_at": "2026-09-24T10:02:06Z",
+      "ends_at": "2026-09-24T10:12:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-043"
+      },
+      "starts_at": "2026-09-24T10:02:09Z",
+      "ends_at": "2026-09-24T10:12:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-044"
+      },
+      "starts_at": "2026-09-24T10:02:12Z",
+      "ends_at": "2026-09-24T10:12:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-045"
+      },
+      "starts_at": "2026-09-24T10:02:15Z",
+      "ends_at": "2026-09-24T10:12:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-046"
+      },
+      "starts_at": "2026-09-24T10:02:18Z",
+      "ends_at": "2026-09-24T10:12:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-047"
+      },
+      "starts_at": "2026-09-24T10:02:21Z",
+      "ends_at": "2026-09-24T10:12:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-048"
+      },
+      "starts_at": "2026-09-24T10:02:24Z",
+      "ends_at": "2026-09-24T10:12:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-049"
+      },
+      "starts_at": "2026-09-24T10:02:27Z",
+      "ends_at": "2026-09-24T10:12:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-050"
+      },
+      "starts_at": "2026-09-24T10:02:30Z",
+      "ends_at": "2026-09-24T10:12:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-051"
+      },
+      "starts_at": "2026-09-24T10:02:33Z",
+      "ends_at": "2026-09-24T10:12:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-052"
+      },
+      "starts_at": "2026-09-24T10:02:36Z",
+      "ends_at": "2026-09-24T10:12:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-053"
+      },
+      "starts_at": "2026-09-24T10:02:39Z",
+      "ends_at": "2026-09-24T10:12:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-054"
+      },
+      "starts_at": "2026-09-24T10:02:42Z",
+      "ends_at": "2026-09-24T10:12:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-055"
+      },
+      "starts_at": "2026-09-24T10:02:45Z",
+      "ends_at": "2026-09-24T10:12:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-056"
+      },
+      "starts_at": "2026-09-24T10:02:48Z",
+      "ends_at": "2026-09-24T10:12:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-057"
+      },
+      "starts_at": "2026-09-24T10:02:51Z",
+      "ends_at": "2026-09-24T10:12:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-058"
+      },
+      "starts_at": "2026-09-24T10:02:54Z",
+      "ends_at": "2026-09-24T10:12:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-059"
+      },
+      "starts_at": "2026-09-24T10:02:57Z",
+      "ends_at": "2026-09-24T10:12:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-060"
+      },
+      "starts_at": "2026-09-24T10:03:00Z",
+      "ends_at": "2026-09-24T10:13:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-061"
+      },
+      "starts_at": "2026-09-24T10:03:03Z",
+      "ends_at": "2026-09-24T10:13:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-062"
+      },
+      "starts_at": "2026-09-24T10:03:06Z",
+      "ends_at": "2026-09-24T10:13:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-063"
+      },
+      "starts_at": "2026-09-24T10:03:09Z",
+      "ends_at": "2026-09-24T10:13:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-064"
+      },
+      "starts_at": "2026-09-24T10:03:12Z",
+      "ends_at": "2026-09-24T10:13:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-065"
+      },
+      "starts_at": "2026-09-24T10:03:15Z",
+      "ends_at": "2026-09-24T10:13:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-066"
+      },
+      "starts_at": "2026-09-24T10:03:18Z",
+      "ends_at": "2026-09-24T10:13:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-067"
+      },
+      "starts_at": "2026-09-24T10:03:21Z",
+      "ends_at": "2026-09-24T10:13:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-068"
+      },
+      "starts_at": "2026-09-24T10:03:24Z",
+      "ends_at": "2026-09-24T10:13:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-069"
+      },
+      "starts_at": "2026-09-24T10:03:27Z",
+      "ends_at": "2026-09-24T10:13:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-070"
+      },
+      "starts_at": "2026-09-24T10:03:30Z",
+      "ends_at": "2026-09-24T10:13:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-071"
+      },
+      "starts_at": "2026-09-24T10:03:33Z",
+      "ends_at": "2026-09-24T10:13:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-072"
+      },
+      "starts_at": "2026-09-24T10:03:36Z",
+      "ends_at": "2026-09-24T10:13:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-073"
+      },
+      "starts_at": "2026-09-24T10:03:39Z",
+      "ends_at": "2026-09-24T10:13:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-074"
+      },
+      "starts_at": "2026-09-24T10:03:42Z",
+      "ends_at": "2026-09-24T10:13:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-075"
+      },
+      "starts_at": "2026-09-24T10:03:45Z",
+      "ends_at": "2026-09-24T10:13:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-076"
+      },
+      "starts_at": "2026-09-24T10:03:48Z",
+      "ends_at": "2026-09-24T10:13:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-077"
+      },
+      "starts_at": "2026-09-24T10:03:51Z",
+      "ends_at": "2026-09-24T10:13:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-078"
+      },
+      "starts_at": "2026-09-24T10:03:54Z",
+      "ends_at": "2026-09-24T10:13:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-079"
+      },
+      "starts_at": "2026-09-24T10:03:57Z",
+      "ends_at": "2026-09-24T10:13:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-080"
+      },
+      "starts_at": "2026-09-24T10:04:00Z",
+      "ends_at": "2026-09-24T10:14:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-081"
+      },
+      "starts_at": "2026-09-24T10:04:03Z",
+      "ends_at": "2026-09-24T10:14:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-082"
+      },
+      "starts_at": "2026-09-24T10:04:06Z",
+      "ends_at": "2026-09-24T10:14:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-083"
+      },
+      "starts_at": "2026-09-24T10:04:09Z",
+      "ends_at": "2026-09-24T10:14:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-084"
+      },
+      "starts_at": "2026-09-24T10:04:12Z",
+      "ends_at": "2026-09-24T10:14:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-085"
+      },
+      "starts_at": "2026-09-24T10:04:15Z",
+      "ends_at": "2026-09-24T10:14:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-086"
+      },
+      "starts_at": "2026-09-24T10:04:18Z",
+      "ends_at": "2026-09-24T10:14:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-087"
+      },
+      "starts_at": "2026-09-24T10:04:21Z",
+      "ends_at": "2026-09-24T10:14:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-088"
+      },
+      "starts_at": "2026-09-24T10:04:24Z",
+      "ends_at": "2026-09-24T10:14:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-089"
+      },
+      "starts_at": "2026-09-24T10:04:27Z",
+      "ends_at": "2026-09-24T10:14:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-090"
+      },
+      "starts_at": "2026-09-24T10:04:30Z",
+      "ends_at": "2026-09-24T10:14:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-091"
+      },
+      "starts_at": "2026-09-24T10:04:33Z",
+      "ends_at": "2026-09-24T10:14:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-092"
+      },
+      "starts_at": "2026-09-24T10:04:36Z",
+      "ends_at": "2026-09-24T10:14:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-093"
+      },
+      "starts_at": "2026-09-24T10:04:39Z",
+      "ends_at": "2026-09-24T10:14:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-094"
+      },
+      "starts_at": "2026-09-24T10:04:42Z",
+      "ends_at": "2026-09-24T10:14:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-095"
+      },
+      "starts_at": "2026-09-24T10:04:45Z",
+      "ends_at": "2026-09-24T10:14:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-096"
+      },
+      "starts_at": "2026-09-24T10:04:48Z",
+      "ends_at": "2026-09-24T10:14:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-097"
+      },
+      "starts_at": "2026-09-24T10:04:51Z",
+      "ends_at": "2026-09-24T10:14:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-098"
+      },
+      "starts_at": "2026-09-24T10:04:54Z",
+      "ends_at": "2026-09-24T10:14:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-099"
+      },
+      "starts_at": "2026-09-24T10:04:57Z",
+      "ends_at": "2026-09-24T10:14:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-100"
+      },
+      "starts_at": "2026-09-24T10:05:00Z",
+      "ends_at": "2026-09-24T10:15:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-101"
+      },
+      "starts_at": "2026-09-24T10:05:03Z",
+      "ends_at": "2026-09-24T10:15:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-102"
+      },
+      "starts_at": "2026-09-24T10:05:06Z",
+      "ends_at": "2026-09-24T10:15:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-103"
+      },
+      "starts_at": "2026-09-24T10:05:09Z",
+      "ends_at": "2026-09-24T10:15:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-104"
+      },
+      "starts_at": "2026-09-24T10:05:12Z",
+      "ends_at": "2026-09-24T10:15:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-105"
+      },
+      "starts_at": "2026-09-24T10:05:15Z",
+      "ends_at": "2026-09-24T10:15:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-106"
+      },
+      "starts_at": "2026-09-24T10:05:18Z",
+      "ends_at": "2026-09-24T10:15:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-107"
+      },
+      "starts_at": "2026-09-24T10:05:21Z",
+      "ends_at": "2026-09-24T10:15:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-108"
+      },
+      "starts_at": "2026-09-24T10:05:24Z",
+      "ends_at": "2026-09-24T10:15:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-109"
+      },
+      "starts_at": "2026-09-24T10:05:27Z",
+      "ends_at": "2026-09-24T10:15:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-110"
+      },
+      "starts_at": "2026-09-24T10:05:30Z",
+      "ends_at": "2026-09-24T10:15:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-111"
+      },
+      "starts_at": "2026-09-24T10:05:33Z",
+      "ends_at": "2026-09-24T10:15:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-112"
+      },
+      "starts_at": "2026-09-24T10:05:36Z",
+      "ends_at": "2026-09-24T10:15:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-113"
+      },
+      "starts_at": "2026-09-24T10:05:39Z",
+      "ends_at": "2026-09-24T10:15:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-114"
+      },
+      "starts_at": "2026-09-24T10:05:42Z",
+      "ends_at": "2026-09-24T10:15:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-115"
+      },
+      "starts_at": "2026-09-24T10:05:45Z",
+      "ends_at": "2026-09-24T10:15:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-116"
+      },
+      "starts_at": "2026-09-24T10:05:48Z",
+      "ends_at": "2026-09-24T10:15:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-117"
+      },
+      "starts_at": "2026-09-24T10:05:51Z",
+      "ends_at": "2026-09-24T10:15:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-118"
+      },
+      "starts_at": "2026-09-24T10:05:54Z",
+      "ends_at": "2026-09-24T10:15:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-119"
+      },
+      "starts_at": "2026-09-24T10:05:57Z",
+      "ends_at": "2026-09-24T10:15:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-120"
+      },
+      "starts_at": "2026-09-24T10:06:00Z",
+      "ends_at": "2026-09-24T10:16:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-121"
+      },
+      "starts_at": "2026-09-24T10:06:03Z",
+      "ends_at": "2026-09-24T10:16:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-122"
+      },
+      "starts_at": "2026-09-24T10:06:06Z",
+      "ends_at": "2026-09-24T10:16:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-123"
+      },
+      "starts_at": "2026-09-24T10:06:09Z",
+      "ends_at": "2026-09-24T10:16:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-124"
+      },
+      "starts_at": "2026-09-24T10:06:12Z",
+      "ends_at": "2026-09-24T10:16:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-125"
+      },
+      "starts_at": "2026-09-24T10:06:15Z",
+      "ends_at": "2026-09-24T10:16:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-126"
+      },
+      "starts_at": "2026-09-24T10:06:18Z",
+      "ends_at": "2026-09-24T10:16:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-127"
+      },
+      "starts_at": "2026-09-24T10:06:21Z",
+      "ends_at": "2026-09-24T10:16:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-128"
+      },
+      "starts_at": "2026-09-24T10:06:24Z",
+      "ends_at": "2026-09-24T10:16:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-129"
+      },
+      "starts_at": "2026-09-24T10:06:27Z",
+      "ends_at": "2026-09-24T10:16:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-130"
+      },
+      "starts_at": "2026-09-24T10:06:30Z",
+      "ends_at": "2026-09-24T10:16:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-131"
+      },
+      "starts_at": "2026-09-24T10:06:33Z",
+      "ends_at": "2026-09-24T10:16:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-132"
+      },
+      "starts_at": "2026-09-24T10:06:36Z",
+      "ends_at": "2026-09-24T10:16:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-133"
+      },
+      "starts_at": "2026-09-24T10:06:39Z",
+      "ends_at": "2026-09-24T10:16:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-134"
+      },
+      "starts_at": "2026-09-24T10:06:42Z",
+      "ends_at": "2026-09-24T10:16:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-135"
+      },
+      "starts_at": "2026-09-24T10:06:45Z",
+      "ends_at": "2026-09-24T10:16:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-136"
+      },
+      "starts_at": "2026-09-24T10:06:48Z",
+      "ends_at": "2026-09-24T10:16:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-137"
+      },
+      "starts_at": "2026-09-24T10:06:51Z",
+      "ends_at": "2026-09-24T10:16:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-138"
+      },
+      "starts_at": "2026-09-24T10:06:54Z",
+      "ends_at": "2026-09-24T10:16:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-139"
+      },
+      "starts_at": "2026-09-24T10:06:57Z",
+      "ends_at": "2026-09-24T10:16:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-140"
+      },
+      "starts_at": "2026-09-24T10:07:00Z",
+      "ends_at": "2026-09-24T10:17:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-141"
+      },
+      "starts_at": "2026-09-24T10:07:03Z",
+      "ends_at": "2026-09-24T10:17:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-142"
+      },
+      "starts_at": "2026-09-24T10:07:06Z",
+      "ends_at": "2026-09-24T10:17:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-143"
+      },
+      "starts_at": "2026-09-24T10:07:09Z",
+      "ends_at": "2026-09-24T10:17:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-144"
+      },
+      "starts_at": "2026-09-24T10:07:12Z",
+      "ends_at": "2026-09-24T10:17:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-145"
+      },
+      "starts_at": "2026-09-24T10:07:15Z",
+      "ends_at": "2026-09-24T10:17:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-146"
+      },
+      "starts_at": "2026-09-24T10:07:18Z",
+      "ends_at": "2026-09-24T10:17:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-147"
+      },
+      "starts_at": "2026-09-24T10:07:21Z",
+      "ends_at": "2026-09-24T10:17:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-148"
+      },
+      "starts_at": "2026-09-24T10:07:24Z",
+      "ends_at": "2026-09-24T10:17:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-149"
+      },
+      "starts_at": "2026-09-24T10:07:27Z",
+      "ends_at": "2026-09-24T10:17:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-150"
+      },
+      "starts_at": "2026-09-24T10:07:30Z",
+      "ends_at": "2026-09-24T10:17:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-151"
+      },
+      "starts_at": "2026-09-24T10:07:33Z",
+      "ends_at": "2026-09-24T10:17:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-152"
+      },
+      "starts_at": "2026-09-24T10:07:36Z",
+      "ends_at": "2026-09-24T10:17:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-153"
+      },
+      "starts_at": "2026-09-24T10:07:39Z",
+      "ends_at": "2026-09-24T10:17:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-154"
+      },
+      "starts_at": "2026-09-24T10:07:42Z",
+      "ends_at": "2026-09-24T10:17:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-155"
+      },
+      "starts_at": "2026-09-24T10:07:45Z",
+      "ends_at": "2026-09-24T10:17:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-156"
+      },
+      "starts_at": "2026-09-24T10:07:48Z",
+      "ends_at": "2026-09-24T10:17:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-157"
+      },
+      "starts_at": "2026-09-24T10:07:51Z",
+      "ends_at": "2026-09-24T10:17:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-158"
+      },
+      "starts_at": "2026-09-24T10:07:54Z",
+      "ends_at": "2026-09-24T10:17:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-159"
+      },
+      "starts_at": "2026-09-24T10:07:57Z",
+      "ends_at": "2026-09-24T10:17:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-160"
+      },
+      "starts_at": "2026-09-24T10:08:00Z",
+      "ends_at": "2026-09-24T10:18:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-161"
+      },
+      "starts_at": "2026-09-24T10:08:03Z",
+      "ends_at": "2026-09-24T10:18:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-162"
+      },
+      "starts_at": "2026-09-24T10:08:06Z",
+      "ends_at": "2026-09-24T10:18:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-163"
+      },
+      "starts_at": "2026-09-24T10:08:09Z",
+      "ends_at": "2026-09-24T10:18:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-164"
+      },
+      "starts_at": "2026-09-24T10:08:12Z",
+      "ends_at": "2026-09-24T10:18:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-165"
+      },
+      "starts_at": "2026-09-24T10:08:15Z",
+      "ends_at": "2026-09-24T10:18:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-166"
+      },
+      "starts_at": "2026-09-24T10:08:18Z",
+      "ends_at": "2026-09-24T10:18:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-167"
+      },
+      "starts_at": "2026-09-24T10:08:21Z",
+      "ends_at": "2026-09-24T10:18:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-168"
+      },
+      "starts_at": "2026-09-24T10:08:24Z",
+      "ends_at": "2026-09-24T10:18:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-169"
+      },
+      "starts_at": "2026-09-24T10:08:27Z",
+      "ends_at": "2026-09-24T10:18:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-170"
+      },
+      "starts_at": "2026-09-24T10:08:30Z",
+      "ends_at": "2026-09-24T10:18:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-171"
+      },
+      "starts_at": "2026-09-24T10:08:33Z",
+      "ends_at": "2026-09-24T10:18:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-172"
+      },
+      "starts_at": "2026-09-24T10:08:36Z",
+      "ends_at": "2026-09-24T10:18:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-173"
+      },
+      "starts_at": "2026-09-24T10:08:39Z",
+      "ends_at": "2026-09-24T10:18:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-174"
+      },
+      "starts_at": "2026-09-24T10:08:42Z",
+      "ends_at": "2026-09-24T10:18:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-175"
+      },
+      "starts_at": "2026-09-24T10:08:45Z",
+      "ends_at": "2026-09-24T10:18:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-176"
+      },
+      "starts_at": "2026-09-24T10:08:48Z",
+      "ends_at": "2026-09-24T10:18:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-177"
+      },
+      "starts_at": "2026-09-24T10:08:51Z",
+      "ends_at": "2026-09-24T10:18:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-178"
+      },
+      "starts_at": "2026-09-24T10:08:54Z",
+      "ends_at": "2026-09-24T10:18:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-179"
+      },
+      "starts_at": "2026-09-24T10:08:57Z",
+      "ends_at": "2026-09-24T10:18:57Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-180"
+      },
+      "starts_at": "2026-09-24T10:09:00Z",
+      "ends_at": "2026-09-24T10:19:00Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-181"
+      },
+      "starts_at": "2026-09-24T10:09:03Z",
+      "ends_at": "2026-09-24T10:19:03Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-182"
+      },
+      "starts_at": "2026-09-24T10:09:06Z",
+      "ends_at": "2026-09-24T10:19:06Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-183"
+      },
+      "starts_at": "2026-09-24T10:09:09Z",
+      "ends_at": "2026-09-24T10:19:09Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-184"
+      },
+      "starts_at": "2026-09-24T10:09:12Z",
+      "ends_at": "2026-09-24T10:19:12Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-185"
+      },
+      "starts_at": "2026-09-24T10:09:15Z",
+      "ends_at": "2026-09-24T10:19:15Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-186"
+      },
+      "starts_at": "2026-09-24T10:09:18Z",
+      "ends_at": "2026-09-24T10:19:18Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-187"
+      },
+      "starts_at": "2026-09-24T10:09:21Z",
+      "ends_at": "2026-09-24T10:19:21Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-188"
+      },
+      "starts_at": "2026-09-24T10:09:24Z",
+      "ends_at": "2026-09-24T10:19:24Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-189"
+      },
+      "starts_at": "2026-09-24T10:09:27Z",
+      "ends_at": "2026-09-24T10:19:27Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-190"
+      },
+      "starts_at": "2026-09-24T10:09:30Z",
+      "ends_at": "2026-09-24T10:19:30Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-191"
+      },
+      "starts_at": "2026-09-24T10:09:33Z",
+      "ends_at": "2026-09-24T10:19:33Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-192"
+      },
+      "starts_at": "2026-09-24T10:09:36Z",
+      "ends_at": "2026-09-24T10:19:36Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-193"
+      },
+      "starts_at": "2026-09-24T10:09:39Z",
+      "ends_at": "2026-09-24T10:19:39Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-194"
+      },
+      "starts_at": "2026-09-24T10:09:42Z",
+      "ends_at": "2026-09-24T10:19:42Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-195"
+      },
+      "starts_at": "2026-09-24T10:09:45Z",
+      "ends_at": "2026-09-24T10:19:45Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-196"
+      },
+      "starts_at": "2026-09-24T10:09:48Z",
+      "ends_at": "2026-09-24T10:19:48Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-197"
+      },
+      "starts_at": "2026-09-24T10:09:51Z",
+      "ends_at": "2026-09-24T10:19:51Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-198"
+      },
+      "starts_at": "2026-09-24T10:09:54Z",
+      "ends_at": "2026-09-24T10:19:54Z"
+    },
+    {
+      "alertname": "LatencyHigh",
+      "service": "checkout",
+      "namespace": "prod",
+      "severity": "critical",
+      "labels": {
+        "alertname": "LatencyHigh",
+        "service": "checkout",
+        "namespace": "prod",
+        "tier": "web",
+        "instance": "pod-199"
+      },
+      "starts_at": "2026-09-24T10:09:57Z",
+      "ends_at": "2026-09-24T10:19:57Z"
+    },
+    {
+      "alertname": "DiskFull",
+      "service": "search",
+      "namespace": "staging",
+      "severity": "warning",
+      "labels": {
+        "alertname": "DiskFull",
+        "service": "search",
+        "namespace": "staging",
+        "tier": "data"
+      },
+      "starts_at": "2026-09-24T12:00:00Z",
+      "ends_at": "2026-09-24T12:10:00Z"
+    },
+    {
+      "alertname": "CertExpiring",
+      "service": "gateway",
+      "namespace": "edge",
+      "severity": "info",
+      "labels": {
+        "alertname": "CertExpiring",
+        "service": "gateway",
+        "namespace": "edge",
+        "tier": "edge"
+      },
+      "starts_at": "2026-09-24T13:00:00Z",
+      "ends_at": "2026-09-24T13:05:00Z"
+    }
+  ]
+}
