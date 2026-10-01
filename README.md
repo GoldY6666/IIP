@@ -290,12 +290,12 @@ M0 的完成定义（DoD）见 `docs/IIP-M0详细开发计划.md` §3。当前�
 | worker 心跳 + 优雅退出 | **PASS** | 60s 心跳（`poll_count=59`）→ `drain 完成，worker 已干净退出` |
 | **v1 端到端运行测试（全 51 项）** | **PASS** | 三条链路：镜像内容物（cross-compile + ELF 静态链接）→ 应用端到端（真实 PG 16.4 从零建库 → 迁移 → 探活 → worker 心跳 → 优雅退出）→ 容器运行（`docker build` + `compose --profile app up` + 容器内断言）。见 `docs/v1-测试报告.md` |
 | **镜像内容物静态链接校验** | **PASS** | 按 Dockerfile 逐参数 cross-compile；ELF `PT_INTERP` 缺失 + 无 libc 引用 = 真静态；版本串注入生效；server 迁移 SQL 完整嵌入 |
-| `go test -race ./...` | **UNVERIFIED** | 本机缺 gcc（Windows 下 `-race` 需 CGO）；由 CI（ubuntu-latest 自带 gcc）覆盖 |
+| `go test -race ./...` | **PASS**（2026-10-01 等价复现） | 本机仍跑不了（Windows 下 `-race` 需 CGO，`CGO_ENABLED=0`、无 gcc，已裁决不装）。改为在 `golang:1.23-alpine` 容器内以 `CGO_ENABLED=1` 实跑：8 包全 ok、rc=0。证据 `D:\_iip_setup\_ci_equiv_report.txt` |
 | 应用镜像可构建（`docker build`） | **PASS** | `iip-server` 13.8MB / `iip-worker` 11.3MB，linux/amd64。WSL2 装好后实测通过 |
 | iip-server / iip-worker 容器可运行 | **PASS** | distroless 运行层，容器内 `--healthcheck` 退出码 0；worker 心跳 `poll_count=29` |
 | compose 依赖服务全 healthy | **PASS** | postgres / redis / prometheus / alertmanager / loki 全 healthy；7 服务全部收敛到终态，无 unhealthy、无停留 starting |
 | Alertmanager UI 可见 firing 告警 | **未验证** | 容器健康与 9093 可达已验证；但未构造真实告警场景，UI 上的 firing 呈现仍属 M4 范围 |
-| CI backend + frontend 双 job 绿 | **待观察** | `go.sum` 已生成、前端 `TS6310` 已修；两个 job 的本地等价命令均通过，但**尚未推远端观察真实结果** |
+| CI backend + frontend 双 job 绿 | **未验证（无法验证）** | 本仓库**没有 git remote**，`.github/workflows/ci.yml` **从未在 GitHub 上执行过**，「由 CI 覆盖」这一说法无从兑现。两个 job 的命令改为**本地等价复现**：`-race` 容器内 PASS、`golangci-lint` 为 FAIL（见下文「M1 验收状态」表的 lint 行） |
 | `docs/decisions.md` 记录 T0.2 四条决策 | 已就绪 | 状态「待人工确认」，见 `docs/decisions.md` |
 | `git tag v0.0-m0` | 待执行 | 全部验收通过后打 tag |
 
@@ -315,7 +315,8 @@ M1 的完成定义见 `docs/IIP-M1详细开发手册.md` §八。当前状态（
 |--------|------|------|
 | 迁移 up → down → up 三连通过；新索引就位 | **PASS** | `migrations/migrate_test.go` 真库实跑 up→down-all→up，每步均断言版本号与 `uq_alerts_fingerprint_firing` 存在性（不只看命令返回码） |
 | 第二条同指纹 firing 的 INSERT 被 DB 拒绝（或静默跳过） | **PASS** | 裸 INSERT 实得 SQLSTATE 23505；生产语句 `ON CONFLICT … DO NOTHING` 影响 0 行；resolved 历史行不受该索引约束 |
-| `go build` / `go vet` / `go test ./...` / `golangci-lint run` / `gofmt -l` 全 rc=0 | **PASS** | 五项均 0。lint 初跑报 7 项（govet shadow ×5、gocritic hugeParam、gocritic httpNoBody），已逐项修复而非加排除规则 |
+| `go build` / `go vet` / `go test ./...` / `gofmt -l` 全 rc=0 | **PASS**（四项） | build / vet / test / gofmt 均 rc=0 |
+| `golangci-lint run` | **FAIL**（更正：原记为 PASS） | 2026-10-01 在**本表对应的 M1 终点提交 `a0ca8a5`** 上用同版本 v1.61.0 实跑：**rc=1、1 项**（`internal/api/alert_list.go:77` gocritic ifElseChain）。即 M1 当时「lint 全绿、7 项已修」的说法**不成立**——该列表切片引入此项后 lint 再未执行过（本机 CLI 未装），「由 CI 覆盖」亦从未兑现（仓库无 remote）。M2 终点累计 **17 项**，详见 `docs/M2-交付详细报告.md` §10.1。**未修复，待裁决** |
 | 纯函数包行覆盖率 ≥ 90% | **PASS** | `internal/alert` 91.2%。初测仅 51%——Service 分支只有跨包集成用例触达，而 Go 的 `-cover` 不计入，故按手册 §4.5 补 `service_test.go`（假仓储）覆盖 7 个去重分支 |
 | 重复 payload 投递 → 表内不增行，HTTP 200 | **PASS** | 端到端实跑 6 步完整生命周期，HTTP 计数与库内行数逐一核对 |
 | resolved 投递 → 原行 `status='resolved'` 且 `ends_at` 非空，不新增行 | **PASS** | 同上，含「重新起火后再次 resolved」场景 |
@@ -346,7 +347,7 @@ M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（
 
 | 验收项 | 状态 | 说明 |
 |--------|------|------|
-| 五维评分 + 三档决策实现，`correlation` 包单测全绿 | **PASS** | `internal/correlation` 新增 9 个实现文件 + 7 个测试文件。权重 Time 0.25 / Service 0.25 / Label 0.20 / Dependency 0.20 / Historical 0.10；阈值 MERGE ≥0.80、REVIEW ≥0.50、否则 NEW，边界一律取「大于等于」 |
+| 五维评分 + 三档决策实现，`correlation` 包单测全绿 | **PASS** | `internal/correlation` 新增 **8 个实现文件（823 行）+ 8 个测试文件（1654 行）**，共 16 个文件（行数按字节级统计 `\n`，等价 `wc -l`）。权重 Time 0.25 / Service 0.25 / Label 0.20 / Dependency 0.20 / Historical 0.10；阈值 MERGE ≥0.80、REVIEW ≥0.50、否则 NEW，边界一律取「大于等于」 |
 | 权重/阈值存于 `correlation_rules` 单行，GET/PUT 配置 API 可用，非法配置 422 | **PASS** | 迁移 0003 种子 `name='default'` 单行；`internal/api/correlation_config_test.go` 12 项 HTTP 契约用例，逐项锁定 400 / 413 / 422 / 503 四种错误码的**可判别性**（请求不成形 → 400；语义非法 → 422；存储故障 → 503） |
 | 改配置后无需重启即对下一条告警生效 | **PASS** | `TestCorrelateAlertsEndToEnd` 真库实跑：`PutConfig(enabled=false)` 后下一条同服务告警不再建事件、不回写 `incident_id`，事件数保持不变 |
 | Replay 三场景：精确率 100% / 召回率 ≥90% / 杂告警不误合并 | **PASS** | scenario1 单服务风暴 202 条（200 风暴 + 2 跨域噪声）→ 3 组；scenario2 跨服务级联 4 → 2 组；scenario3 互不相关 5 → 5 组。**三场景精确率与召回率均为 1.0000**（19900 / 3 / 0 对同组对逐一比对，非仅看组数）；另断言「最大组恰含 200 条」以防「全并成一组」式的假达标 |
