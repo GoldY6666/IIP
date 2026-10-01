@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：M2（关联引擎）已完成并通过真库验收**——M0 交付可运行的地基（monorepo 骨架、数据库迁移、本地编排、CI 流水线）；M1 接入告警接收与落库（含 ADR-007 修复）；M2 在其上实现五维加权评分 + 三档决策的关联引擎，把同根因告警自动聚合为 Incident（详见下文「M2 验收状态」）。**唯一未完成项是容器链路的实测**：本机 Docker daemon 未运行，`docs/IIP-M2详细开发手册.md` §八 的镜像内内容物已用交叉编译 + ELF 解析等价验证，容器实测如实标注为 BLOCKED，未修饰为通过。
+> **当前阶段：M2（关联引擎）已完成，真库验收与容器链路实测均已通过**——M0 交付可运行的地基（monorepo 骨架、数据库迁移、本地编排、CI 流水线）；M1 接入告警接收与落库（含 ADR-007 修复）；M2 在其上实现五维加权评分 + 三档决策的关联引擎，把同根因告警自动聚合为 Incident（详见下文「M2 验收状态」）。容器链路已于 2026-10-01 在 Docker 29.8.0 下补验：清空 named volume 后 **27 项断言全绿**，镜像内内容物另有交叉编译 + ELF 解析的等价验证，二者的证据均已留存。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -87,7 +87,10 @@ make verify-images
 ```
 
 > `make verify-images` 会自动完成端到端验证并产出 `_verify_images.txt` 报告，
-> 断言包含 healthz 200 / 容器内自检 / 迁移版本 / 表数量 / worker 心跳。
+> 断言包含 healthz 200 / 容器内自检 / 迁移版本 / 表数量 / worker 心跳；
+> M2 起另含容器内的关联语义：种子权重逐位比对、配置 API 的 400/422 判别，
+> 以及「改阈值 → 同批告警判 NEW 还是被并入同一个 Incident」的对照实验。
+> 脚本**可重复执行**：每次运行注入独立标签，不会与上一轮留在卷里的告警互相去重。
 > 加 `IIP_KEEP=1` 可保留容器便于人工排查。
 
 等价的原始命令：
@@ -299,7 +302,7 @@ M0 的完成定义（DoD）见 `docs/IIP-M0详细开发计划.md` §3。当前�
 > 本表由运维在环境就绪后逐条执行并更新；**任何一项不通过如实标注，不修饰为通过**（AGENTS.md 约束 5）。
 > 实测原始输出留存于 `D:\_iip_setup\_rt_all.txt` / `_rt_downup.txt` / `_srv*.log` / `_wrk.log` / `pg.log`。
 > v1 端到端证据留存于 `D:\_iip_setup\_v1_e2e_report.txt` / `_v1_binary_check.txt` / `_v1_quality_gate.txt`。
-> 容器链路证据留存于 `D:\_iip_setup\_verify_images.txt` / `_prepull.txt`。
+> 容器链路证据留存于 `D:\_iip_setup\_verify_images.txt`（2026-10-01 M2 补验：清空卷后的全绿报告）/ `_prepull.txt`；M1 期同名证据已归档为 `_verify_images_m1_20260925.txt`，未被覆盖。
 > 详细证据见 `docs/M0-总验收报告.md` §二 与 `docs/v1-测试报告.md`。
 
 ---
@@ -339,7 +342,7 @@ M1 的完成定义见 `docs/IIP-M1详细开发手册.md` §八。当前状态（
 
 ## M2 验收状态（如实标注）
 
-M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（2026-09-26 实跑）：
+M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（2026-10-01 实跑；容器链路于同日补验，此前如实标为 BLOCKED）：
 
 | 验收项 | 状态 | 说明 |
 |--------|------|------|
@@ -354,7 +357,8 @@ M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（
 | `go build ./...` / `go vet ./...` / `go test ./...` / `gofmt` 全绿 | **PASS** | 四项 rc=0；另在**真库模式**下重跑 `go test ./...` 全绿（8 个包，0 跳过） |
 | `go.mod` 无新增依赖 | **PASS** | require 仍为 chi / golang-migrate / pgx / koanf / pflag + `gopkg.in/yaml.v3`。YAML 库**并非新增**：它本就是 koanf 的间接依赖且已在 `go.mod` 中，M2 用到拓扑解析后升级为**直接**依赖，`go.sum` 未新增任何模块（OPEN-M2-1 由此关闭） |
 | 镜像内内容物（交叉编译 + ELF 静态链接 + 0003 已嵌入） | **PASS** | `scripts/check-binaries.py` 全项通过：iip-server 11.33 MB / iip-worker 8.77 MB，均 `PT_INTERP` 缺失 + 无 libc/libpthread/libdl 引用 = 真静态；版本串 `0.0-m2` 注入生效；server 含 0003 迁移与 `idx_incident_alerts_needs_review`，worker 按预期被死代码消除剥离 |
-| 容器链路实测（`docker build` → `compose up` → 健康收敛） | **BLOCKED** | 本机 Docker daemon 未运行（`npipe:////./pipe/dockerDesktopLinuxEngine` 不存在）。**未验证 ≠ 通过**，故如实标 BLOCKED，不计入 PASS |
+| 容器链路实测（`docker build` → `compose up` → 健康收敛） | **PASS** | 2026-10-01 补验（Docker 29.8.0 / linux/overlay2）：**清空 named volume** 后全绿，**27 项断言 0 失败**。覆盖迁移到版本 3 且非 dirty、8 张表、`needs_review` 列与部分索引、`correlation_rules` 种子权重逐位等于 V1.0 §5、GET 配置与种子一致、PUT 非法权重 422 / 未知字段 400，以及**容器内**的关键行为：阈值抬到 0.99 → 本轮 2 条告警均判 NEW（关联边 2 条、带分数 0 条、各自建事件）；阈值还原 → 本轮 2 条告警均被关联进**同一个** Incident（关联边 2 条、带分数 2 条、涉及事件仅 1 个）。全程**未重启任何容器**，即「配置热生效」的容器级证据 |
+| 验收脚本可重复执行（named volume 保留数据后重跑） | **PASS** | 紧接上一行再跑一遍仍全绿（27/27）：事件 2→4、关联边 4→8。去重按**指纹**判定且**无时间窗**（V1.0 §4.2），脚本若不做跨**进程调用**的唯一化，第二轮就会被上一轮遗留的 firing 行按指纹整批吃掉（实测 `skipped:2`、落库 0 行），断言随即假失败——故此行为「脚本可重复执行」的回归证据 |
 | README 新增「M2 验收状态」表；`docs/decisions.md` 记录 M2 决策 | **PASS** | 本表 + ADR-008 / ADR-009 / ADR-010 |
 
 **本轮实测发现并修复的缺陷**（详见 `docs/decisions.md` ADR-008）：
@@ -372,6 +376,16 @@ M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（
 > 导致该断言时红时绿（曾出现「同一份代码单包跑 FAIL、全量跑 PASS」）；已改为切片固定顺序 + 容差。
 > ② `check-binaries.py` 的迁移标记只含 0001/0002，新增的 0003 漏在校验之外；
 > 已补 `0003_correlation_m2.up.sql` 与 `idx_incident_alerts_needs_review` 两条标记。
+
+> **容器链路补验中修掉的脚本缺陷**（均为验收脚本自身问题，**产品代码零改动**）：
+> ① 断言里写成了 `score` 列名，而 `incident_alerts` 的该列在 0001 就定名为 `correlation_score`
+> ——SQL 直接报错、辅助函数返回空串，看上去像产品 FAIL，实为脚本自己写错列名；
+> ② JSONB 中的 numeric 输出为最简形式（种子写 `0.20`，取出得 `0.2`），断言按字面比对必然失败；
+> 已改用 `to_char(..., 'FM0.00')` 归一（`FM` 不可省：不带它 PostgreSQL 会为负号预留一格，输出带前导空格的 ` 0.20`）；
+> ③ 告警标签的 `run` 值原先只做到「跨**轮次**唯一」，未做到「跨**进程调用**唯一」。
+> 去重按指纹且**无时间窗**，而 compose 用 named volume 保留数据，于是脚本第二次执行时
+> 两轮告警被上一轮遗留的 firing 行整批吃掉（实测 `skipped:2`、落库 0 行）。
+> 已改为注入 `RUN_TOKEN`（本次运行的时间戳），并**连跑两次**作为回归证据。
 
 > 复现方式：真库验收用 `python D:\_iip_setup\m2_pg_gate.py`（单次调用内起库 → 跑真库用例 → 回收，
 > 报告落在 `D:\_iip_setup\_m2_pg_gate_report.txt`）。
