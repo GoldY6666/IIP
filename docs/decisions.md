@@ -266,6 +266,79 @@
 
 ---
 
+## ADR-011：告警接入层的五个兜底策略裁定（关闭 OPEN-3/4/5/6/7）
+
+- **Background**:
+  M1 手册 §十 的 OPEN-3～OPEN-7 五项，代码里都已有「暂定」实现，但都未正式裁定。
+  其中 OPEN-5 的复核触发条件写明是「M2 关联引擎上线后复核」，**该条件现已满足**——
+  继续挂着就变成没人认领的待办。故本轮一并裁定。
+  两个能实测的（OPEN-5 / OPEN-6）不以推理下结论，改在**真库 + 真容器**上做对照实验取证。
+- **Decision**（逐项）:
+
+  **OPEN-3：未知 `severity` 维持兜底 `info` + WARN**
+  - 依据：未知取值的真实严重度**不可知**。兜底 `warning` 会把「上游新增了一个我们没映射的
+    标签值」这类**命名漂移**渲染成需要关注的告警，让噪声挤占注意力；`info` 是唯一的
+    「不升级」选择。**可发现性不靠兜底值承担**——`MapSeverity` 同时返回
+    `recognized=false`，由调用方打 WARN 日志。
+  - 别名表已覆盖 `critical/page/emergency/fatal/error → critical`、
+    `warn → warning`、`notice/none/debug → info`，未命中才走兜底。
+  - 重估触发条件（**改为可判定形式**）：出现一例「未命中别名表、但语义确为严重」的真实告警。
+    原表述「有真实上游数据后」太含糊，无法判定何时算满足，等于永远不会重估。
+
+  **OPEN-4：fingerprint 排除表维持写死，不做成可配置**
+  - 依据：指纹是**去重与关联的主键**。若排除表可按环境配置，同一份告警在不同环境会算出
+    不同指纹，后果是 ①历史数据无法跨环境比对；②关联的「历史相似度」维度失去意义；
+    ③迁移与回放的可复现性被破坏。配置化换来的「适配个别环境」收益远小于此代价。
+  - 四键取值（`instance`/`pod`/`container`/`node`）来自 V1.0 §4.3，属规格锁定值。
+  - 这是**架构级**决策（影响数据模型的可移植性），故单独成 ADR，而非只在代码注释里说明。
+
+  **OPEN-5：孤立 `resolved` 维持 skip + WARN，不插孤儿行**
+  - 依据（**已实测**，见下方证据）：插入孤儿行会让 M2 关联引擎把它**当作一条新告警**参与
+    候选集评分，可能在**没有任何 firing 起点**的情况下凭空建出 Incident 或并链到无关事件；
+    而无 firing 起点的 resolved 对 RCA 不提供信息。
+  - 代价（如实记录）：该条 resolved 在库中不留任何痕迹，仅 WARN 日志可见。
+
+  **OPEN-6：重复 firing 维持「不回写」，保留首次现场**
+  - 依据三条：① **Evidence-First**——首次现场是最有价值的一手证据，覆盖即永久丢失；
+    ② 同一指纹蕴含非动态标签集合相同（指纹正是它们算出来的），故回写实际只能覆盖
+    `annotations` 与 `raw_payload` 两者；③ Alertmanager 在**每个评估周期**都会重推仍在起火的
+    告警，回写等于**持续写放大**，收益仅为「注解显示最新值」。
+  - 边界（**已实测**）：`firing → resolved → 再 firing` 必须**插新行**，绝不能走「不回写」路径，
+    否则「故障恢复后再次起火」的历史会被抹掉。实测确认走 `accepted=1` 插新行。
+  - 将来若确需「最新值」视图：**新增列**（如 `latest_annotations`）或改由 `timeline` 记录
+    演进，**不得**覆盖首次现场。
+
+  **OPEN-7：`raw_payload` 维持只存单条 alert**
+  - 依据：批次上下文（`groupKey` / `receiver` / `commonLabels` / `externalURL`）对同一批的
+    **每一行都是相同的**。复制进 N 行是 N 倍写放大，且批次语义一变就要批量改写。
+  - 将来若排查确需批次上下文：**加标量列**（`group_key`、`receiver`）或建独立 payload 表，
+    **不要**把整批 JSON 塞进每行。
+
+- **Consequences**:
+  - 正面：五项不再是没人认领的待办；两个可测项拿到了真库证据而非推理；OPEN-4 的架构理由
+    被显式记录，后人不会「顺手把它做成配置项」。
+  - **如实记录**：本轮**未改任何产品代码**——五项结论都是「维持现状」。
+    这本身是个信号：M1 的暂定值经 M2 上线后的复核仍然成立。
+  - **重要如实说明**：`timeline` 与 `evidence` 两张表虽在 0001 就已建好，但**截至本 ADR
+    没有任何 Go 代码写入它们**（`internal/db/queries/` 只有 alerts / correlation_rules /
+    incidents 三组查询）。因此「信息丢弃由 timeline 承接」**目前不成立**，它只是 M3 的设计
+    意图。OPEN-5 / OPEN-6 的「敢丢」依据必须落在上面写的前两条（不污染关联、保留首次现场），
+    **不能**写成「timeline 会记下来」。
+  - 证据：
+    - OPEN-5 / OPEN-6 真库实验：`D:\_iip_setup\_open56_report.txt`（**14 项断言全过**）。
+      关键实测值——孤立 resolved → `skipped=1`，且 `alerts 8→8`、`incident_alerts 8→8`、
+      `incidents 4→4`；重复 firing → `skipped=1`、同指纹仍 1 行、`annotations` 与
+      `raw_payload` 均保持首次值（`999` 未渗入）；`resolved` → `updated=1`；
+      再 firing → `accepted=1` 且该指纹累计 2 行。
+    - 代码位置：`internal/alert/normalize.go`（severity 别名与兜底）、
+      `internal/alert/fingerprint.go`（`DynamicLabelKeys`）、
+      `internal/alert/service.go`（`persistWithoutHistory` / `persistAgainstHistory`）、
+      `internal/db/queries/alerts.sql`（`ON CONFLICT ... DO NOTHING`）。
+- **Related ADRs**: ADR-007（去重判定排序必须以 `id DESC` 收尾，OPEN-6 的正确性依赖它）；
+  ADR-009（REVIEW 档落库）。
+
+---
+
 ## 待人工确认汇总
 
 | ADR | 决策 | 状态 |
@@ -280,6 +353,7 @@
 | ADR-008 | 关联评分统一量化到 6 位小数 | 已实施（M2 实测修复：0.80 边界被浮点毛刺误判为 REVIEW） |
 | ADR-009 | REVIEW 档落 `incident_alerts.needs_review` 列 | 已实施（M2；关闭 OPEN-M2-2） |
 | ADR-010 | 配置 API 拒绝未知字段 | 已实施（M2；防「拼错键名回 200 却什么也没改」） |
+| ADR-011 | 告警接入层五项兜底策略裁定（关闭 OPEN-3/4/5/6/7） | 已裁定（OPEN-5/6 有真库实验证据；五项均为「维持现状」，产品代码零改动） |
 
 ---
 

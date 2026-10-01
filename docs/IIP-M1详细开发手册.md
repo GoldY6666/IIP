@@ -549,12 +549,12 @@ psql "$env:IIP_PG_URL" -c "SELECT id, fingerprint, severity, status, starts_at, 
 |------|--------|----------|--------|------|
 | OPEN-1 | 新迁移号用 `0002_` 还是文档写的 `0003_` | 倾向 `0002_`（保持连续） | — | **RESOLVED**（2026-09-25 裁定 `0002_`；三连验证已通过） |
 | OPEN-2 | `sqlc generate` 生成物是否入库 | 倾向**入库**（CI 与镜像构建不必装 sqlc CLI） | — | **RESOLVED**（2026-09-25 裁定入库） |
-| OPEN-3 | `severity` 未知值兜底 `info` 还是 `warning` | 暂定 `info` + WARN | 有真实上游数据后 | OPEN |
-| OPEN-4 | fingerprint 排除表是否需可配置 | 暂定写死四键（V1.0 原样） | 出现跨环境差异需求 | OPEN |
-| OPEN-5 | 未知指纹的孤立 `resolved` 如何处置 | 暂定 skip + WARN（不插孤儿行） | M2 关联引擎上线后复核 | OPEN |
-| OPEN-6 | 重复 firing 命中时是否回写 `annotations`/`raw_payload` | 暂定**不回写**（按 V1.0「跳过」） | 上游是否会更新同一告警的注解值 | OPEN |
-| OPEN-7 | `raw_payload` 是否需另存整批上下文（groupKey/receiver） | 暂定只存单条 alert | 排查场景提出需求 | OPEN |
-| OPEN-8 | M0 验收脚本 `scripts/verify-runtime.py:292` 硬编码「迁移版本=1」，M1 新增 0002 后必然失败 | 改为动态校验：版本 = `migrations/` 下最大迁移版本号，且 `dirty=false` | **AGENTS.md 约束 3 禁止擅自修改测试断言** | 技术负责人裁定是否修改 | OPEN |
+| OPEN-3 | `severity` 未知值兜底 `info` 还是 `warning` | 维持 `info` + WARN —— 可发现性由 `recognized=false` + WARN 日志承担，不靠把兜底值升级来实现 | — | **RESOLVED**（2026-10-01，见 ADR-011；重估条件改为**可判定**形式：出现一例「未命中别名表、但语义确为严重」的真实告警） |
+| OPEN-4 | fingerprint 排除表是否需可配置 | 维持**写死四键**（V1.0 §4.3）—— 可配置会让同一告警跨环境算出不同指纹，破坏去重 / 关联 / 回放的可复现性 | — | **RESOLVED**（2026-10-01，见 ADR-011；架构级决策） |
+| OPEN-5 | 未知指纹的孤立 `resolved` 如何处置 | 维持 skip + WARN（不插孤儿行）—— 插孤儿行会让 M2 把它当新告警参与评分，可能在无 firing 起点的情况下凭空建 Incident | — | **RESOLVED**（2026-10-01，见 ADR-011；M2 上线后已在**真库**复核：14 项断言全过，孤立 resolved → `skipped=1` 且 alerts / incident_alerts / incidents 三项计数均不变） |
+| OPEN-6 | 重复 firing 命中时是否回写 `annotations`/`raw_payload` | 维持**不回写** —— Evidence-First 保留首次现场；同指纹蕴含非动态标签相同，回写只能覆盖注解与原始载荷；Alertmanager 每周期重推 → 回写等于写放大 | — | **RESOLVED**（2026-10-01，见 ADR-011；真库实测：改注解重推 → `skipped=1`、仍 1 行、首次值未被覆盖；`resolved` → `updated=1`，再 firing → `accepted=1` 插新行） |
+| OPEN-7 | `raw_payload` 是否需另存整批上下文（groupKey/receiver） | 维持只存单条 alert —— 批次上下文对同一批每行都相同，复制进 N 行是 N 倍写放大 | — | **RESOLVED**（2026-10-01，见 ADR-011；将来若确需，加标量列 `group_key`/`receiver` 或独立表，**不要**把整批 JSON 塞进每行） |
+| OPEN-8 | M0 验收脚本 `scripts/verify-runtime.py:292` 硬编码「迁移版本=1」，M1 新增 0002 后必然失败 | 改为动态校验：版本 = `migrations/` 下最大迁移版本号，且 `dirty=false` | — | **RESOLVED**（2026-09-25 已修正为动态校验；本行原先多出一个单元格导致表格错位，2026-10-01 一并规范） |
 | RISK-1 | `AGENTS.md` 约束 2/11 的「M0」限定需随 M1 启动改写 | 已在 §3.3 给出映射，待确认后落笔 | 技术负责人 | **已处置**（2026-09-25：约束 1/2/10/11 已按里程碑改为通用表述，保留改写说明） |
 | RISK-2 | 复用旧库时，脏数据会让新唯一索引创建失败 | 迁移须能在干净库无条件成功，脏数据清理不入迁移 | — | 已缓解（§五 执行注意 2） |
 
