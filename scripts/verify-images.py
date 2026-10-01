@@ -52,6 +52,17 @@ GOPROXY = os.environ.get("IIP_GOPROXY", "https://goproxy.cn,direct")
 
 REPORT = os.path.join(os.environ.get("IIP_LOG_DIR", PROJ), "_verify_images.txt")
 
+# 本轮运行的唯一令牌，注入告警的非动态标签值里。
+#
+# 为什么需要它：去重是按**指纹**判定的，且**没有时间窗**（V1.0 §4.2：同一指纹
+# 的 firing 已在库中即 skipped）。指纹又包含全部非动态标签，所以只要标签值
+# 逐字相同，本轮告警就会被上一轮留在库里、且仍处于 firing 的行吃掉——
+# compose 用的是 named volume，脚本第二次执行时数据仍在。
+# 实测：不加令牌时第二轮 POST 返回 skipped:2，落库 0 行，
+# 「本轮新增 2 条」的前提不成立，聚合断言必然假失败。
+# 故令牌必须**跨进程调用**唯一，而不只是跨轮次唯一。
+RUN_TOKEN = time.strftime("%m%d-%H%M%S")
+
 L: list[str] = []
 FAILURES: list[str] = []
 
@@ -370,14 +381,17 @@ def main() -> int:
     check("needs_review 部分索引已建立", got == "1", "实际 %r" % got)
 
     # 4.5.3 default 配置行：五维权重与阈值必须逐位等于 V1.0 §5 锁定值
+    # 注：JSONB 内 numeric 输出为最简形式（0.20 -> 0.2），故显式 to_char 归一为两位小数，
+    #     保证断言比对的是「数值相等」而非「文本恰好同形」，且仍为精确相等比较。
+    #     FM 前缀不可省：不带 FM 时 to_char 会为负号预留一格，输出 ' 0.25'（前导空格）。
     got = sql_val(
-        "SELECT name||'|'||(rule_config->'weights'->>'time')||'|'"
-        "||(rule_config->'weights'->>'service')||'|'"
-        "||(rule_config->'weights'->>'label')||'|'"
-        "||(rule_config->'weights'->>'dependency')||'|'"
-        "||(rule_config->'weights'->>'historical')||'|'"
-        "||(rule_config->'thresholds'->>'merge')||'|'"
-        "||(rule_config->'thresholds'->>'review')||'|'||enabled "
+        "SELECT name||'|'||to_char((rule_config->'weights'->>'time')::numeric,'FM0.00')||'|'"
+        "||to_char((rule_config->'weights'->>'service')::numeric,'FM0.00')||'|'"
+        "||to_char((rule_config->'weights'->>'label')::numeric,'FM0.00')||'|'"
+        "||to_char((rule_config->'weights'->>'dependency')::numeric,'FM0.00')||'|'"
+        "||to_char((rule_config->'weights'->>'historical')::numeric,'FM0.00')||'|'"
+        "||to_char((rule_config->'thresholds'->>'merge')::numeric,'FM0.00')||'|'"
+        "||to_char((rule_config->'thresholds'->>'review')::numeric,'FM0.00')||'|'||enabled "
         "FROM correlation_rules WHERE name='default';")
     check("correlation_rules 有 default 行且权重/阈值为 V1.0 §5 锁定值",
           got == "default|0.25|0.25|0.20|0.20|0.10|0.80|0.50|true",
@@ -413,83 +427,122 @@ def main() -> int:
     check("PUT 未知字段(threshods 拼错) -> 400", st == 400,
           "status=%s body=%s" % (st, body[:120]))
 
-    def post_alerts(mark: str | None) -> tuple:
+    def post_alerts(run: str) -> tuple:
         """投递两条同服务(checkout)告警，返回 (status, body)。
 
-        两条告警刻意只在**非动态**标签上不同：
-        指纹计算会剔除 instance/pod/container/node，若两条只差 instance，
-        它们会撞成同一指纹而被去重成 1 条——那这条端到端断言就白测了。
-        故用 shard（非常规动态键）区分，保证落库 2 行。
+        两条告警做成「B = A 再多一个非动态标签 shard」，两个原因：
+        * A 与 B 的指纹必须不同，否则 B 会被当成重复投递而跳过（skipped），
+          落库只剩 1 行，聚合断言就白测了。指纹计算会剔除
+          instance/pod/container/node，所以不能靠 instance 区分，必须用非常规键。
+        * A 与 B 的非动态标签集合只差一个键 → 标签维 Jaccard ≈ 0.83，
+          叠加时间/服务两维满分，总分稳在 0.66 以上（最差也是 REVIEW，
+          而 REVIEW 仍会链接到候选 Incident），故断言不依赖拓扑文件是否存在。
+
+        run 给每轮一个互不相同的非动态标签值。若两条用完全一样的标签，
+        后一条会被前一条的去重逻辑吃掉（实测 skipped:1），
+        「本轮新增 2 条」的前提就不成立——这是第一版实测踩到的坑。
+
+        注意 run 还必须带上 RUN_TOKEN：跨**轮次**唯一不够，还得跨**进程调用**唯一，
+        否则第二次执行本脚本时，上一轮留在 named volume 里的 firing 行会把
+        本轮告警全部吃掉（实测 skipped:2、落库 0 行）。详见 RUN_TOKEN 处注释。
         """
         labels_a = {"alertname": "HighLatency", "service": "checkout",
-                    "namespace": "production", "severity": "critical"}
-        alerts = [{"status": "firing", "labels": labels_a,
+                    "namespace": "production", "severity": "critical",
+                    "run": run}
+        labels_b = dict(labels_a, shard="s1")
+        alerts = [{"status": "firing", "labels": lb,
                    "annotations": {"summary": "p99 超阈"},
                    "startsAt": "2026-10-01T00:00:00Z",
-                   "endsAt": "0001-01-01T00:00:00Z"}]
-        if mark:
-            labels_b = dict(labels_a, shard=mark)
-            alerts.append({"status": "firing", "labels": labels_b,
-                           "annotations": {"summary": "p99 超阈（同服务另一分片）"},
-                           "startsAt": "2026-10-01T00:00:00Z",
-                           "endsAt": "0001-01-01T00:00:00Z"})
+                   "endsAt": "0001-01-01T00:00:00Z"}
+                  for lb in (labels_a, labels_b)]
         payload = json.dumps({"version": "4", "status": "firing",
                               "groupKey": "iip-m2-container-check",
                               "receiver": "iip-webhook", "alerts": alerts},
                              ensure_ascii=False).encode("utf-8")
         return http_request(hook_url, "POST", payload)
 
+    def max_alert_id() -> int:
+        v = sql_val("SELECT coalesce(max(id),0) FROM alerts;")
+        return int(v) if v.isdigit() else -1
+
+    def links_of_new_alerts(after_id: int) -> str:
+        """统计「比 after_id 更新的告警」的关联边形态。
+
+        返回 '关联边总数|带分数的条数|涉及的事件数'；查询失败时返回空串。
+
+        列名是 correlation_score（0001_init 里定的），**不是** score：
+        第一版这里写成 score，SQL 直接报错、sql_val 返回空串，
+        于是「断言失败」看着像产品缺陷、实为脚本自己写错了列名。
+        故这里保留空串这个可辨识的失败形态，并在断言信息里点明，
+        避免把脚本 bug 误读成产品 FAIL。
+        """
+        return sql_val("SELECT count(*)||'|'||count(correlation_score)||'|'||"
+                       "count(DISTINCT incident_id) FROM incident_alerts "
+                       "WHERE alert_id > %d;" % after_id)
+
+    def bad_sql_note(got: str) -> str:
+        return "SQL 查询失败（脚本问题，非产品缺陷）" if got == "" \
+            else "实际 %r" % got
+
     # 4.5.7 先把两个阈值一起抬到 0.99 = 等价于「关闭聚合」。
     #
     # 必须**同时**抬 review：只抬 merge 的话，分数落在 [0.50, merge) 的告警
     # 会走 REVIEW 档——按设计 REVIEW 仍然链接到候选 Incident（只是打标待确认），
-    # 于是「不合并」的预期不会成立，断言会误判成产品缺陷。
+    # 于是「不聚合」的预期不会成立，断言会误判成产品缺陷。
     st, body = http_request(cfg_url, "PUT",
                             b'{"thresholds":{"merge":0.99,"review":0.99}}')
     check("PUT merge/review=0.99 -> 200（模拟关闭聚合）", st == 200,
           "status=%s body=%s" % (st, body[:120]))
 
-    inc0, ia0 = db_count("incidents"), db_count("incident_alerts")
-    st, body = post_alerts("b")
+    aid0 = max_alert_id()
+    st, body = post_alerts("phase-a-" + RUN_TOKEN)
     check("POST 2 条同服务告警 -> 200", st == 200,
           "status=%s body=%s" % (st, body[:160]))
 
-    inc1, ia1 = db_count("incidents"), db_count("incident_alerts")
-    check("阈值 0.99 时两条告警各自新建 Incident（不聚合）",
-          inc1 - inc0 == 2 and ia1 - ia0 == 2,
-          "incidents +%d, incident_alerts +%d" % (inc1 - inc0, ia1 - ia0))
-    got = sql_val("SELECT count(*) FROM incident_alerts WHERE score IS NULL;")
-    check("NEW 档的关联边 score 为空（新建无相似度可言）", got == "2",
-          "score IS NULL 条数 = %r" % got)
+    # 阈值 0.99 时两条都不该被关联，各自新建 Incident：
+    # 关联边 2 条、带分数的 0 条 —— 分数为空即 NEW 档（新建不产生相似度）。
+    got = links_of_new_alerts(aid0)
+    check("阈值 0.99：本轮 2 条告警均为 NEW 档（关联边 2 条 / 带分数 0 条）",
+          got.startswith("2|0|"), bad_sql_note(got) + "（期望 2|0|*）")
 
-    # 4.5.8 还原默认阈值 → 同样两条告警应当聚合。阈值是**即时**生效的，
+    # 4.5.8 还原默认阈值 → 同样两条告警应当被关联。阈值是**即时**生效的，
     # 中途没有重启任何容器，这正是手册 §八「改配置后无需重启」的验收。
     st, body = http_request(cfg_url, "PUT",
                             b'{"thresholds":{"merge":0.80,"review":0.50}}')
     check("PUT 还原 merge=0.80/review=0.50 -> 200", st == 200,
           "status=%s body=%s" % (st, body[:120]))
 
-    inc2, ia2 = db_count("incidents"), db_count("incident_alerts")
-    st, body = post_alerts("c")
+    aid1 = max_alert_id()
+    st, body = post_alerts("phase-b-" + RUN_TOKEN)
     check("POST 2 条同服务告警（阈值还原后）-> 200", st == 200,
           "status=%s body=%s" % (st, body[:160]))
 
-    inc3, ia3 = db_count("incidents"), db_count("incident_alerts")
-    check("阈值还原后两条告警聚合为同一 Incident（配置热生效，无重启）",
-          inc3 - inc2 == 1 and ia3 - ia2 == 2,
-          "incidents +%d, incident_alerts +%d" % (inc3 - inc2, ia3 - ia2))
+    # 阈值还原后两条都应被关联到候选 Incident（走 REVIEW 或 MERGE）：
+    # 关联边 2 条、带分数的 2 条 —— 分数非空即「关联档」，这就是恢复聚合的证据。
+    #
+    # 这里刻意**不**断言「incidents 只增 1」：本轮告警与上一轮同服务，
+    # 会被关联到上一轮遗留的 open Incident 上（incidents +0），
+    # 具体增减取决于库里的候选分布——断言它就等于把断言绑死在偶然状态上，
+    # 而「有没有走关联档」才是配置热生效真正的判据。
+    got = links_of_new_alerts(aid1)
+    check("阈值还原：本轮 2 条告警均被关联（关联边 2 条 / 带分数 2 条）",
+          got.startswith("2|2|"), bad_sql_note(got) + "（期望 2|2|*）")
 
-    # 4.5.9 needs_review 与 score 区间必须自洽：
+    # 4.5.9 needs_review 与关联分数区间必须自洽：
     # 只有 REVIEW 档（0.50 ≤ score < 0.80）才允许打标。这条不变量能同时抓住
-    # 「REVIEW 忘了打标」和「MERGE 被误打标」两个方向的缺陷。
-    got = sql_val("SELECT count(*) FROM incident_alerts WHERE score IS NOT NULL "
-                  "AND needs_review <> (score >= 0.50 AND score < 0.80);")
-    check("needs_review 与 score 区间自洽（仅 REVIEW 档打标）", got == "0",
-          "不自洽条数 = %r" % got)
+    # 「REVIEW 忘了打标」和「MERGE 被误打标」两个方向上的缺陷。
+    got = sql_val("SELECT count(*) FROM incident_alerts "
+                  "WHERE correlation_score IS NOT NULL "
+                  "AND needs_review <> (correlation_score >= 0.50 "
+                  "AND correlation_score < 0.80);")
+    check("needs_review 与关联分数区间自洽（仅 REVIEW 档打标）", got == "0",
+          bad_sql_note(got))
 
-    got = sql_val("SELECT coalesce(round(max(score)::numeric,4)::text,'-') "
+    got = sql_val("SELECT coalesce(round(max(correlation_score)::numeric,4)::text,'-') "
                   "FROM incident_alerts;")
     w("        本次最高关联得分 = %s" % got)
+    w("        incidents 总数 = %d, incident_alerts 总数 = %d"
+      % (db_count("incidents"), db_count("incident_alerts")))
     w()
 
     # 4.6 worker 心跳（60s 周期，需等一轮）
