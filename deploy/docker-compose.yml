@@ -7,9 +7,13 @@
 #   应用组（本项目构建）：iip-server / iip-worker
 #
 # 镜像构建（在仓库根执行，先 build 再 up）：
-#   docker build --target server -t iip-server:0.0-m0 .
-#   docker build --target worker -t iip-worker:0.0-m0 .
+#   docker build --target server -t iip-server:0.0-m2 .
+#   docker build --target worker -t iip-worker:0.0-m2 .
 #   # 或一次性：make image-build
+#
+# 标签随里程碑前移：M0 → 0.0-m0，M1 → 0.0-m1，M2 → 0.0-m2。
+# 改本文件的应用组标签时，务必与 scripts/verify-images.py 的 IIP_TAG 默认值同步，
+# 否则 compose 会去找一个并未构建的标签，表现为 up 直接失败。
 #
 # 起停：
 #   docker compose -f deploy/docker-compose.yml up -d
@@ -25,7 +29,7 @@ name: iip
 
 # ---------------------------------------------------------------- 公共锚点
 # 应用组的镜像与连接串在此集中定义，避免两处漂移。
-x-app-image: &app-image iip-server:0.0-m1
+x-app-image: &app-image iip-server:0.0-m2
 # 容器内连库走 compose 服务名 postgres:5432（不是宿主机的 5433）。
 x-app-env: &app-env
   IIP_PG_URL: "postgres://postgres:dev@postgres:5432/iip?sslmode=disable"
@@ -161,7 +165,7 @@ services:
       start_period: 10s
 
   iip-worker:
-    image: iip-worker:0.0-m1
+    image: iip-worker:0.0-m2
     container_name: iip-worker
     profiles: ["app"]
     restart: unless-stopped

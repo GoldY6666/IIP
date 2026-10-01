@@ -185,7 +185,8 @@ if os.path.exists(DOCKER):
                        capture_output=True, text=True, errors="ignore", timeout=30)
     docker_ok = r.returncode == 0 and bool((r.stdout or "").strip())
 record("Docker daemon 可用", "PASS" if docker_ok else "BLOCKED",
-       "" if docker_ok else "WSL2 未安装，引擎从未启动")
+       "" if docker_ok else "Docker Desktop 未运行（本机 WSL2 已就绪："
+                            "docker-desktop 发行版存在，引擎待手动启动）")
 
 # 编译 windows 版产物用于运行测试
 os.makedirs(WORK, exist_ok=True)
@@ -586,7 +587,7 @@ if n_block:
         if s == "BLOCKED":
             log(f"    - {n}  ({d})")
 log("")
-log(f"  Docker 镜像链路: {'已实测' if docker_ok else 'BLOCKED（等待 WSL2）'}")
+log(f"  Docker 镜像链路: {'已实测' if docker_ok else 'BLOCKED（需手动启动 Docker Desktop）'}")
 log("=" * 74)
 
 with open(os.path.join(LOG_DIR, "_verify_runtime.txt"), "w", encoding="utf-8") as f:
