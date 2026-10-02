@@ -173,9 +173,12 @@ func newFiringOnCheckout(id int64, instance string) alert.StoredAlert {
 
 // candidateOnCheckout 是已归属于某 Incident 的同类告警（评分口径：同服务同窗口同标签）。
 func candidateOnCheckout(incidentID int64, instance string) CandidateAlert {
+	// NewAlertView 收 *alert.StoredAlert（ADR-012）；函数返回值不可直接取址，
+	// 故先落变量再取址。
+	a := newFiringOnCheckout(900, instance)
 	return CandidateAlert{
 		IncidentID: incidentID,
-		View:       NewAlertView(newFiringOnCheckout(900, instance)),
+		View:       NewAlertView(&a),
 	}
 }
 

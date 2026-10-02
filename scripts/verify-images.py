@@ -436,7 +436,12 @@ def main() -> int:
           instance/pod/container/node，所以不能靠 instance 区分，必须用非常规键。
         * A 与 B 的非动态标签集合只差一个键 → 标签维 Jaccard ≈ 0.83，
           叠加时间/服务两维满分，总分稳在 0.66 以上（最差也是 REVIEW，
-          而 REVIEW 仍会链接到候选 Incident），故断言不依赖拓扑文件是否存在。
+          而 REVIEW 仍会链接到候选 Incident），故「有没有被关联」这条断言
+          不依赖拓扑文件是否存在。
+          （ADR-013 后拓扑已挂载：这一对**同服务**告警会经共同邻居 payment
+           额外拿到依赖维 0.5，总分由 0.6667 升到 0.7667 —— 这不是回归。
+           本处只用它判「走没走关联档」，故不因该变化调整断言；
+           依赖维自身的取证见 4.5.10，那里用的是鉴别力更强的直接边。）
 
         run 给每轮一个互不相同的非动态标签值。若两条用完全一样的标签，
         后一条会被前一条的去重逻辑吃掉（实测 skipped:1），
@@ -537,6 +542,75 @@ def main() -> int:
                   "AND correlation_score < 0.80);")
     check("needs_review 与关联分数区间自洽（仅 REVIEW 档打标）", got == "0",
           bad_sql_note(got))
+
+    # 4.5.10 依赖维必须真正参与评分（ADR-013：拓扑改由 compose 挂载，不再缺失）。
+    #
+    # 判据分两层，缺一不可：
+    #   ① 启动日志不再出现「服务拓扑为空」/「加载服务拓扑失败」——证明文件被读到且解析成功；
+    #      只做 ① 会漏掉「文件在、内容却没用上」。
+    #   ② 分数里确实含依赖维——靠一对**跨服务但有直接依赖边**的告警取证。
+    #
+    # 分数口径（V1.0 §5；权重 time .25 / service .25 / label .20 / dependency .20 / historical .10）：
+    #   time       = 0.25   （两条 startsAt 相同、endsAt 均为 NULL → 按 now 兜底，窗口重叠比 1.0）
+    #   service    = 0.15   （不同 service 但同 namespace → 0.6 × 0.25）
+    #   label      = 0.1333 （k=v 对做 Jaccard：只差 service=... 一对，交集 4 / 并集 6 → 0.6667 × 0.20）
+    #   dependency = 0.18   （checkout↔payment 是拓扑里的直接边 → 0.9 × 0.20）  <-- 拓扑缺失时此项为 0
+    #   historical = 0      （run 标签带 RUN_TOKEN，指纹每次全新，无共现历史）
+    #   合计 ≈ 0.7133；**无拓扑时上限 ≈ 0.5333** —— 故 0.70 这条线只有依赖维真参与才过得去。
+    rc, out = docker("logs", "--tail", "200", "iip-server", timeout=60)
+    # 优先做**正向**断言：日志是 slog JSON，结构化属性渲染成 "services":4 这种键值。
+    # （M2 起成功路径不出声，只能靠「没看到 WARN」反推；ADR-013 给 main.go 补了
+    #  成功日志，验收才得以写成正向证据。）
+    loaded = re.search(r'"msg":"服务拓扑已加载".*?"services":(\d+)', out)
+    check("server 日志出现「服务拓扑已加载」且 services>=4",
+          loaded is not None and int(loaded.group(1)) >= 4,
+          ("services=%s" % loaded.group(1)) if loaded
+          else "未见该 INFO → 容器内 config/topology.yaml 未被挂载或为空")
+    check("server 日志不含「服务拓扑为空」", "服务拓扑为空" not in out,
+          "该 WARN 与上一条 INFO 不应同时出现")
+    check("server 日志不含「加载服务拓扑失败」", "加载服务拓扑失败" not in out,
+          "出现该 WARN → 文件在但内容无法解析")
+
+    def post_dep_pair(run: str) -> tuple:
+        """投两条**跨服务、且拓扑里有直接边**的告警（checkout / payment）。
+
+        与上面的 post_alerts 刻意不同：那对是同服务(checkout)，在拓扑存在时
+        只能靠「共同邻居 payment」拿到 0.5；本函数要的是**直接边**那 0.9，
+        鉴别力更强。故两条 service 不同、且不加 shard —— 让标签维恰好只差
+        service 一对，分数可以精确预测（见 4.5.10 的推导）。
+        """
+        base = {"alertname": "LatencyHigh", "namespace": "production",
+                "severity": "critical", "run": run}
+        alerts = [{"status": "firing", "labels": dict(base, service=svc),
+                   "annotations": {"summary": "依赖维取证"},
+                   "startsAt": "2026-10-01T00:00:00Z",
+                   "endsAt": "0001-01-01T00:00:00Z"}
+                  for svc in ("checkout", "payment")]
+        payload = json.dumps({"version": "4", "status": "firing",
+                              "groupKey": "iip-l2-topology-check",
+                              "receiver": "iip-webhook", "alerts": alerts},
+                             ensure_ascii=False).encode("utf-8")
+        return http_request(hook_url, "POST", payload)
+
+    aid2 = max_alert_id()
+    st, body = post_dep_pair("topo-" + RUN_TOKEN)
+    check("POST 2 条跨服务告警(checkout/payment) -> 200", st == 200,
+          "status=%s body=%s" % (st, body[:160]))
+
+    # 只取 payment 那一条的关联分数：它的最优匹配就是同批的 checkout 告警。
+    # 用 run 标签精确定位（带 RUN_TOKEN，跨进程唯一），避免被其它轮次的行干扰。
+    got = sql_val("SELECT coalesce(round(max(ia.correlation_score)::numeric,4)::text,'-') "
+                  "FROM incident_alerts ia JOIN alerts a ON a.id = ia.alert_id "
+                  "WHERE a.labels->>'run' = 'topo-%s' AND a.labels->>'service' = 'payment';"
+                  % RUN_TOKEN)
+    try:
+        dep_score = float(got)
+    except ValueError:
+        dep_score = -1.0
+    check("依赖维参与评分：跨服务直接边得分落在 [0.70, 0.73)", 0.70 <= dep_score < 0.73,
+          "实际 %s（期望 ≈0.7133；拓扑缺失时上限 ≈0.5333）%s"
+          % (got, bad_sql_note(got)))
+    w()
 
     got = sql_val("SELECT coalesce(round(max(correlation_score)::numeric,4)::text,'-') "
                   "FROM incident_alerts;")

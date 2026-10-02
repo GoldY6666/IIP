@@ -70,7 +70,10 @@ func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAler
 	hist := func(fpA, fpB string) float64 { return s.coOccurrence(ctx, memo, fpA, fpB) }
 	scorer := NewScorer(cfg, s.topo, hist, ref)
 
-	for _, a := range alerts {
+	// 按索引遍历并取址：StoredAlert 184 字节，`for _, a := range` 每轮复制一份
+	// （gocritic rangeValCopy）；取址后直接喂给 NewAlertView，省掉第二份复制。
+	for i := range alerts {
+		a := &alerts[i]
 		if a.Status != alert.StatusFiring {
 			continue
 		}

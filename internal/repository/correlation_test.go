@@ -121,8 +121,9 @@ func TestCorrelationConfigPutIsUpsertSingleRow(t *testing.T) {
 	// 第二次写入：必须是 UPDATE 而非新增行。
 	second := correlation.DefaultConfig()
 	second.Enabled = false
-	if err := store.PutConfig(ctx, second); err != nil {
-		t.Fatalf("二次写入失败: %v", err)
+	// 内层变量改名避免遮蔽上方 GetConfig 的 err（govet shadow）。
+	if errPut := store.PutConfig(ctx, second); errPut != nil {
+		t.Fatalf("二次写入失败: %v", errPut)
 	}
 	if n := countRows(t, pool, `SELECT count(*) FROM correlation_rules WHERE name = 'default'`); n != 1 {
 		t.Fatalf("二次写入不应新增行，实得 %d 行", n)
@@ -309,8 +310,10 @@ func TestListOpenIncidentAlertsProjectsFields(t *testing.T) {
 		`{"alertname":"LatencyHigh","service":"payment","namespace":"prod"}`, corrBase, &endsAt)
 
 	for _, id := range []int64{firingID, resolvedID} {
-		if err := store.LinkAlertToIncident(ctx, inc.ID, id, nil, false); err != nil {
-			t.Fatalf("关联告警 %d 失败: %v", id, err)
+		// 内层变量改名避免遮蔽外层的 err（govet shadow）：遮蔽虽不影响本用例
+		// 结果，但会让后续新增断言时误用外层 err，属真实的隐患。
+		if errLink := store.LinkAlertToIncident(ctx, inc.ID, id, nil, false); errLink != nil {
+			t.Fatalf("关联告警 %d 失败: %v", id, errLink)
 		}
 	}
 

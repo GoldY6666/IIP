@@ -153,7 +153,11 @@ type AlertView struct {
 }
 
 // NewAlertView 从落库告警投影出评分视图。
-func NewAlertView(a alert.StoredAlert) AlertView {
+//
+// 收指针而非值：alert.StoredAlert 实测 184 字节，按值传入触发 gocritic hugeParam
+// （ADR-012）。调用点都是「先取址再传入」，不产生额外生命周期负担，
+// 也不改变本函数「只读投影、不保留入参」的语义。
+func NewAlertView(a *alert.StoredAlert) AlertView {
 	labels := parseLabels(a.Labels)
 	return AlertView{
 		ID:          a.ID,

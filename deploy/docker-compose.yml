@@ -146,7 +146,18 @@ services:
     container_name: iip-server
     profiles: ["app"]
     restart: unless-stopped
-    environment: *app-env
+    # 用 YAML 合并键在共享锚点之上**追加**拓扑路径（ADR-013）：
+    # IIP_TOPOLOGY_FILE 只对 server 有意义（拓扑在 newRouter 里加载），
+    # 故不写进 *app-env，避免给 worker 安一个它根本不读的变量。
+    environment:
+      <<: *app-env
+      IIP_TOPOLOGY_FILE: /config/topology.yaml
+    volumes:
+      # 拓扑是环境相关文件——config/topology.yaml 自述为「示例，请按真实环境替换」，
+      # 因此走挂载而非烧进镜像，与 prometheus / alertmanager / loki 的配置供给方式一致。
+      # 容器运行层没有 WORKDIR，默认工作目录为 /，故默认相对路径
+      # config/topology.yaml 即 /config/topology.yaml，与本变量取值一致。
+      - ../config:/config:ro
     ports:
       # 宿主机 8080 -> 容器 8080（与本地裸跑保持一致）
       - "8080:8080"

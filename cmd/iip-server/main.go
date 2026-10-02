@@ -213,15 +213,26 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	r.Get("/healthz", handleHealthz(pool))
 
 	// 关联引擎（M2）：拓扑 + 配置仓储 + 服务。此处只装配，评分/决策在 internal/correlation。
+	//
+	// 三分支改用 switch-true 而非 if/else-if/else 链（gocritic ifElseChain）。
+	// case 按序求值，故 err != nil 命中时不会再去调 topo.Size()（拓扑可能为 nil）。
 	topo, err := correlation.LoadTopology(cfg.TopologyFile)
-	if err != nil {
+	switch {
+	case err != nil:
 		// 拓扑解析失败不应让服务起不来：记 WARN 并以空拓扑运行（依赖维恒 0）。
 		logger.Warn("加载服务拓扑失败，依赖相似度将恒为 0",
 			slog.String("error", err.Error()),
 			slog.String("topology_file", cfg.TopologyFile))
 		topo = &correlation.Topology{}
-	} else if topo.Size() == 0 {
+	case topo.Size() == 0:
 		logger.Warn("服务拓扑为空，依赖相似度将恒为 0",
+			slog.String("topology_file", cfg.TopologyFile))
+	default:
+		// 成功路径也给一条正向日志（M2 起只有失败才出声）：
+		// 否则「拓扑到底加载上没有」只能靠「没看到 WARN」反推，
+		// 验收断言也就只能写成反证。有这条 INFO，容器链路可以正向断言 services>0。
+		logger.Info("服务拓扑已加载",
+			slog.Int("services", topo.Size()),
 			slog.String("topology_file", cfg.TopologyFile))
 	}
 

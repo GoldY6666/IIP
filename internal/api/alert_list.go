@@ -74,14 +74,17 @@ func parseListParams(r *http.Request, logger *slog.Logger) (limit, offset int32)
 	limit = defaultListLimit
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil {
+		// 用 switch-true 而非 if/else-if 链：分支已达 4 条，链式写法难读
+		// （gocritic ifElseChain）；语义与原先逐字等价。
+		switch {
+		case err != nil:
 			logger.Warn("告警列表 limit 参数非法，使用默认值",
 				slog.String("value", v))
-		} else if n < 1 {
+		case n < 1:
 			limit = 1
-		} else if n > maxListLimit {
+		case n > maxListLimit:
 			limit = maxListLimit
-		} else {
+		default:
 			limit = int32(n)
 		}
 	}

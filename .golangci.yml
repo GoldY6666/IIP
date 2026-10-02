@@ -56,6 +56,14 @@ linters-settings:
     disabled-checks:
       # 允许 package comment 与文件头注释合并写法（避免与 gofumpt 冲突）
       - commentFormatting
+    settings:
+      # hugeParam 默认阈值 80 字节；本项目显式上调到 128，理由见 ADR-012：
+      # AlertView（112 B）是关联引擎刻意设计的**值语义**对象——纯函数、不可变、
+      # 无别名风险，按值传递是 Go 的常规写法；而真正偏重的 StoredAlert（184 B）
+      # 仍高于本阈值、必须改指针（否则本项配置等于把检查关掉）。
+      # 注意：这是"阈值收敛"而非"排除规则"——不 exclude 任何文件，不写 nolint。
+      hugeParam:
+        sizeThreshold: 128
   goimports:
     local-prefixes: github.com/yu/iip
 

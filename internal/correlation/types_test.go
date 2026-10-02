@@ -173,7 +173,7 @@ func TestNewAlertView(t *testing.T) {
 				EndsAt:      &ends,
 			},
 		}
-		got := NewAlertView(in)
+		got := NewAlertView(&in)
 
 		if got.ID != 42 || got.Fingerprint != "fp-1" {
 			t.Errorf("ID/指纹投影错误: %+v", got)
@@ -187,7 +187,7 @@ func TestNewAlertView(t *testing.T) {
 	})
 
 	t.Run("labels缺失不panic", func(t *testing.T) {
-		got := NewAlertView(alert.StoredAlert{ID: 1})
+		got := NewAlertView(&alert.StoredAlert{ID: 1})
 		if got.Service != "" || got.Namespace != "" {
 			t.Errorf("无 labels 时 service/namespace 应为空，实得 %+v", got)
 		}
