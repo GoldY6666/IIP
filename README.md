@@ -302,7 +302,7 @@ M0 的完成定义（DoD）见 `docs/IIP-M0详细开发计划.md` §3。当前�
 > 本表由运维在环境就绪后逐条执行并更新；**任何一项不通过如实标注，不修饰为通过**（AGENTS.md 约束 5）。
 > 实测原始输出留存于 `D:\_iip_setup\_rt_all.txt` / `_rt_downup.txt` / `_srv*.log` / `_wrk.log` / `pg.log`。
 > v1 端到端证据留存于 `D:\_iip_setup\_v1_e2e_report.txt` / `_v1_binary_check.txt` / `_v1_quality_gate.txt`。
-> 容器链路证据留存于 `D:\_iip_setup\_verify_images.txt`（2026-10-01 M2 补验：清空卷后的全绿报告）/ `_prepull.txt`；M1 期同名证据已归档为 `_verify_images_m1_20260925.txt`，未被覆盖。M3 前置清理（L1 lint / L2 容器拓扑）的**六道门禁汇总**见 `D:\_iip_setup\_l1l2_regression_report.txt`，补验后的容器链路报告见 `_verify_images_l2.txt`（32 项）。
+> 容器链路证据留存于 `D:\_iip_setup\_verify_images.txt`（2026-10-01 M2 补验：清空卷后的全绿报告）/ `_prepull.txt`；M1 期同名证据已归档为 `_verify_images_m1_20260925.txt`，未被覆盖。M3 前置清理（L1 lint / L2 容器拓扑）的**六道门禁汇总**见 `D:\_iip_setup\_l1l2_regression_report.txt`，补验后的容器链路报告见 `_verify_images_l2.txt`（32 项）。2026-10-02 再跑为 **34 项**（新增 4.5.0「干净起点」2 条），且是在**未清空 named volume** 的脏数据环境下全绿，属修复后的复现证据。
 > 详细证据见 `docs/M0-总验收报告.md` §二 与 `docs/v1-测试报告.md`。
 
 ---
@@ -358,11 +358,11 @@ M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（
 | `go build ./...` / `go vet ./...` / `go test ./...` / `gofmt` 全绿 | **PASS** | 四项 rc=0；另在**真库模式**下重跑 `go test ./...` 全绿（8 个包，0 跳过） |
 | `go.mod` 无新增依赖 | **PASS** | require 仍为 chi / golang-migrate / pgx / koanf / pflag + `gopkg.in/yaml.v3`。YAML 库**并非新增**：它本就是 koanf 的间接依赖且已在 `go.mod` 中，M2 用到拓扑解析后升级为**直接**依赖，`go.sum` 未新增任何模块（OPEN-M2-1 由此关闭） |
 | 镜像内内容物（交叉编译 + ELF 静态链接 + 0003 已嵌入） | **PASS** | `scripts/check-binaries.py` 全项通过：iip-server 11.33 MB / iip-worker 8.77 MB，均 `PT_INTERP` 缺失 + 无 libc/libpthread/libdl 引用 = 真静态；版本串 `0.0-m2` 注入生效；server 含 0003 迁移与 `idx_incident_alerts_needs_review`，worker 按预期被死代码消除剥离 |
-| 容器链路实测（`docker build` → `compose up` → 健康收敛） | **PASS** | 2026-10-01 补验（Docker 29.8.0 / linux/overlay2）：**清空 named volume** 后全绿，**27 项断言 0 失败**。覆盖迁移到版本 3 且非 dirty、8 张表、`needs_review` 列与部分索引、`correlation_rules` 种子权重逐位等于 V1.0 §5、GET 配置与种子一致、PUT 非法权重 422 / 未知字段 400，以及**容器内**的关键行为：阈值抬到 0.99 → 本轮 2 条告警均判 NEW（关联边 2 条、带分数 0 条、各自建事件）；阈值还原 → 本轮 2 条告警均被关联进**同一个** Incident（关联边 2 条、带分数 2 条、涉及事件仅 1 个）。全程**未重启任何容器**，即「配置热生效」的容器级证据。**补 L2 后重跑为 32 项断言 0 失败**（27 基线 + 5 项拓扑/依赖维新增，见上表「容器内 `config/topology.yaml` 与依赖维」行） |
-| 验收脚本可重复执行（named volume 保留数据后重跑） | **PASS** | 紧接上一行再跑一遍仍全绿（27/27；补 L2 后为 32/32）：事件 2→4、关联边 4→8。去重按**指纹**判定且**无时间窗**（V1.0 §4.2），脚本若不做跨**进程调用**的唯一化，第二轮就会被上一轮遗留的 firing 行按指纹整批吃掉（实测 `skipped:2`、落库 0 行），断言随即假失败——故此行为「脚本可重复执行」的回归证据 |
+| 容器链路实测（`docker build` → `compose up` → 健康收敛） | **PASS** | 2026-10-01 补验（Docker 29.8.0 / linux/overlay2）：**清空 named volume** 后全绿，**27 项断言 0 失败**。覆盖迁移到版本 3 且非 dirty、8 张表、`needs_review` 列与部分索引、`correlation_rules` 种子权重逐位等于 V1.0 §5、GET 配置与种子一致、PUT 非法权重 422 / 未知字段 400，以及**容器内**的关键行为：阈值抬到 0.99 → 本轮 2 条告警均判 NEW（关联边 2 条、带分数 0 条、各自建事件）；阈值还原 → 本轮 2 条告警均被关联进**同一个** Incident（关联边 2 条、带分数 2 条、涉及事件仅 1 个）。全程**未重启任何容器**，即「配置热生效」的容器级证据。**补 L2 后重跑为 32 项断言 0 失败**（27 基线 + 5 项拓扑/依赖维新增，见上表「容器内 `config/topology.yaml` 与依赖维」行）；**2026-10-02 补 4.5.0「干净起点」后为 34 项 0 失败**（再加 2 项 TRUNCATE 校验），且该次是在**未清空 named volume** 的脏数据环境下跑的 |
+| 验收脚本可重复执行（named volume 保留数据后重跑） | **PASS**（2026-10-02 修正：原结论记为「成立」，实为**当时未暴露**） | L2 追加依赖维断言后这条**不再成立**：2026-10-02 在**未清空** named volume 的情况下重跑，4.5.10 由 0.7133 抬到 **0.7667 → 假 FAIL**（容器里 `alert_id` 从 13 起、`incidents` 总数 6，是上轮残留）。根因为历史告警喂高了 historical 维：差额 `0.7667 − 0.7133 = 0.0534 = 0.534 × 0.10`，而该维权重恰为 0.10，钩稽得上。**未放宽断言区间**，改为在脚本中补 **4.5.0「干净起点」**：迁移后、投递前 `TRUNCATE incident_alerts, alerts, incidents, correlation_feedback CASCADE`（保留 `schema_migrations` 与 `correlation_rules` 的 default 种子行；`CASCADE` 不可省，因 `incident_alerts` 对 `alerts`/`incidents` 有外键）。修复后在**同一份脏数据**上复跑：truncate 生效、三表计数归零、得分精确回到 **0.7133**、**34/34** 全绿。另：去重按**指纹**判定且**无时间窗**（V1.0 §4.2），若不做跨**进程调用**的唯一化，第二轮会被上一轮遗留的 firing 行整批吃掉（实测 `skipped:2`、落库 0 行），故注入 `RUN_TOKEN` |
 | `golangci-lint run` | **PASS**（2026-10-01 修复至 rc=0；原为 FAIL） | M2 终点累计 **17 项**（gocritic hugeParam 13 / rangeValCopy 1 / ifElseChain 1 + govet shadow 2），用与 CI 同版本 v1.61.0 + 同配置复现。**已于 2026-10-01 逐项修复至 rc=0**：无排除规则新增、无 `nolint`，唯一配置改动是 gocritic `hugeParam` 阈值 80 → 128 B。方案见 ADR-012；证据 `D:\_iip_setup\_lint_m3_final.txt`（`LINT_RC=0`）、`_l1_gate.txt` |
 | 容器内 `go test -race ./...` | **PASS** | 本机 Windows 无 gcc 跑不了；在 `golang:1.23-alpine` 容器内 `apk add gcc musl-dev` → `CGO_ENABLED=1`，8 个有测试的包全 ok、`RACE_RC=0`。装模块走「挂载宿主 modcache + `GOPROXY=off`」，全程零网络。2026-10-01 的 L1/L2 改动后重跑仍 PASS |
-| 容器内 `config/topology.yaml` 与依赖维 | **PASS**（2026-10-01 修复；原为「容器内缺失、依赖维恒 0」） | 原 `Dockerfile` 只 `COPY cmd/ internal/ migrations/`，`config/` **从未进过镜像**，而缺文件时 `LoadTopology` **不报错** → 容器内依赖维恒 0 却断言仍全绿（**静默降级**）。现改为 compose 挂载 `../config:/config:ro` + `IIP_TOPOLOGY_FILE`（ADR-013），并新增**可判定**正向断言：日志「服务拓扑已加载」且 `services` ≥4、跨服务直连边分数落在 [0.70, 0.73)（无拓扑时上限仅 0.5333）。容器链路 **32 项断言 0 失败**（27 基线 + 5 新增） |
+| 容器内 `config/topology.yaml` 与依赖维 | **PASS**（2026-10-01 修复；原为「容器内缺失、依赖维恒 0」） | 原 `Dockerfile` 只 `COPY cmd/ internal/ migrations/`，`config/` **从未进过镜像**，而缺文件时 `LoadTopology` **不报错** → 容器内依赖维恒 0 却断言仍全绿（**静默降级**）。现改为 compose 挂载 `../config:/config:ro` + `IIP_TOPOLOGY_FILE`（ADR-013），并新增**可判定**正向断言：日志「服务拓扑已加载」且 `services` ≥4、跨服务直连边分数落在 [0.70, 0.73)（无拓扑时上限仅 0.5333）。容器链路 **34 项断言 0 失败**（27 基线 + 5 项拓扑/依赖维 + 2 项干净起点）。**注意**：依赖维这条断言依赖「无历史共现」的前提，跑第二次前必须走 4.5.0 干净起点，否则 historical 维会被 named volume 里的上轮数据喂高（2026-10-02 实测 0.7133 → 0.7667） |
 | README 新增「M2 验收状态」表；`docs/decisions.md` 记录 M2 决策 | **PASS** | 本表 + ADR-008 / ADR-009 / ADR-010（另 M3 前置清理记 ADR-012 / ADR-013） |
 
 **本轮实测发现并修复的缺陷**（详见 `docs/decisions.md` ADR-008）：
@@ -390,6 +390,12 @@ M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（
 > 去重按指纹且**无时间窗**，而 compose 用 named volume 保留数据，于是脚本第二次执行时
 > 两轮告警被上一轮遗留的 firing 行整批吃掉（实测 `skipped:2`、落库 0 行）。
 > 已改为注入 `RUN_TOKEN`（本次运行的时间戳），并**连跑两次**作为回归证据。
+> ④ **缺「干净起点」，第二次执行必假 FAIL**（2026-10-02 实测）：`compose down` 不加 `-v`，
+> named volume 里留着上轮的 alerts/incidents → 历史共现喂高 historical 维 →
+> 4.5.10 依赖维得分由 0.7133 抬到 0.7667 而越出 [0.70, 0.73)。
+> 识别方法：看容器里 `alert_id` 是否从 1 起。**修法是加 TRUNCATE，不是放宽区间**——
+> 已补 4.5.0 干净起点（详见上表「验收脚本可重复执行」行）。
+> 这条之所以在 M2 期没暴露：当时该断言还不存在，是补 L2 时才引入的。
 
 > 复现方式：真库验收用 `python D:\_iip_setup\m2_pg_gate.py`（单次调用内起库 → 跑真库用例 → 回收，
 > 报告落在 `D:\_iip_setup\_m2_pg_gate_report.txt`）。

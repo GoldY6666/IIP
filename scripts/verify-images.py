@@ -368,6 +368,28 @@ def main() -> int:
         v = sql_val("SELECT count(*) FROM %s;" % table)
         return int(v) if v.isdigit() else -1
 
+    # 4.5.0 干净起点：抹掉 named volume 里历次验收留下的行。
+    #
+    # compose 走 named volume 且 down 不加 -v（M2 有意保数据便于排查），
+    # 于是**第二次**执行本脚本时，上一轮的告警/事件仍在库里：
+    #   * 4.5.10 依赖维口径要求「historical = 0（无共现历史）」，脏历史会把该维从 0
+    #     喂到 ≈0.53，使跨服务直接边由 0.7133 抬到 0.7667 → 断言假 FAIL。
+    #     2026-10-02 实测：残留 12 条告警时得 0.7667，清空后精确回到 0.7133。
+    #   * 4.5.7 / 4.5.8 这类「本轮新增 N 条」的计数断言同样会被历史行带偏。
+    # 只清本脚本会写的四张业务表；schema_migrations 与 correlation_rules 保留
+    #（4.5.3 依赖其中的 default 种子行）。
+    # CASCADE 不可省：incident_alerts 对 alerts / incidents 有外键。
+    _rc, _out = docker("exec", PG_C, "psql", "-U", "postgres", "-d", "iip",
+                       "-t", "-A", "-c",
+                       "TRUNCATE TABLE incident_alerts, alerts, incidents, "
+                       "correlation_feedback CASCADE;", timeout=60)
+    check("干净起点：已清空历次验收残留行", _rc == 0,
+          "实际 rc=%d %s" % (_rc, _out[:200]))
+    _a, _i, _ia = db_count("alerts"), db_count("incidents"), db_count("incident_alerts")
+    check("干净起点：alerts/incidents/incident_alerts 计数均为 0",
+          _a == 0 and _i == 0 and _ia == 0,
+          "alerts=%d incidents=%d incident_alerts=%d" % (_a, _i, _ia))
+
     # 4.5.1 needs_review 列：必须 NOT NULL + 默认 false（REVIEW 档落库的前提）
     got = sql_val("SELECT is_nullable||'|'||coalesce(column_default,'(无)') "
                   "FROM information_schema.columns WHERE table_schema='public' "
