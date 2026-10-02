@@ -34,7 +34,12 @@ const EnvPGURL = "IIP_TEST_PG_URL"
 const adminDatabase = "postgres"
 
 // adminTimeout 是建库/删库这类管理操作的超时。
-const adminTimeout = 30 * time.Second
+//
+// 取 120s 而非 30s：一个用例的生命周期里要 CREATE DATABASE 再跑完全部迁移，
+// 本机在**连续**创建多个一次性库时（go test 串行跑十几条真库用例），
+// CREATE DATABASE 实测可达数十秒——那不是用例失败，而是环境慢。
+// 超时给窄了会把「机器慢」伪装成「断言失败」，白白浪费一次排查。
+const adminTimeout = 120 * time.Second
 
 // PGURL 返回集成测试用连接串；未配置时返回空串。
 func PGURL() string {

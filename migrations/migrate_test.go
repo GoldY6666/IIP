@@ -24,11 +24,11 @@ import (
 	"github.com/yu/iip/migrations"
 )
 
-// latestVersion 是当前迁移文件到达的版本号（0003）。
+// latestVersion 是当前迁移文件到达的版本号（0004）。
 //
 // 新增迁移时必须同步修改此常量——它让「忘记把新迁移纳入 embed/schema」这类
 // 沉默失败变成一条明确的测试失败。
-const latestVersion = 3
+const latestVersion = 4
 
 // dedupeIndex 是 0002 建立的部分唯一索引名。
 const dedupeIndex = "uq_alerts_fingerprint_firing"
@@ -36,10 +36,29 @@ const dedupeIndex = "uq_alerts_fingerprint_firing"
 // needsReviewIndex 是 0003 建立的部分索引名（只索引 needs_review 为真的关联边）。
 const needsReviewIndex = "idx_incident_alerts_needs_review"
 
+// timelineIncidentTSIndex / reviewSuppressionsIndex 是 0004 建立的两个索引名。
+const (
+	timelineIncidentTSIndex = "idx_timeline_incident_ts"
+	reviewSuppressionsIndex = "idx_review_suppressions_fingerprint"
+	reviewSuppressionsTable = "review_suppressions"
+)
+
+// newTimelineEventTypes 是 0004 为 timeline.event_type 新增的 7 个取值（手册 §4.2）。
+//
+// 刻意用切片而非 map：断言要按固定顺序逐个插入并报错，map 的随机迭代顺序
+// 会让失败信息时左时右。
+var newTimelineEventTypes = []string{
+	"alert_linked", "acknowledged", "investigation_started",
+	"mitigated", "resolved", "ignored", "reopened",
+}
+
 // expectedIndexes 列出「up 之后必须存在、down-all 之后必须消失」的索引。
 //
 // 逐个断言而非只查总数：索引被漏建或漏删时，错误信息能直接点出是哪一个。
-var expectedIndexes = []string{dedupeIndex, needsReviewIndex}
+var expectedIndexes = []string{
+	dedupeIndex, needsReviewIndex,
+	timelineIncidentTSIndex, reviewSuppressionsIndex, // 0004
+}
 
 // TestMigrateUpDownUp 是 M1 手册 §五 的验收：迁移可重复执行、可完整回滚。
 //
@@ -91,11 +110,15 @@ func TestCorrelationM2Migration(t *testing.T) {
 	assertDefaultCorrelationRule(t, dsn, true)
 
 	// 2) 只回滚 0003：0001/0002 保持不动，correlation_rules 表仍在。
-	if err := m.Steps(-1); err != nil {
-		t.Fatalf("回滚 0003 失败: %v", err)
+	//
+	// 用 Steps(-2) 而不是 Steps(-1)：0004 落地后「回退一步」落到的已是 0004 自己，
+	// 那样测的是 0004 的 down 而非 0003 的。写成 latestVersion-2 的相对形式，
+	// 后续再新增迁移也不会把本用例的语义带偏。
+	if err := m.Steps(-2); err != nil {
+		t.Fatalf("回滚 0004+0003 失败: %v", err)
 	}
-	if v, dirty := currentVersion(t, m); v != 2 || dirty {
-		t.Fatalf("回滚一步后版本应为 2 且非 dirty，实际 version=%d dirty=%v", v, dirty)
+	if v, dirty := currentVersion(t, m); v != latestVersion-2 || dirty {
+		t.Fatalf("回滚两步后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion-2, v, dirty)
 	}
 	assertNeedsReviewColumn(t, dsn, false)
 	assertDefaultCorrelationRule(t, dsn, false)
@@ -109,6 +132,112 @@ func TestCorrelationM2Migration(t *testing.T) {
 	}
 	assertNeedsReviewColumn(t, dsn, true)
 	assertDefaultCorrelationRule(t, dsn, true)
+}
+
+// TestIncidentLifecycleM3Migration 覆盖 0004 的三项改动在**数据库层**确实生效且可单步回滚：
+// incidents.status 放宽到 6 值、timeline.event_type 放宽到 12 值、review_suppressions 建表。
+//
+// 与 TestCorrelationM2Migration 同理，刻意用 Steps(-1) **只回滚 0004**：
+// 全量回滚会把两个 CHECK 所在的表一并删掉，届时「插入被拒」是必然的，
+// 根本测不出 0004 的 down 是否真的把约束还原了。隔离到单步才有判别力。
+//
+// 反向断言同样重要：只测「acknowledged 能插进去」会被「有人把 CHECK 整个删掉」
+// 蒙混过关，故每处放宽都配一条非法值必须仍被拒的用例（SQLSTATE 23514）。
+func TestIncidentLifecycleM3Migration(t *testing.T) {
+	dsn := testsupport.NewEmptyDB(t)
+	m := newMigrator(t, dsn)
+	defer closeMigrator(t, m)
+
+	// 1) 全量 up
+	mustUp(t, m)
+	assertTableExists(t, dsn, reviewSuppressionsTable, true)
+
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		// ① status='acknowledged' 可插入 —— 0001 限定的 5 值里没有它（偏差 A1）。
+		incidentID := insertIncident(t, ctx, pool, "acknowledged")
+
+		// ② 7 个新 event_type 均可插入（偏差 A2）。
+		for _, eventType := range newTimelineEventTypes {
+			if _, err := pool.Exec(ctx,
+				`INSERT INTO timeline (incident_id, event_type, description, actor)
+				 VALUES ($1, $2, $3, 'tester')`, incidentID, eventType, "m3 "+eventType); err != nil {
+				t.Errorf("插入 event_type=%q 应成功，实际失败: %v", eventType, err)
+			}
+		}
+
+		// ③ 非法值仍必须被拒 —— 证明是「放宽」而不是「删掉约束」。
+		assertRejected(t, ctx, pool, "23514",
+			`INSERT INTO incidents (title, severity, status) VALUES ('bad-status', 'warning', 'triage')`)
+		assertRejected(t, ctx, pool, "23514",
+			`INSERT INTO timeline (incident_id, event_type, description) VALUES ($1, 'foo', 'bad')`, incidentID)
+
+		// ④ review_suppressions 唯一约束 (fingerprint, incident_id) 生效。
+		const insertSuppression = `INSERT INTO review_suppressions (fingerprint, incident_id, actor)
+			VALUES ($1, $2, 'tester')`
+		if _, err := pool.Exec(ctx, insertSuppression, "fp-m3-suppress", incidentID); err != nil {
+			t.Fatalf("插入抑制行应成功，实际失败: %v", err)
+		}
+		assertRejected(t, ctx, pool, "23505", insertSuppression, "fp-m3-suppress", incidentID)
+	})
+
+	// 2) 只回滚 0004：0001/0002/0003 保持不动。
+	//
+	// 写成 latestVersion-1：将来再新增迁移时，这里会立刻转红提醒「本用例测的
+	// 已不是 0004」，而不是静默改测别的迁移。
+	if err := m.Steps(-1); err != nil {
+		t.Fatalf("回滚 0004 失败: %v", err)
+	}
+	if v, dirty := currentVersion(t, m); v != latestVersion-1 || dirty {
+		t.Fatalf("回滚一步后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion-1, v, dirty)
+	}
+	assertTableExists(t, dsn, reviewSuppressionsTable, false)
+	assertIndexExists(t, dsn, timelineIncidentTSIndex, false)
+	assertIndexExists(t, dsn, reviewSuppressionsIndex, false)
+	assertIndexExists(t, dsn, needsReviewIndex, true) // 0003 未被回滚，其索引必须还在
+
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		// ⑤ down 的破坏性 ① 真实发生：7 个新类型的 timeline 行已被删除。
+		//    不删这些行的话，下面的 CHECK 还原会因违反约束而失败（SQLSTATE 23514），
+		//    所以这条断言同时是「down 能跑完」的前置条件证明。
+		var remain int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM timeline`).Scan(&remain); err != nil {
+			t.Fatalf("统计 timeline 行数失败: %v", err)
+		}
+		if remain != 0 {
+			t.Errorf("回滚 0004 后新增类型的 timeline 行应已被删除，实际残留 %d 行", remain)
+		}
+
+		// 破坏性 ②：acknowledged 事件被回写为 open，故库里不应再有 acknowledged。
+		var acked int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM incidents WHERE status = 'acknowledged'`).Scan(&acked); err != nil {
+			t.Fatalf("统计 acknowledged 事件数失败: %v", err)
+		}
+		if acked != 0 {
+			t.Errorf("回滚 0004 后不应仍有 status='acknowledged' 的行，实际 %d 行", acked)
+		}
+
+		// 两个 CHECK 均已还原：新增取值重新被拒。
+		assertRejected(t, ctx, pool, "23514",
+			`INSERT INTO incidents (title, severity, status) VALUES ('rolled-back', 'warning', 'acknowledged')`)
+		incidentID := insertIncident(t, ctx, pool, "open")
+		for _, eventType := range newTimelineEventTypes {
+			assertRejected(t, ctx, pool, "23514",
+				`INSERT INTO timeline (incident_id, event_type, description) VALUES ($1, $2, 'rolled back')`,
+				incidentID, eventType)
+		}
+	})
+
+	// 3) 重新 up 到最新：验证 0004 可重复执行（幂等）。
+	mustUp(t, m)
+	if v, dirty := currentVersion(t, m); v != latestVersion || dirty {
+		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion, v, dirty)
+	}
+	assertTableExists(t, dsn, reviewSuppressionsTable, true)
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		// 二次 up 后 acknowledged 重新可用（三连可重复的最终证明）。
+		insertIncident(t, ctx, pool, "acknowledged")
+	})
 }
 
 // TestFingerprintFiringUniqueness 验证 0002 的部分唯一索引在**数据库层**真的拦得住
@@ -254,6 +383,64 @@ func assertIndexesExist(t *testing.T, dsn string, want bool) {
 	t.Helper()
 	for _, indexName := range expectedIndexes {
 		assertIndexExists(t, dsn, indexName, want)
+	}
+}
+
+// assertTableExists 断言单张表存在（want=true）或不存在（want=false）。
+//
+// 只认 public schema：information_schema.tables 会带上系统表，
+// 不限定 schema 会让「表被删掉」这类断言被同名系统表蒙混过关。
+func assertTableExists(t *testing.T, dsn, tableName string, want bool) {
+	t.Helper()
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		var exists bool
+		err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = $1
+)`, tableName).Scan(&exists)
+		if err != nil {
+			t.Fatalf("查询表 %s 存在性失败: %v", tableName, err)
+		}
+		if want && !exists {
+			t.Errorf("期望表 %s 存在，实际未找到", tableName)
+		}
+		if !want && exists {
+			t.Errorf("期望表 %s 已被回滚删除，实际仍然存在", tableName)
+		}
+	})
+}
+
+// insertIncident 插入一条指定状态的事件并返回其 id，供 timeline 断言做外键用。
+func insertIncident(t *testing.T, ctx context.Context, pool *pgxpool.Pool, status string) int64 {
+	t.Helper()
+	var id int64
+	err := pool.QueryRow(ctx,
+		`INSERT INTO incidents (title, severity, status, service)
+		 VALUES ($1, 'warning', $2, 'checkout') RETURNING id`,
+		"m3-lifecycle-"+status, status).Scan(&id)
+	if err != nil {
+		t.Fatalf("插入 status=%q 的事件应成功，实际失败: %v", status, err)
+	}
+	return id
+}
+
+// assertRejected 断言一条 SQL 被数据库拒绝，且 SQLSTATE 恰为期望值。
+//
+// 必须比对 SQLSTATE 而不只是「有错」：CHECK 违反是 23514、唯一冲突是 23505，
+// 只看「报错」会把「语法写错」和「约束生效」混为一谈，测试就失去判别力。
+func assertRejected(t *testing.T, ctx context.Context, pool *pgxpool.Pool, sqlState, stmt string, args ...any) {
+	t.Helper()
+	_, err := pool.Exec(ctx, stmt, args...)
+	if err == nil {
+		t.Fatalf("期望该 SQL 被拒绝（SQLSTATE %s），实际执行成功: %s", sqlState, stmt)
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("期望 *pgconn.PgError，实际: %v", err)
+	}
+	if pgErr.Code != sqlState {
+		t.Fatalf("期望 SQLSTATE %s，实际 %s（%v）", sqlState, pgErr.Code, err)
 	}
 }
 

@@ -55,6 +55,34 @@ func (q *Queries) CreateIncident(ctx context.Context, arg CreateIncidentParams) 
 	return i, err
 }
 
+const getIncidentByID = `-- name: GetIncidentByID :one
+SELECT id, title, severity, status, service, started_at, resolved_at,
+       root_causes, recommendations, created_at, updated_at
+FROM incidents
+WHERE id = $1
+`
+
+// 详情本体。M3 的状态流转需要「先读到当前 status 再决定能否转」，
+// 故按主键直取单行；不存在时 sqlc 返回 pgx.ErrNoRows，由调用方映射为 404。
+func (q *Queries) GetIncidentByID(ctx context.Context, id int64) (Incident, error) {
+	row := q.db.QueryRow(ctx, getIncidentByID, id)
+	var i Incident
+	err := row.Scan(
+		&i.ID,
+		&i.Title,
+		&i.Severity,
+		&i.Status,
+		&i.Service,
+		&i.StartedAt,
+		&i.ResolvedAt,
+		&i.RootCauses,
+		&i.Recommendations,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const linkAlertToIncident = `-- name: LinkAlertToIncident :exec
 INSERT INTO incident_alerts (incident_id, alert_id, correlation_score, needs_review)
 VALUES ($1, $2, $4, $3)
@@ -158,4 +186,52 @@ type SetAlertIncidentParams struct {
 func (q *Queries) SetAlertIncident(ctx context.Context, arg SetAlertIncidentParams) error {
 	_, err := q.db.Exec(ctx, setAlertIncident, arg.ID, arg.IncidentID)
 	return err
+}
+
+const updateIncidentStatus = `-- name: UpdateIncidentStatus :execrows
+UPDATE incidents
+SET status      = $1,
+    resolved_at = CASE
+        WHEN $2::boolean   THEN NULL::timestamptz
+        WHEN $3::boolean THEN NOW()
+        ELSE resolved_at
+    END,
+    updated_at  = NOW()
+WHERE id     = $4
+  AND status = $5
+`
+
+type UpdateIncidentStatusParams struct {
+	ToStatus       string `json:"to_status"`
+	ClearResolved  bool   `json:"clear_resolved"`
+	SetResolvedNow bool   `json:"set_resolved_now"`
+	IncidentID     int64  `json:"incident_id"`
+	FromStatus     string `json:"from_status"`
+}
+
+// M3 状态流转的唯一写入点（手册 §4.1 / §4.7）。
+//
+// 两个关键点：
+//   - **乐观并发**：WHERE 里带 `status = from_status`。若并发下另一个事务已经把状态
+//     改走，本条影响 0 行——调用方据此返回 409，而不是「后写覆盖先写」。
+//     返回影响行数而非只报错，故用 :execrows。
+//   - **resolved_at 三态**：由 clear_resolved / set_resolved_now 两个开关表达，
+//     二者互斥且由领域层计算（incident.ResolveAtEffect）——业务规则留在 Go 侧可单测，
+//     SQL 只负责执行。三态含义：
+//     进入 resolved        → set_resolved_now = true  → 写 NOW()
+//     从 resolved 重开     → clear_resolved  = true   → 置 NULL
+//     进入 ignored 及其余  → 两者皆 false             → 该列保持不动
+//     ignored 不写 resolved_at 是有意为之：误报关闭不该被算进 MTTR（手册 §4.1 决策 D1）。
+func (q *Queries) UpdateIncidentStatus(ctx context.Context, arg UpdateIncidentStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateIncidentStatus,
+		arg.ToStatus,
+		arg.ClearResolved,
+		arg.SetResolvedNow,
+		arg.IncidentID,
+		arg.FromStatus,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

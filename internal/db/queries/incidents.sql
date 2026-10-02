@@ -41,3 +41,36 @@ ON CONFLICT (incident_id, alert_id) DO NOTHING;
 UPDATE alerts
 SET incident_id = $2, updated_at = NOW()
 WHERE id = $1;
+
+-- name: GetIncidentByID :one
+-- 详情本体。M3 的状态流转需要「先读到当前 status 再决定能否转」，
+-- 故按主键直取单行；不存在时 sqlc 返回 pgx.ErrNoRows，由调用方映射为 404。
+SELECT id, title, severity, status, service, started_at, resolved_at,
+       root_causes, recommendations, created_at, updated_at
+FROM incidents
+WHERE id = sqlc.arg('id');
+
+-- name: UpdateIncidentStatus :execrows
+-- M3 状态流转的唯一写入点（手册 §4.1 / §4.7）。
+--
+-- 两个关键点：
+--   * **乐观并发**：WHERE 里带 `status = from_status`。若并发下另一个事务已经把状态
+--     改走，本条影响 0 行——调用方据此返回 409，而不是「后写覆盖先写」。
+--     返回影响行数而非只报错，故用 :execrows。
+--   * **resolved_at 三态**：由 clear_resolved / set_resolved_now 两个开关表达，
+--     二者互斥且由领域层计算（incident.ResolveAtEffect）——业务规则留在 Go 侧可单测，
+--     SQL 只负责执行。三态含义：
+--       进入 resolved        → set_resolved_now = true  → 写 NOW()
+--       从 resolved 重开     → clear_resolved  = true   → 置 NULL
+--       进入 ignored 及其余  → 两者皆 false             → 该列保持不动
+--     ignored 不写 resolved_at 是有意为之：误报关闭不该被算进 MTTR（手册 §4.1 决策 D1）。
+UPDATE incidents
+SET status      = sqlc.arg('to_status'),
+    resolved_at = CASE
+        WHEN sqlc.arg('clear_resolved')::boolean   THEN NULL::timestamptz
+        WHEN sqlc.arg('set_resolved_now')::boolean THEN NOW()
+        ELSE resolved_at
+    END,
+    updated_at  = NOW()
+WHERE id     = sqlc.arg('incident_id')
+  AND status = sqlc.arg('from_status');

@@ -55,6 +55,9 @@ type Querier interface {
 	// 规格依据：docs/IIP-M2详细开发手册.md §4.4 / §4.7。
 	// 取单行配置（name='default'）。零行时调用方回退到内置默认值。
 	GetCorrelationConfig(ctx context.Context) (CorrelationRule, error)
+	// 详情本体。M3 的状态流转需要「先读到当前 status 再决定能否转」，
+	// 故按主键直取单行；不存在时 sqlc 返回 pgx.ErrNoRows，由调用方映射为 404。
+	GetIncidentByID(ctx context.Context, id int64) (Incident, error)
 	// 持久化归一化后的告警（见手册 §4.2 阶段五 Persist）。
 	//
 	// ON CONFLICT 是 M1 的**数据库层去重兜底**：应用层的「先查后写」防不住并发投递，
@@ -63,6 +66,13 @@ type Querier interface {
 	// 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
 	// （而不是错误），详见 internal/repository/alerts.go。
 	InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert, error)
+	// M3 事件生命周期：timeline 留痕。
+	// 规格依据：docs/IIP-M3详细开发手册.md §4.2 / §4.7。
+	// 写入一条时间线条目并返回整行（含数据库生成的 id / timestamp）。
+	// timestamp 由调用方显式给出（与 evidence 同口径：事件时间来自发生时刻，不用 NOW() 兜底，
+	// 见 ADR-003）——状态流转是「刚刚发生」的，故 incident 服务层传 time.Now()。
+	// actor 与 metadata 可空：系统自动写入的事件（如 alert_linked）可能没有操作人。
+	InsertTimelineEntry(ctx context.Context, arg InsertTimelineEntryParams) (Timeline, error)
 	// 关联一条告警到 Incident。(incident_id, alert_id) 为主键，重复链接静默跳过（幂等）。
 	// correlation_score 为 0.0000-1.0000；NEW 档传 NULL（无关联对象）。
 	// needs_review = true 表示 REVIEW 档，待人工确认。
@@ -80,6 +90,10 @@ type Querier interface {
 	// 每行是「一条已关联告警」；调用方按 incident_id 聚合。
 	// ends_at 可能为 NULL（仍 firing），由 Go 侧按当前时刻兜底。
 	ListOpenIncidentsWithAlerts(ctx context.Context) ([]ListOpenIncidentsWithAlertsRow, error)
+	// 详情页时间线：新近在上。id DESC 作为次级排序键，避免同一时刻的多条事件
+	// 在翻页时顺序漂移（只按 timestamp 排序时，同秒事件的前后关系是未定义的）。
+	// row_limit 由调用方传入（默认 200），不写死在 SQL 里。
+	ListTimelineByIncident(ctx context.Context, arg ListTimelineByIncidentParams) ([]Timeline, error)
 	// M1 的 resolved 生命周期：**更新既有行**，而不是插新行（见手册 §4.4）。
 	// Alertmanager 的 send_resolved: true 会把同一指纹再推一次，status=resolved。
 	//
@@ -87,6 +101,20 @@ type Querier interface {
 	ResolveAlert(ctx context.Context, arg ResolveAlertParams) error
 	// 回写 alerts.incident_id（反规范化指针），便于后续按 incident 直查告警。
 	SetAlertIncident(ctx context.Context, arg SetAlertIncidentParams) error
+	// M3 状态流转的唯一写入点（手册 §4.1 / §4.7）。
+	//
+	// 两个关键点：
+	//   * **乐观并发**：WHERE 里带 `status = from_status`。若并发下另一个事务已经把状态
+	//     改走，本条影响 0 行——调用方据此返回 409，而不是「后写覆盖先写」。
+	//     返回影响行数而非只报错，故用 :execrows。
+	//   * **resolved_at 三态**：由 clear_resolved / set_resolved_now 两个开关表达，
+	//     二者互斥且由领域层计算（incident.ResolveAtEffect）——业务规则留在 Go 侧可单测，
+	//     SQL 只负责执行。三态含义：
+	//       进入 resolved        → set_resolved_now = true  → 写 NOW()
+	//       从 resolved 重开     → clear_resolved  = true   → 置 NULL
+	//       进入 ignored 及其余  → 两者皆 false             → 该列保持不动
+	//     ignored 不写 resolved_at 是有意为之：误报关闭不该被算进 MTTR（手册 §4.1 决策 D1）。
+	UpdateIncidentStatus(ctx context.Context, arg UpdateIncidentStatusParams) (int64, error)
 	// 写单行配置：存在即更新 rule_config，不存在则插入（幂等）。
 	// 允许通过 enabled 关闭整个关联引擎。
 	UpsertCorrelationConfig(ctx context.Context, arg UpsertCorrelationConfigParams) (CorrelationRule, error)

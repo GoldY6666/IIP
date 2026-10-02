@@ -430,6 +430,70 @@
 
 ---
 
+## ADR-014：M3 的状态与事件类型用 0004 重建 CHECK，不改 0001
+
+- **Background**:
+  M3 状态机需要 `acknowledged`（手册偏差 A1），时间线需要 7 个专用事件类型（偏差 A2），
+  但 `0001_init.up.sql:58 / :115` 的 `chk_incidents_status` / `chk_timeline_event_type`
+  分别只认 5 个取值——`acknowledged` 不在其中，M3 计划的 7 个类型**一个也不在**。
+  直接插入会被 PG 以 23514 拒绝。
+- **Options**:
+  (a) 改 `0001` —— 违反 `AGENTS.md` 约束 10（迁移文件冻结），且会让已部署环境无法对齐版本。
+  (b) 改用 PG ENUM —— 违反 ADR-001（VARCHAR + 命名 CHECK），且加值要 `ALTER TYPE`，
+      回滚比 CHECK 更麻烦（ENUM 不能删单个值）。
+  (c) 新增 `0004_incident_lifecycle_m3`：DROP CONSTRAINT → 重建为 6 值 / 12 值。
+- **Decision**: **(c)**，与 ADR-001 的口径保持一致（仍是可回滚的命名 CHECK）。
+  - `incidents.status` → 6 值；`timeline.event_type` → 12 值（既有 5 个**全部保留**，
+    其中 `status_change` 虽零存量行仍保留在 CHECK 里，是否删除见 OPEN-M3-3）。
+  - 新增表 `review_suppressions`（REVIEW 拒绝后的跨次抑制键，见手册 §4.5）与两个索引。
+  - **down 三步破坏性已写进 SQL 文件头并在此明示**：① 删除 7 个新类型的 timeline 行；
+    ② `UPDATE incidents SET status='open' WHERE status='acknowledged'`；③ `DROP TABLE review_suppressions`。
+    这三步会**真实丢数据**——不回写就无法把 CHECK 还原（PG 会因既有行违反而拒绝重建），
+    不是「忘了写补偿」，而是**回滚语义上无法两全**。生产回滚前必须备份。
+- **Consequences**:
+  - 正面：up → down → up 三连可重复（真库实测 4 用例全 PASS）；`0001`–`0003` 一字未动。
+  - 连带动作（容易漏）：**新增迁移必须同步追加到 `sqlc.yaml` 的 `schema` 列表**，
+    否则新表在 sqlc 里不存在、查询无法生成。本次已追加。
+  - 另一处连带：`migrations/migrate_test.go` 的 `latestVersion` 3 → 4 会让既有用例的
+    `Steps(-1)` **改回滚别的迁移**（本次 `TestCorrelationM2Migration` 因此转红）。
+    已改为相对写法 `Steps(-2)` / `latestVersion-1`，避免下次重演。
+- **Related ADRs**: ADR-001（VARCHAR + CHECK 而非 ENUM）、ADR-009（REVIEW 标记落在关联边上）。
+- **Evidence**: `D:\_iip_setup\_m3_s1_mig.txt`（无库组 SKIP=4 / 真库组 PASS=4 FAIL=0 SKIP=0）。
+
+---
+
+## ADR-015：状态流转走「乐观条件 + 同事务」，resolved_at 三态由领域层计算
+
+- **Background**:
+  一次状态流转要同时做两件事：改 `incidents.status`、写一条 timeline 留痕。
+  分两次写会出现「状态变了但没留痕」或反之的**幽灵流转**；并发下两个请求可能
+  同时读到 `open` 再各自写走（后写覆盖先写）；`resolved_at` 还有三态语义要处理。
+- **Options**:
+  (a) 两次独立写入，先状态后留痕 —— 简单，但留痕失败时状态已改，事后无法追溯。
+  (b) 同事务 + `WHERE status = from` 乐观条件，影响 0 行即判冲突。
+  (c) 同事务 + `SELECT ... FOR UPDATE` 悲观锁 —— 一致性强，但会把读也堵住，
+      且本产品的写冲突概率低、事务极短，用锁换不来收益。
+- **Decision**: **(b)**。
+  - 事务边界由 `incident.Transactor.InTx` 表达：领域层只认接口，仓储层（`repository.Lifecycle`）
+    用 `pgx.Tx` 实现，状态更新与留痕共用同一连接。
+  - 乐观条件 `status = from` 落在 SQL 的 WHERE 里（`UpdateIncidentStatus :execrows`），
+    返回影响行数；0 行 → `*ConflictError`（409）。**不自动重试**：重试等于替调用方
+    猜一个新状态，而新状态该由人决定。
+  - `resolved_at` 三态由领域层 `ResolveAtEffect(from, to)` 算出两个开关，SQL 只负责执行：
+    进入 `resolved` → 写 `NOW()`；从 `resolved` 重开 → 置 `NULL`；**进入 `ignored` 不写**。
+    把规则留在 Go 侧，是为了让它能脱离数据库被单测覆盖。
+- **Consequences**:
+  - 正面：留痕写失败 → 整个事务回滚，实测「状态保持原值且无残留留痕」
+    （`TestLifecycleTxRollback`）。并发冲突变成可判定的 409，而不是静默覆盖。
+  - 代价（如实记录）：`ignored` 不写 `resolved_at` 意味着**「忽略时刻」只能从 timeline 取**；
+    这是有意为之——误报关闭计入 MTTR 会把指标做脏。
+  - 另一处代价：每次流转在事务内多一次回读（为了返回真实落库的 `resolved_at`），
+    多一个 round-trip，换取返回值与库内一致。
+- **Related ADRs**: ADR-003（时间列一律 TIMESTAMPTZ）、手册 §4.1 决策 D1。
+- **Evidence**: `D:\_iip_setup\_m3_s1_lc.txt`（真库组 PASS=46 FAIL=0 SKIP=0）。
+
+---
+
 ## 待人工确认汇总
 
 | ADR | 决策 | 状态 |
@@ -447,6 +511,8 @@
 | ADR-011 | 告警接入层五项兜底策略裁定（关闭 OPEN-3/4/5/6/7） | 已裁定（OPEN-5/6 有真库实验证据；五项均为「维持现状」，产品代码零改动） |
 | ADR-012 | gocritic `hugeParam` 阈值收敛到 128 B + 真正超重入参改指针 | 已实施（M3 前置 L1：lint 17 项 → rc=0；是「阈值收敛」不是「排除规则」，无 nolint） |
 | ADR-013 | 服务拓扑走 compose 挂载，不烧进镜像 | 已实施（M3 前置 L2：容器内依赖维恢复，跨服务分数 0.5333 → 0.7133；新增可判定正向断言） |
+| ADR-014 | M3 的状态/事件类型用 0004 重建 CHECK，不改 0001 | 已实施（M3 S1：6 值 / 12 值；up→down→up 三连通过；down 三步破坏性已明示；sqlc.yaml 同步追加 0004） |
+| ADR-015 | 状态流转走「乐观条件 + 同事务」，resolved_at 三态由领域层计算 | 已实施（M3 S1：`WHERE status=from` + `InTx`；ignored 不写 resolved_at） |
 
 ---
 

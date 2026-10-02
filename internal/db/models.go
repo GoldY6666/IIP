@@ -82,6 +82,15 @@ type IncidentAlert struct {
 	NeedsReview      bool               `json:"needs_review"`
 }
 
+type ReviewSuppression struct {
+	ID          int64              `json:"id"`
+	Fingerprint string             `json:"fingerprint"`
+	IncidentID  int64              `json:"incident_id"`
+	Actor       pgtype.Text        `json:"actor"`
+	Reason      pgtype.Text        `json:"reason"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type Timeline struct {
 	ID          int64              `json:"id"`
 	IncidentID  int64              `json:"incident_id"`
