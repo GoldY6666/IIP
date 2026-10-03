@@ -1,8 +1,9 @@
-// 事件详情页：处置区+ 双 Tab（关联告警 / 时间线）+ 证据 Tab。
+// 事件详情页：处置区 + 三 Tab（关联告警 / 时间线 / 证据）。
 //
-// 「证据」Tab 在 M4 之前恒为空 —— evidence 表 0001 就建好，但直到 M4
-// 才第一次有写入方。**空态必须说清原因**，不能只显示「暂无数据」：
-// 用户会以为采集坏了或自己看错了地方。这正是 M4 要填上的洞。
+// 「证据」Tab 自 M4 起接真实数据（GET /incidents/{id}/evidence），
+// 组件在 components/EvidenceList.tsx。**空态仍必须说清原因**：
+// 「采集器没注册」与「确实没有可采的证据」在页面上必须能区分，
+// 否则用户会去查自己的集群而找不到问题（worker 才是该查的地方）。
 //
 // 处置按钮的可用性由 api/status.ts 的 canTransition 判定，与后端
 // CanTransition 同构。若前端算错，用户点下去只会拿到一个 422。
@@ -15,7 +16,6 @@ import {
   Button,
   Card,
   Descriptions,
-  Empty,
   Input,
   Modal,
   Space,
@@ -36,10 +36,11 @@ import {
   type TimelineEntry,
   type IncidentStatus,
 } from '../api/incidents'
+import { fetchEvidence, type EvidenceType } from '../api/evidence'
+import { EvidenceList } from '../components/EvidenceList'
 import { allowedTargets, statusLabel, statusColor, severityColor } from '../api/status'
-import { palette } from '../theme'
 
-const { Title, Text, Paragraph } = Typography
+const { Title, Text } = Typography
 
 export default function IncidentDetail() {
   const { id } = useParams<{ id: string }>()
@@ -49,11 +50,35 @@ export default function IncidentDetail() {
   const qc = useQueryClient()
   const [noteOpen, setNoteOpen] = useState(false)
   const [note, setNote] = useState('')
+  // 证据的类型筛选放在页面状态里而不是 URL query：
+  // 它是纯 UI 关注点，放进 URL 会让「分享一个事件链接」带上
+  // 与对方无关的筛选状态（对方打开后看到的是被筛过的子集）。
+  const [evidenceType, setEvidenceType] = useState<EvidenceType | undefined>(
+    undefined,
+  )
 
   const { data, isLoading, isError, error } = useQuery({
     queryKey: ['incident', incidentID],
     queryFn: () => fetchIncident(incidentID),
     enabled: Number.isFinite(incidentID) && incidentID > 0,
+  })
+
+  // 证据单独查，不塞进事件详情响应。
+  //
+  // 理由：证据会随采集持续增长（单事件上限 50~200 条），
+  // 与「看一眼事件基本信息」是两种访问节奏。合进详情响应会让
+  // 每次打开详情都要拉全量证据，而多数人只是看一眼状态就走了。
+  //
+  // 轮询：事件创建后 2 分钟内证据才陆续出现，一次性拉取会看到空的
+  // 证据 Tab 而让人以为没采到。12s 一次、仅在该 Tab 有过数据或
+  // 正在看时轮询，避免长期挂着详情页还在打接口。
+  const evidenceQuery = useQuery({
+    queryKey: ['evidence', incidentID, evidenceType ?? 'all'],
+    queryFn: () => fetchEvidence(incidentID, { type: evidenceType }),
+    enabled: Number.isFinite(incidentID) && incidentID > 0,
+    refetchInterval: 12_000,
+    // 采集窗口内证据只增不减，重复拉到同样的内容没意义。
+    refetchOnWindowFocus: false,
   })
 
   // 流转后要同时刷详情与列表：状态变了，列表那一行的状态/待确认数也变了。
@@ -288,19 +313,21 @@ export default function IncidentDetail() {
             },
             {
               key: 'evidence',
-              label: '证据',
+              // 角标用 total 而不是 count：筛选后 count 只反映当前视图，
+              // 用它做 Tab 名会让人以为筛选把证据「弄没了」。
+              label: `证据${evidenceQuery.data ? ` (${evidenceQuery.data.total})` : ''}`,
               children: (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description={
-                    <span style={{ color: palette.text.tertiary }}>
-                      暂无证据。
-                      <Paragraph type="secondary" style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}>
-                        证据由 M4 的采集器自动拉取（指标 / 日志 / 部署记录）。
-                        当前尚未接入，因此这个Tab 恒为空。
-                      </Paragraph>
-                    </span>
+                <EvidenceList
+                  data={evidenceQuery.data}
+                  loading={evidenceQuery.isLoading}
+                  error={
+                    evidenceQuery.isError
+                      ? ((evidenceQuery.error as Error) ?? null)
+                      : null
                   }
+                  filter={evidenceType}
+                  onFilterChange={setEvidenceType}
+                  reload={() => void evidenceQuery.refetch()}
                 />
               ),
             },

@@ -123,7 +123,7 @@ export interface ReviewResult {
 // 后端错误体是 {"error": "...", "code": "..."}；但反向代理或容器返回的
 // 可能不是 JSON，所以 text() 失败时退回状态码 —— 宁可少说，也不能
 // 让「解析失败」这个二次错误盖掉真实原因。
-async function readError(res: Response, what: string): Promise<Error> {
+export async function readError(res: Response, what: string): Promise<Error> {
   const text = await res.text().catch(() => '')
   let detail = text
   try {
@@ -134,6 +134,9 @@ async function readError(res: Response, what: string): Promise<Error> {
   }
   return new Error(`${what}：HTTP ${res.status}${detail ? ` ${detail}` : ''}`)
 }
+
+// readError 已导出：evidence.ts 也要用它，两处各写一份会让错误文案漂移。
+// 错误文案是用户唯一能看到的失败原因，漂移等于用户看到两种说法。
 
 // buildQuery 拼查询串，自动跳过空值。
 //
