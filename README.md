@@ -275,6 +275,26 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 
 查看全部任务：`make help` 或 `pwsh -File scripts/tasks.ps1 list`。
 
+### 验证脚本：四条链路，别混用
+
+| 脚本 | 链路 | 前置 | 报告 |
+|------|------|------|------|
+| `scripts/verify-func.py` | **业务闭环**：M1 接入 → M2 关联 → M3 处置 → 抑制生效，核对数据后果 | 绿色版 PostgreSQL（`IIP_PG_HOME` 可覆盖） | `_verify_func.txt` |
+| `scripts/verify-runtime.py` | 宿主机全栈（偏 M1/M2 单点校验） | 宿主 PostgreSQL | `_verify_runtime.txt` |
+| `scripts/verify-images.py` | 容器链路（偏部署形态与镜像内容物） | Docker daemon | `_verify_images.txt` |
+| `scripts/check-binaries.py` | 镜像内容物（交叉编译 + ELF 解析） | 无 | 控制台 |
+
+`verify-func.py` 默认用 **5434 / 8082**，与 `verify-runtime.py` 错开，
+两条链路可并存而不互相抢占。
+
+> **自己写端到端验证时注意三条**（2026-10-03 各踩一次，详见 M3 报告 §14.7）：
+> 1. 告警的 `startsAt` / `endsAt` **必须固定** —— firing 的 `endsAt` 落库为 NULL，
+>    评分时用「当前时刻」兜底，投递间隔一变分数就变，会导致关联结果不可复现。
+> 2. 要造「同指纹的第二条告警」，只能用 `instance`（动态键）区分，
+>    用 `round` 之类会改变指纹，测的就不是你想测的东西了。
+> 3. 造第二条前必须先把前一条投成 `resolved` —— 同指纹的 firing 行已在库会被
+>    去重 `skipped`，连库都不进，也不会触发关联。
+
 ---
 
 ## M0 验收状态（如实标注）
