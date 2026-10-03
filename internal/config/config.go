@@ -9,6 +9,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -48,6 +49,48 @@ type Config struct {
 
 	// CorrelationEnabled 是 M2 关联引擎总开关；false 时 webhook 落库后不关联。
 	CorrelationEnabled bool // IIP_CORRELATION_ENABLED，默认 true
+
+	// --- M4：任务队列（手册 §4.1 / §4.6）---
+
+	// WorkerTaskBatch 是单次轮询最多领取几条任务。
+	WorkerTaskBatch int // IIP_WORKER_TASK_BATCH，默认 10
+	// WorkerTaskStaleAfter 是 in_flight 多久算「持有者已消失」可被回收。
+	WorkerTaskStaleAfter time.Duration // IIP_WORKER_TASK_STALE_AFTER，默认 5m
+	// WorkerMaxAttempts 是超过即进死信的尝试次数。
+	WorkerMaxAttempts int // IIP_WORKER_MAX_ATTEMPTS，默认 3
+
+	// --- M4：证据采集（手册 §4.6）---
+
+	// EvidencePromEnabled 控制 Prometheus 采集器是否注册，默认 true。
+	EvidencePromEnabled bool // IIP_EVIDENCE_PROM_ENABLED
+	// EvidenceLokiEnabled 控制 Loki 采集器是否注册，默认 true。
+	EvidenceLokiEnabled bool // IIP_EVIDENCE_LOKI_ENABLED
+	// EvidenceK8sEnabled 控制 K8s 采集器是否注册，**默认 false**。
+	//
+	// 默认关闭是刻意的（手册 §三偏差 B1）：本仓库零K8s 依赖，
+	// 写一个接不上任何真实集群的采集器比不写更危险 —— 它看起来在工作，
+	// 但永远采不到东西。要接真实集群是部署侧的事（用户自带 kubeconfig）。
+	EvidenceK8sEnabled bool // IIP_EVIDENCE_K8S_ENABLED
+	// EvidenceMaxPerIncident 是单事件证据上限，超限截断并标记。
+	EvidenceMaxPerIncident int // IIP_EVIDENCE_MAX_PER_INCIDENT，默认 50
+	// EvidenceWindow 是采集时间窗口。
+	EvidenceWindow time.Duration // IIP_EVIDENCE_WINDOW，默认 1h
+
+	// PromURL 是 Prometheus 的查询端点根地址（形如 http://prom:9090）。
+	PromURL string // IIP_PROM_URL
+	// LokiURL 是 Loki 的查询端点根地址。
+	LokiURL string // IIP_LOKI_URL
+	// K8sURL 是 K8s API Server 根地址（仅在 EvidenceK8sEnabled 时必填）。
+	K8sURL string // IIP_K8S_URL
+	// EvidenceTimeout 是单个采集器的超时上限（手册 §4.5：三类均为 5s）。
+	EvidenceTimeout time.Duration // IIP_EVIDENCE_TIMEOUT，默认 5s
+
+	// 三个 evidence*Explicit 记录采集器开关是否被**显式**配置过。
+	//
+	// 不导出给业务用，只服务 validateM4：见该方法的说明。
+	evidencePromExplicit bool
+	evidenceLokiExplicit bool
+	evidenceK8sExplicit  bool
 }
 
 // 内置默认值集中定义，便于单测断言。
@@ -66,6 +109,18 @@ const (
 
 	// DefaultCorrelationEnabled 默认开启关联：M2 的核心能力，不应默认静默。
 	DefaultCorrelationEnabled = true
+
+	// --- M4 默认值（手册 §4.1 / §4.6）---
+
+	DefaultWorkerTaskBatch        = 10
+	DefaultWorkerTaskStaleAfter   = 5 * time.Minute
+	DefaultWorkerMaxAttempts      = 3
+	DefaultEvidencePromEnabled    = true
+	DefaultEvidenceLokiEnabled    = true
+	DefaultEvidenceK8sEnabled     = false // 偏差 B1：默认关闭
+	DefaultEvidenceMaxPerIncident = 50
+	DefaultEvidenceWindow         = time.Hour
+	DefaultEvidenceTimeout        = 5 * time.Second
 )
 
 // Load 按优先级加载配置。
@@ -85,6 +140,19 @@ func Load(args []string) (*Config, error) {
 	fs.Int64("webhook-max-bytes", DefaultWebhookMaxBytes, "告警 webhook 请求体上限（字节），超限返回 413")
 	fs.String("topology-file", DefaultTopologyFile, "服务依赖拓扑文件路径（M2 依赖相似度用）")
 	fs.Bool("correlation-enabled", DefaultCorrelationEnabled, "M2 关联引擎总开关")
+	// M4 队列与采集器
+	fs.Int("worker-task-batch", DefaultWorkerTaskBatch, "单次轮询最多领取几条任务")
+	fs.Duration("worker-task-stale-after", DefaultWorkerTaskStaleAfter, "in_flight 多久算超时可回收")
+	fs.Int("worker-max-attempts", DefaultWorkerMaxAttempts, "超过即进死信的尝试次数")
+	fs.Bool("evidence-prom-enabled", DefaultEvidencePromEnabled, "启用 Prometheus 采集器")
+	fs.Bool("evidence-loki-enabled", DefaultEvidenceLokiEnabled, "启用 Loki 采集器")
+	fs.Bool("evidence-k8s-enabled", DefaultEvidenceK8sEnabled, "启用 K8s 采集器（默认关闭）")
+	fs.Int("evidence-max-per-incident", DefaultEvidenceMaxPerIncident, "单事件证据上限，超限截断并标记")
+	fs.Duration("evidence-window", DefaultEvidenceWindow, "证据采集时间窗口")
+	fs.Duration("evidence-timeout", DefaultEvidenceTimeout, "单个采集器超时上限")
+	fs.String("prom-url", "", "Prometheus 查询端点根地址（启用该采集器时必填）")
+	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
+	fs.String("k8s-url", "", "K8s API Server 根地址（启用该采集器时必填）")
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -129,7 +197,35 @@ func Load(args []string) (*Config, error) {
 		WebhookMaxBytes:    k.Int64("webhook-max-bytes"),
 		TopologyFile:       k.String("topology-file"),
 		CorrelationEnabled: k.Bool("correlation-enabled"),
+
+		WorkerTaskBatch:      k.Int("worker-task-batch"),
+		WorkerTaskStaleAfter: k.Duration("worker-task-stale-after"),
+		WorkerMaxAttempts:    k.Int("worker-max-attempts"),
+
+		EvidencePromEnabled:    k.Bool("evidence-prom-enabled"),
+		EvidenceLokiEnabled:    k.Bool("evidence-loki-enabled"),
+		EvidenceK8sEnabled:     k.Bool("evidence-k8s-enabled"),
+		EvidenceMaxPerIncident: k.Int("evidence-max-per-incident"),
+		EvidenceWindow:         k.Duration("evidence-window"),
+		EvidenceTimeout:        k.Duration("evidence-timeout"),
+
+		PromURL: k.String("prom-url"),
+		LokiURL: k.String("loki-url"),
+		K8sURL:  k.String("k8s-url"),
 	}
+
+	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
+	//
+	// 判据用 pflag 的 Changed（而非 koanf的键是否存在）：
+	// posflag provider 会把**每个** flag 的默认值都写进 koanf，
+	// 所以「键存在」对 flag 来源恒为真，分不出「默认值」与「用户显式设置」。
+	// 环境变量来源直接查 os.LookupEnv——它天然区分「设过」与「没设」。
+	cfg.evidencePromExplicit = flagChanged(fs, "evidence-prom-enabled") ||
+		envExists("IIP_EVIDENCE_PROM_ENABLED")
+	cfg.evidenceLokiExplicit = flagChanged(fs, "evidence-loki-enabled") ||
+		envExists("IIP_EVIDENCE_LOKI_ENABLED")
+	cfg.evidenceK8sExplicit = flagChanged(fs, "evidence-k8s-enabled") ||
+		envExists("IIP_EVIDENCE_K8S_ENABLED")
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -153,6 +249,73 @@ func (c *Config) Validate() error {
 		// 0 或负数会让 MaxBytesReader 拒绝一切请求体（含合法告警），
 		// 表现为"所有告警都 413"——必须在启动时拦下，而不是上线后才发现。
 		return fmt.Errorf("WebhookMaxBytes 必须为正数，当前为 %d", c.WebhookMaxBytes)
+	}
+	if err := c.validateM4(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// flagChanged 报告该 flag 是否被用户在命令行显式设置过。
+func flagChanged(fs *pflag.FlagSet, name string) bool {
+	f := fs.Lookup(name)
+	return f != nil && f.Changed
+}
+
+// envExists 报告该环境变量是否被设置过（哪怕值为空字符串）。
+func envExists(key string) bool {
+	_, ok := os.LookupEnv(key)
+	return ok
+}
+
+// validateM4 校验 M4 的队列参数与采集器开关组合。
+//
+// 「启用了某个采集器却没给它的地址」必须在启动时报错：
+// 若放任过去，worker 会在**第一次采集**时才失败，而那意味着
+// 事件已经建好、任务已入队，证据却永远采不到 ——
+// 表现为「任务进了死信」，排查时看不出是配置缺失。
+func (c *Config) validateM4() error {
+	if c.WorkerTaskBatch <= 0 {
+		return fmt.Errorf("WorkerTaskBatch 必须为正数，当前为 %d", c.WorkerTaskBatch)
+	}
+	if c.WorkerMaxAttempts <= 0 {
+		return fmt.Errorf("WorkerMaxAttempts 必须为正数，当前为 %d", c.WorkerMaxAttempts)
+	}
+	if c.WorkerTaskStaleAfter <= 0 {
+		// 0 会让 ReclaimStale 把所有 in_flight 任务立刻回收，
+		// 表现为「任务刚领走就被别人抢走」，且 attempts 飞快涨到死信。
+		return fmt.Errorf("WorkerTaskStaleAfter 必须为正数，当前为 %s", c.WorkerTaskStaleAfter)
+	}
+	if c.EvidenceMaxPerIncident <= 0 {
+		return fmt.Errorf("EvidenceMaxPerIncident 必须为正数，当前为 %d", c.EvidenceMaxPerIncident)
+	}
+	if c.EvidenceWindow <= 0 {
+		return fmt.Errorf("EvidenceWindow 必须为正数，当前为 %s", c.EvidenceWindow)
+	}
+	if c.EvidenceTimeout <= 0 {
+		return fmt.Errorf("EvidenceTimeout 必须为正数，当前为 %s", c.EvidenceTimeout)
+	}
+
+	// 采集器开关与地址的一致性。
+	//
+	// **仅在开关被显式配置过时才要求地址**（手册 §4.6 的2026-10-03 修订）：
+	// 默认值是「启用 Prometheus / Loki」，若无条件要求地址，
+	// 默认部署（compose 里根本没这两个外部服务）会在启动即失败。
+	// 那等于拿可用性换「默认值好看」，而 M4 的验收标准恰恰是
+	// 「事件创建后 2 分钟内 ≥5 条证据」——服务起不来，标准一条都过不了。
+	//
+	// 未配地址时的行为：装配阶段不注册该采集器，worker 日志明确说明原因。
+	// 「说不清就不说」优于「让整个 worker 拒绝启动」。
+	if c.evidencePromExplicit && c.EvidencePromEnabled && strings.TrimSpace(c.PromURL) == "" {
+		return fmt.Errorf("已显式启用 Prometheus 采集器但未提供 %sPROM_URL", envPrefix)
+	}
+	if c.evidenceLokiExplicit && c.EvidenceLokiEnabled && strings.TrimSpace(c.LokiURL) == "" {
+		return fmt.Errorf("已显式启用 Loki 采集器但未提供 %sLOKI_URL", envPrefix)
+	}
+	if c.EvidenceK8sEnabled && strings.TrimSpace(c.K8sURL) == "" {
+		// K8s 不设「显式才校验」：它默认就是 false，一旦有人打开就必然是有意为之，
+		// 此时缺地址一定是漏配，必须拦下。
+		return fmt.Errorf("已启用 K8s 采集器但未提供 %sK8S_URL", envPrefix)
 	}
 	return nil
 }
