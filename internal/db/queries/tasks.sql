@@ -24,12 +24,25 @@ RETURNING *;
 --
 -- NOT EXISTS 的判定范围刻意包含 in_flight —— 已领取但未完成的也算，
 -- 否则重试逻辑可能在采集进行中又插一条。
+--
+-- incident_id 显式 ::text：payload->>'incident_id' 的结果类型是 text，
+-- 而 sqlc 对无Cast 的命名参数会推断成 jsonb。`text = jsonb` 在 PG 里
+-- **没有对应运算符**，运行期会报 operator does not exist —— 且只在真库
+-- 跑到这条查询时才暴露。写Cast 让比较两侧同为 text。
+--
+-- kind 必须**四处**都显式 ::text（下面每处都标了）：
+-- 同一个 $1 既出现在 INSERT 的目标列（kind VARCHAR(32)）、
+-- 又出现在 NOT EXISTS 的比较里（t.kind = $1）。
+-- PG 对无 Cast 的参数按**首次出现**处推断类型，两处推断不一致时直接报
+--「inconsistent types deduced for parameter $1」(SQLSTATE 42P08)，
+-- 整条查询用不了。凡「同一参数在多处出现且上下文类型可能不同」，
+-- 全部显式 Cast，别指望推断一致。
 INSERT INTO tasks (kind, payload)
-SELECT sqlc.arg('kind'), sqlc.arg('payload')
+SELECT sqlc.arg('kind')::text, sqlc.arg('payload')
 WHERE NOT EXISTS (
     SELECT 1 FROM tasks t
-     WHERE t.kind = sqlc.arg('kind')
-       AND t.payload->>'incident_id' = sqlc.arg('incident_id')
+     WHERE t.kind = sqlc.arg('kind')::text
+       AND t.payload->>'incident_id' = sqlc.arg('incident_id')::text
        AND t.status IN ('pending', 'in_flight')
 )
 RETURNING *;
@@ -131,6 +144,17 @@ UPDATE tasks
 
 -- name: CountTasksByStatus :one
 -- 按状态计数，供 worker 心跳与端到端断言使用。
-SELECT status, count(*)::int AS count
-  FROM tasks
- GROUP BY status;
+--
+-- **用 FILTER 聚成一行，而不是 GROUP BY + :many**：
+-- 调用方要的是「一个快照」，而 GROUP BY 会让「有几种状态」随运行时刻变化
+-- （刚启动只有 pending，跑一轮后出现 done 和 dead），调用方就得处理
+-- 「返回几行不确定」——而漏读某一行会被误当成「该状态为 0」。
+-- 聚成固定 4 列后，「这一行永远是 4 个计数」是可断言的契约。
+--
+-- 刻意**不写 WHERE status <> 'done'`**：done 是正常运行产物，
+-- 而「done 为 0」本身就是异常信号（没有任务被成功处理过），压掉就看不见了。
+SELECT count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+       count(*) FILTER (WHERE status = 'in_flight')::int AS in_flight,
+       count(*) FILTER (WHERE status = 'done')::int      AS done,
+       count(*) FILTER (WHERE status = 'dead')::int      AS dead
+  FROM tasks;

@@ -50,7 +50,7 @@ type ClaimTasksParams struct {
 // 「超时回收」复用（回收时也 +1），这样任何一次「被领走但没成功」
 // 都会推进 attempts，最终能进死信而不是无限重试。
 //
-// COALESCE(claimed_by, ”) 用于让 RETURNING 的列类型确定为非空，
+// COALESCE(claimed_by, '') 用于让 RETURNING 的列类型确定为非空，
 // 避免 sqlc 因两处类型不一致生成不出结构体。
 func (q *Queries) ClaimTasks(ctx context.Context, arg ClaimTasksParams) ([]Task, error) {
 	rows, err := q.db.Query(ctx, claimTasks, arg.ClaimedBy, arg.Batch)
@@ -109,21 +109,39 @@ func (q *Queries) CompleteTask(ctx context.Context, id int64) (int64, error) {
 }
 
 const countTasksByStatus = `-- name: CountTasksByStatus :one
-SELECT status, count(*)::int AS count
+SELECT count(*) FILTER (WHERE status = 'pending')::int   AS pending,
+       count(*) FILTER (WHERE status = 'in_flight')::int AS in_flight,
+       count(*) FILTER (WHERE status = 'done')::int      AS done,
+       count(*) FILTER (WHERE status = 'dead')::int      AS dead
   FROM tasks
- GROUP BY status
 `
 
 type CountTasksByStatusRow struct {
-	Status string `json:"status"`
-	Count  int32  `json:"count"`
+	Pending  int32 `json:"pending"`
+	InFlight int32 `json:"in_flight"`
+	Done     int32 `json:"done"`
+	Dead     int32 `json:"dead"`
 }
 
 // 按状态计数，供 worker 心跳与端到端断言使用。
+//
+// **用 FILTER 聚成一行，而不是 GROUP BY + :many**：
+// 调用方要的是「一个快照」，而 GROUP BY 会让「有几种状态」随运行时刻变化
+// （刚启动只有 pending，跑一轮后出现 done 和 dead），调用方就得处理
+// 「返回几行不确定」——而漏读某一行会被误当成「该状态为 0」。
+// 聚成固定 4 列后，「这一行永远是 4 个计数」是可断言的契约。
+//
+// 刻意**不写 WHERE status <> 'done'`**：done 是正常运行产物，
+// 而「done 为 0」本身就是异常信号（没有任务被成功处理过），压掉就看不见了。
 func (q *Queries) CountTasksByStatus(ctx context.Context) (CountTasksByStatusRow, error) {
 	row := q.db.QueryRow(ctx, countTasksByStatus)
 	var i CountTasksByStatusRow
-	err := row.Scan(&i.Status, &i.Count)
+	err := row.Scan(
+		&i.Pending,
+		&i.InFlight,
+		&i.Done,
+		&i.Dead,
+	)
 	return i, err
 }
 
@@ -144,11 +162,10 @@ type EnqueueTaskParams struct {
 // 规格来源：docs/IIP-M4详细开发手册.md §4.1
 //
 // 队列语义见手册 §4.1 的五点设计。要点复述（因为 SQL 本身不解释「为什么」）：
-//   - 领取用 SKIP LOCKED —— 多 worker 并行时各自取到不重叠的行，互不阻塞。
-//   - 退避用 available_at（可见性）而非 sleep —— 进程重启不丢退避状态。
-//   - 死信保留行（status='dead'），不删 —— 删掉就看不出「曾经试过」。
-//   - in_flight 超时可回收（ReclaimStaleTasks）—— worker 崩溃不会让任务永久卡住。
-//
+//   * 领取用 SKIP LOCKED —— 多 worker 并行时各自取到不重叠的行，互不阻塞。
+//   * 退避用 available_at（可见性）而非 sleep —— 进程重启不丢退避状态。
+//   * 死信保留行（status='dead'），不删 —— 删掉就看不出「曾经试过」。
+//   * in_flight 超时可回收（ReclaimStaleTasks）—— worker 崩溃不会让任务永久卡住。
 // ============================================================================
 // 入队一个任务。幂等由调用方保证（payload 里的 incident_id + 「未采集过」判定）。
 func (q *Queries) EnqueueTask(ctx context.Context, arg EnqueueTaskParams) (Task, error) {
@@ -172,11 +189,11 @@ func (q *Queries) EnqueueTask(ctx context.Context, arg EnqueueTaskParams) (Task,
 
 const enqueueTaskIfAbsent = `-- name: EnqueueTaskIfAbsent :one
 INSERT INTO tasks (kind, payload)
-SELECT $1, $2
+SELECT $1::text, $2
 WHERE NOT EXISTS (
     SELECT 1 FROM tasks t
-     WHERE t.kind = $1
-       AND t.payload->>'incident_id' = $3
+     WHERE t.kind = $1::text
+       AND t.payload->>'incident_id' = $3::text
        AND t.status IN ('pending', 'in_flight')
 )
 RETURNING id, kind, payload, status, attempts, available_at, claimed_at, claimed_by, last_error, created_at, updated_at
@@ -185,7 +202,7 @@ RETURNING id, kind, payload, status, attempts, available_at, claimed_at, claimed
 type EnqueueTaskIfAbsentParams struct {
 	Kind       string          `json:"kind"`
 	Payload    json.RawMessage `json:"payload"`
-	IncidentID json.RawMessage `json:"incident_id"`
+	IncidentID string          `json:"incident_id"`
 }
 
 // 条件入队：仅当该事件没有「未完成」的采集任务时才插入。
@@ -196,6 +213,19 @@ type EnqueueTaskIfAbsentParams struct {
 //
 // NOT EXISTS 的判定范围刻意包含 in_flight —— 已领取但未完成的也算，
 // 否则重试逻辑可能在采集进行中又插一条。
+//
+// incident_id 显式 ::text：payload->>'incident_id' 的结果类型是 text，
+// 而 sqlc 对无Cast 的命名参数会推断成 jsonb。`text = jsonb` 在 PG 里
+// **没有对应运算符**，运行期会报 operator does not exist —— 且只在真库
+// 跑到这条查询时才暴露。写Cast 让比较两侧同为 text。
+//
+// kind 必须**四处**都显式 ::text（下面每处都标了）：
+// 同一个 $1 既出现在 INSERT 的目标列（kind VARCHAR(32)）、
+// 又出现在 NOT EXISTS 的比较里（t.kind = $1）。
+// PG 对无 Cast 的参数按**首次出现**处推断类型，两处推断不一致时直接报
+//「inconsistent types deduced for parameter $1」(SQLSTATE 42P08)，
+// 整条查询用不了。凡「同一参数在多处出现且上下文类型可能不同」，
+// 全部显式 Cast，别指望推断一致。
 func (q *Queries) EnqueueTaskIfAbsent(ctx context.Context, arg EnqueueTaskIfAbsentParams) (Task, error) {
 	row := q.db.QueryRow(ctx, enqueueTaskIfAbsent, arg.Kind, arg.Payload, arg.IncidentID)
 	var i Task
@@ -238,12 +268,12 @@ type FailTaskParams struct {
 // 任务失败：重试或进死信。
 //
 // 用 SQL 表达式而不是在 Go 里算延迟，原因有二：
-//  1. available_at 用数据库的 NOW() 计算，与「是否可见」的判断同一时钟源；
-//     若在 Go 侧算，两边时钟不一致会让任务刚退避完就立刻可领（退避形同虚设）
-//     或迟迟不可领。
-//  2. 「是否进死信」需要同时看 attempts 与 max_attempts，二者在同一条 UPDATE
-//     的 WHERE/表达式里判定，不会出现「读到 attempts=2 时另一个 worker 已改成 3」
-//     的竞态。
+//   1) available_at 用数据库的 NOW() 计算，与「是否可见」的判断同一时钟源；
+//      若在 Go 侧算，两边时钟不一致会让任务刚退避完就立刻可领（退避形同虚设）
+//      或迟迟不可领。
+//   2) 「是否进死信」需要同时看 attempts 与 max_attempts，二者在同一条 UPDATE
+//      的 WHERE/表达式里判定，不会出现「读到 attempts=2 时另一个 worker 已改成 3」
+//      的竞态。
 //
 // delay_seconds 由调用方按指数退避算好（手册 §4.1 决策 3：base * 2^(n-1)，封顶 5 分钟）。
 // 封顶在 Go 侧做而非 SQL，因为「封顶值」是业务决策、不该散落到 SQL 里。

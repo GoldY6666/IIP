@@ -156,12 +156,12 @@ type ListIncidentsRow struct {
 // 列表（手册 §4.3）：过滤 + 排序 + limit/offset。
 //
 // 三个过滤口径的取舍：
-//   - status / severity 用**数组全量兜底**：调用方不过滤时传入全部合法取值，
+//   * status / severity 用**数组全量兜底**：调用方不过滤时传入全部合法取值，
 //     而不是在 SQL 里写「参数为 NULL 则不过滤」的分支——后者让同一条 SQL 有两种执行形态，
 //     计划缓存与索引选择都跟着摇摆。
-//   - service / from / to 用 narg 的 NULL 分支：这三个是真正的「可选」条件，
+//   * service / from / to 用 narg 的 NULL 分支：这三个是真正的「可选」条件，
 //     用 NULL 表达「不限」比传哨兵值（如空串、零时间）更不容易歧义。
-//   - 关联告警数与待确认数用 LEFT JOIN 子查询聚合（手册 §4.4：这两个计数在关联边上，
+//   * 关联告警数与待确认数用 LEFT JOIN 子查询聚合（手册 §4.4：这两个计数在关联边上，
 //     incidents 表没有），没有关联边的事件按 0 计而不是被 JOIN 掉。
 //
 // 排序以 id DESC 收尾（ADR-007 的口径）：starts_at 可能完全相同，
@@ -308,15 +308,15 @@ type UpdateIncidentStatusParams struct {
 // M3 状态流转的唯一写入点（手册 §4.1 / §4.7）。
 //
 // 两个关键点：
-//   - **乐观并发**：WHERE 里带 `status = from_status`。若并发下另一个事务已经把状态
+//   * **乐观并发**：WHERE 里带 `status = from_status`。若并发下另一个事务已经把状态
 //     改走，本条影响 0 行——调用方据此返回 409，而不是「后写覆盖先写」。
 //     返回影响行数而非只报错，故用 :execrows。
-//   - **resolved_at 三态**：由 clear_resolved / set_resolved_now 两个开关表达，
+//   * **resolved_at 三态**：由 clear_resolved / set_resolved_now 两个开关表达，
 //     二者互斥且由领域层计算（incident.ResolveAtEffect）——业务规则留在 Go 侧可单测，
 //     SQL 只负责执行。三态含义：
-//     进入 resolved        → set_resolved_now = true  → 写 NOW()
-//     从 resolved 重开     → clear_resolved  = true   → 置 NULL
-//     进入 ignored 及其余  → 两者皆 false             → 该列保持不动
+//       进入 resolved        → set_resolved_now = true  → 写 NOW()
+//       从 resolved 重开     → clear_resolved  = true   → 置 NULL
+//       进入 ignored 及其余  → 两者皆 false             → 该列保持不动
 //     ignored 不写 resolved_at 是有意为之：误报关闭不该被算进 MTTR（手册 §4.1 决策 D1）。
 func (q *Queries) UpdateIncidentStatus(ctx context.Context, arg UpdateIncidentStatusParams) (int64, error) {
 	result, err := q.db.Exec(ctx, updateIncidentStatus,

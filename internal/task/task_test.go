@@ -166,7 +166,8 @@ func TestIsTerminal(t *testing.T) {
 		StatusDead:     true,
 	}
 	for st, want := range cases {
-		if got := (Task{Status: st}).IsTerminal(); got != want {
+		tk := Task{Status: st}
+		if got := tk.IsTerminal(); got != want {
 			t.Errorf("Task{Status:%q}.IsTerminal() = %v，期望 %v", st, got, want)
 		}
 	}

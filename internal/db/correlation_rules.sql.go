@@ -39,10 +39,8 @@ type FingerprintCoOccurrenceRow struct {
 }
 
 // 历史相似度的数据源：统计两个 fingerprint 在「同一 Incident」中的共现比例。
-//
-//	co    = 同时包含两者的 Incident 数
-//	total = 包含任一者的 Incident 数（并集）
-//
+//   co    = 同时包含两者的 Incident 数
+//   total = 包含任一者的 Incident 数（并集）
 // 零历史（total=0）时调用方返回 0.0。
 func (q *Queries) FingerprintCoOccurrence(ctx context.Context, arg FingerprintCoOccurrenceParams) (FingerprintCoOccurrenceRow, error) {
 	row := q.db.QueryRow(ctx, fingerprintCoOccurrence, arg.Fingerprint, arg.Fingerprint_2)

@@ -105,7 +105,7 @@ type Task struct {
 // 只对 KindCollectEvidence 有意义；其余 kind 返回错误而不是 0 ——
 // 返回 0 会让调用方去查incident 0，然后拿到一个「不存在」的错误，
 // 掩盖真正的问题（拿错了 kind 的任务）。
-func (t Task) IncidentID() (int64, error) {
+func (t *Task) IncidentID() (int64, error) {
 	if t.Kind != KindCollectEvidence {
 		return 0, fmt.Errorf("任务类型 %q 不支持解析 incident_id", t.Kind)
 	}
@@ -132,7 +132,7 @@ func NewCollectEvidencePayload(incidentID int64) ([]byte, error) {
 }
 
 // IsTerminal 报告任务是否已到终态（不再会被领取）。
-func (t Task) IsTerminal() bool {
+func (t *Task) IsTerminal() bool {
 	return t.Status == StatusDone || t.Status == StatusDead
 }
 
@@ -168,15 +168,18 @@ type Store interface {
 //
 // 纯函数：这是最容易写错的算术，且它决定一个坏任务多久才被重试一次，
 // 单元测试比集成测试更容易钉死边界（尤其 attempts=0 与超大attempts）。
-func BackoffDelay(attempts int, base, max time.Duration) time.Duration {
+//
+// 参数名用 ceiling 而非 max：max 是 Go 1.21 起的**内建函数**，
+// 遮蔽它会让本包内任何想用内建 max 的代码编译失败，属埋雷。
+func BackoffDelay(attempts int, base, ceiling time.Duration) time.Duration {
 	if attempts < 1 {
 		attempts = 1
 	}
 	if base <= 0 {
 		base = BackoffBase
 	}
-	if max <= 0 {
-		max = BackoffMax
+	if ceiling <= 0 {
+		ceiling = BackoffMax
 	}
 
 	d := base
@@ -185,12 +188,12 @@ func BackoffDelay(attempts int, base, max time.Duration) time.Duration {
 		// 提前到顶比逐次翻倍再截断更省事，且避免整数溢出：
 		// attempts 很大时 2^60 的 time.Duration 会溢出成负数，
 		// 让 available_at 落到过去 —— 那样任务会被立刻反复领取。
-		if d >= max {
-			return max
+		if d >= ceiling {
+			return ceiling
 		}
 	}
-	if d > max {
-		return max
+	if d > ceiling {
+		return ceiling
 	}
 	return d
 }
