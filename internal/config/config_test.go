@@ -317,15 +317,39 @@ func TestK8sCollectorRequiresURL(t *testing.T) {
 	}
 
 	c.K8sURL = "https://k8s:6443"
+	c.K8sNamespace = ""
+	if err := c.Validate(); err == nil {
+		t.Error("给了地址但未给命名空间，应报错（K8s 权限按命名空间授权）")
+	}
+
+	c.K8sNamespace = "prod"
 	if err := c.Validate(); err != nil {
-		t.Errorf("显式启用且给了地址，应通过: %v", err)
+		t.Errorf("显式启用且地址与命名空间齐备，应通过: %v", err)
+	}
+}
+
+// TestK8sDefaultOffDoesNotRequireNamespace 钉住偏差 B1 的「默认关闭」语义：
+// 默认部署（K8s 未开启）不该被要求配任何 K8s 项。
+//
+// 这条与 TestK8sCollectorRequiresURL 是**一对**：只写后者的话，
+// 有人把默认值误改成 true 也会全绿，而那会让默认部署直接起不来。
+func TestK8sDefaultOffDoesNotRequireNamespace(t *testing.T) {
+	c := m4Valid()
+	c.EvidenceK8sEnabled = DefaultEvidenceK8sEnabled
+	c.K8sURL = ""
+	c.K8sNamespace = ""
+	if c.EvidenceK8sEnabled {
+		t.Fatal("前提失效：K8s 采集器默认值应为 false（B1 偏差）")
+	}
+	if err := c.Validate(); err != nil {
+		t.Errorf("K8s 默认关闭时不应要求任何 K8s 配置项: %v", err)
 	}
 }
 
 // TestExplicitPromEnabledRequiresURL 覆盖 §4.6 的 2026-10-03 修订：
 // 只有**显式**配置开关时才要求地址；未配置开关时走默认 true 但不强制地址。
 //
-// 这条是默认部署能起��的关键 —— compose 里没有 Prometheus/Loki，
+// 这条是默认部署能起来的关键 —— compose 里没有 Prometheus/Loki，
 // 若无条件要求地址，服务启动即失败。
 func TestExplicitPromEnabledRequiresURL(t *testing.T) {
 	// 未显式配置开关（explicit 为 false）+ 无地址 → 通过。

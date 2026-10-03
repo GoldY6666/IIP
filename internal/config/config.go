@@ -82,6 +82,13 @@ type Config struct {
 	LokiURL string // IIP_LOKI_URL
 	// K8sURL 是 K8s API Server 根地址（仅在 EvidenceK8sEnabled 时必填）。
 	K8sURL string // IIP_K8S_URL
+	// K8sNamespace 是 K8s 采集器要查的命名空间（仅在 EvidenceK8sEnabled 时必填）。
+	//
+	// 刻意**不支持**一次查多个命名空间或留空代表全集群：K8s 的
+	// events / deployments 权限按命名空间授权，跨命名空间会稳定 403，
+	// 而 403 与「命名空间不存在」的 404 在排查时几乎无法区分。
+	// 要求用户明确给出，反而能第一时间暴露「权限没给对命名空间」。
+	K8sNamespace string // IIP_K8S_NAMESPACE
 	// EvidenceTimeout 是单个采集器的超时上限（手册 §4.5：三类均为 5s）。
 	EvidenceTimeout time.Duration // IIP_EVIDENCE_TIMEOUT，默认 5s
 
@@ -153,6 +160,7 @@ func Load(args []string) (*Config, error) {
 	fs.String("prom-url", "", "Prometheus 查询端点根地址（启用该采集器时必填）")
 	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
 	fs.String("k8s-url", "", "K8s API Server 根地址（启用该采集器时必填）")
+	fs.String("k8s-namespace", "", "K8s 采集器要查询的命名空间（启用该采集器时必填）")
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -212,6 +220,8 @@ func Load(args []string) (*Config, error) {
 		PromURL: k.String("prom-url"),
 		LokiURL: k.String("loki-url"),
 		K8sURL:  k.String("k8s-url"),
+		// koanf 的 key 映射靠结构体 tag，k8s-namespace → K8sNamespace。
+		K8sNamespace: k.String("k8s-namespace"),
 	}
 
 	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
@@ -312,10 +322,20 @@ func (c *Config) validateM4() error {
 	if c.evidenceLokiExplicit && c.EvidenceLokiEnabled && strings.TrimSpace(c.LokiURL) == "" {
 		return fmt.Errorf("已显式启用 Loki 采集器但未提供 %sLOKI_URL", envPrefix)
 	}
-	if c.EvidenceK8sEnabled && strings.TrimSpace(c.K8sURL) == "" {
+	if c.EvidenceK8sEnabled {
 		// K8s 不设「显式才校验」：它默认就是 false，一旦有人打开就必然是有意为之，
 		// 此时缺地址一定是漏配，必须拦下。
-		return fmt.Errorf("已启用 K8s 采集器但未提供 %sK8S_URL", envPrefix)
+		// 也不像 Prom/Loki 那样「缺了就跳过注册」——手册 §4.6 的 B6 修订写明了理由：
+		// 开关是用户接集群的意图，跳过注册会让它变成死配置（开关已开、地址已填、
+		// 日志显示已启用，但采到的证据恒为 0 条且无任何报错）。
+		if strings.TrimSpace(c.K8sURL) == "" {
+			return fmt.Errorf("已启用 K8s 采集器但未提供 %sK8S_URL", envPrefix)
+		}
+		if strings.TrimSpace(c.K8sNamespace) == "" {
+			return fmt.Errorf("已启用 K8s 采集器但未提供 %sK8S_NAMESPACE"+
+				"（K8s 权限按命名空间授权，留空会导致稳定 403，且与「命名空间不存在」"+
+				"的 404 难以区分）", envPrefix)
+		}
 	}
 	return nil
 }

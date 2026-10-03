@@ -125,9 +125,19 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 	if !cfg.EvidenceK8sEnabled {
 		logger.Info("k8s 采集器已禁用（M4 不接真实集群，见手册偏差 B1）",
 			slog.String("env", "IIP_EVIDENCE_K8S_ENABLED"))
-	} else if strings.TrimSpace(cfg.K8sURL) == "" {
-		logger.Info("k8s 采集器已启用但未配置地址，已跳过注册",
-			slog.String("env", "IIP_K8S_URL"))
+	} else {
+		// 走到这里说明 config.Validate 已放行，URL 与 namespace 必非空。
+		// 这里**必须真的注册**：开关是用户接集群的意图，
+		// 若只打日志不注册，就成了死配置 —— 开关已开、地址已填、
+		// 日志显示「已启用」，但采到的证据恒为 0 条且全程无报错。
+		// 与 Prom/Loki 的「未配地址则跳过」是有意的不对称：
+		// 那两个默认就是 true（不配属常态），K8s 默认 false（开了必是有意）。
+		reg.MustRegister(collectors.NewK8sCollector(
+			cfg.K8sURL, cfg.K8sNamespace,
+			collectors.WithTimeout(cfg.EvidenceTimeout),
+			collectors.WithTopN(cfg.EvidenceMaxPerIncident)))
+		logger.Info("k8s 采集器已注册（接的是用户自带集群，本仓库不提供）",
+			slog.String("namespace", cfg.K8sNamespace))
 	}
 
 	// 正向日志：只有「至少注册了一个」才打。
