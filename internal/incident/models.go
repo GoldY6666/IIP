@@ -11,25 +11,32 @@ import (
 //
 // 名字叫 Snapshot 而不是 Incident：这是**某个时刻**的取值，一旦离开事务就可能过期；
 // 叫 Incident 会让人误以为可以拿它去写库。
+// 本包的领域结构体**直接映射为 HTTP 响应体**（列表行、详情内联、复核结果），
+// 因此每个字段都必须带 json tag，命名统一 snake_case —— 与 internal/alert 的
+// StoredAlert 一致（M1 起就是这个惯例）。
+//
+// 2026-10-03 端到端冒烟抓到这批 tag 曾全部缺失：单测用同一套结构体做
+// json round-trip，tag 错了也能自洽，测不出来；只有真实进程吐出的字节流会暴露。
+// 已在 incidents_test.go 补 TestResponseBodyUsesSnakeCase 防复发。
 type Snapshot struct {
-	ID         int64
-	Title      string
-	Severity   string
-	Status     Status
-	Service    string
-	StartedAt  time.Time
-	ResolvedAt *time.Time // nil 表示未解决
-	UpdatedAt  time.Time
+	ID         int64      `json:"id"`
+	Title      string     `json:"title"`
+	Severity   string     `json:"severity"`
+	Status     Status     `json:"status"`
+	Service    string     `json:"service"`
+	StartedAt  time.Time  `json:"started_at"`
+	ResolvedAt *time.Time `json:"resolved_at"` // nil 表示未解决
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 // Entry 是一条时间线留痕。Metadata 承载结构化细节（状态流转固定带 from / to）。
 type Entry struct {
-	IncidentID  int64
-	EventType   EventType
-	Description string
-	Actor       string            // 为空表示系统自动写入（落库为 NULL）
-	Metadata    map[string]string // 为空时落库为 '{}'
-	Timestamp   time.Time
+	IncidentID  int64             `json:"incident_id"`
+	EventType   EventType         `json:"event_type"`
+	Description string            `json:"description"`
+	Actor       string            `json:"actor"` // 为空表示系统自动写入（落库为 NULL）
+	Metadata    map[string]string `json:"metadata"`
+	Timestamp   time.Time         `json:"timestamp"`
 }
 
 // Summary 是列表页一行的形状。
@@ -37,16 +44,16 @@ type Entry struct {
 // 比 Snapshot 多了两个**聚合**字段：关联告警数与待确认数。它们都在关联边上
 // （手册 §4.4：incidents 表没有这两列，也没有「待确认计数」），只能 JOIN 聚合出来。
 type Summary struct {
-	ID               int64
-	Title            string
-	Severity         string
-	Status           Status
-	Service          string
-	StartedAt        time.Time
-	ResolvedAt       *time.Time
-	UpdatedAt        time.Time
-	AlertCount       int
-	NeedsReviewCount int
+	ID               int64      `json:"id"`
+	Title            string     `json:"title"`
+	Severity         string     `json:"severity"`
+	Status           Status     `json:"status"`
+	Service          string     `json:"service"`
+	StartedAt        time.Time  `json:"started_at"`
+	ResolvedAt       *time.Time `json:"resolved_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	AlertCount       int        `json:"alert_count"`
+	NeedsReviewCount int        `json:"needs_review_count"`
 }
 
 // ListFilter 是列表的过滤与分页条件。
@@ -198,9 +205,10 @@ type Store interface {
 // ReviewEdge 是待人工确认队列里的一条：哪条告警被关联到了哪个事件。
 //
 // 用 AlertLink 承载告警侧字段，避免再定义一套几乎相同的结构。
+// 直接作为 GET /api/v1/reviews 的 reviews 数组元素序列化，故两个字段都带 tag。
 type ReviewEdge struct {
-	IncidentID int64
-	Alert      AlertLink
+	IncidentID int64     `json:"incident_id"`
+	Alert      AlertLink `json:"alert"`
 }
 
 // ErrReviewEdgeNotFound 表示这条待确认边不存在或已被处理过（API 层映射为 404）。
@@ -214,17 +222,17 @@ var ErrInvalidReviewDecision = errors.New("复核动作必须是 confirm 或 rej
 
 // AlertLink 是详情页一条关联告警（手册 §4.4）。
 //
-// Score 为 nil 表示该告警是 NEW 档（无关联对象），前端应显示「—」而不是 0。
+// CorrelationScore 为 nil 表示 NEW 档（该告警是事件的起因），前端显示「—」而不是 0。
 type AlertLink struct {
-	AlertID          int64
-	Fingerprint      string
-	Severity         string
-	Labels           map[string]string
-	StartsAt         time.Time
-	EndsAt           *time.Time
-	CorrelationScore *float64
-	NeedsReview      bool
-	CorrelatedAt     time.Time
+	AlertID          int64             `json:"alert_id"`
+	Fingerprint      string            `json:"fingerprint"`
+	Severity         string            `json:"severity"`
+	Labels           map[string]string `json:"labels"`
+	StartsAt         time.Time         `json:"starts_at"`
+	EndsAt           *time.Time        `json:"ends_at"`
+	CorrelationScore *float64          `json:"correlation_score"`
+	NeedsReview      bool              `json:"needs_review"`
+	CorrelatedAt     time.Time         `json:"correlated_at"`
 }
 
 // UpdateStatusArg 是 UpdateStatus 的入参。

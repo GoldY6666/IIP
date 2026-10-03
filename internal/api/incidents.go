@@ -75,7 +75,11 @@ type transitionRequest struct {
 }
 
 type transitionResponse struct {
-	Incident incident.Summary `json:"incident"`
+	// 用 Snapshot 而不是 Summary：Summary 多了 AlertCount / NeedsReviewCount
+	// 两个 JOIN 聚合列，而流转路径不做 JOIN，填 0 会被前端渲染成
+	//「0 条关联告警」——把「不知道」说成了「没有」。Snapshot 的字段
+	// 恰好就是这次能确定给出的全部。
+	Incident incident.Snapshot `json:"incident"`
 }
 
 type commentRequest struct {
@@ -179,18 +183,7 @@ func IncidentTransition(svc IncidentTransitioner, logger *slog.Logger) http.Hand
 		logger.Info("事件状态已流转",
 			slog.Int64("incident_id", id),
 			slog.String("to", string(to)))
-		writeJSON(w, logger, http.StatusOK, transitionResponse{
-			Incident: incident.Summary{
-				ID:         snap.ID,
-				Title:      snap.Title,
-				Severity:   snap.Severity,
-				Status:     snap.Status,
-				Service:    snap.Service,
-				StartedAt:  snap.StartedAt,
-				ResolvedAt: snap.ResolvedAt,
-				UpdatedAt:  snap.UpdatedAt,
-			},
-		})
+		writeJSON(w, logger, http.StatusOK, transitionResponse{Incident: snap})
 	}
 }
 

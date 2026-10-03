@@ -30,12 +30,14 @@ func ParseReviewDecision(raw string) (ReviewDecision, error) {
 //
 // Suppressed / Unlinked 只在 reject 时有意义，回传给调用方是为了让日志与响应
 // 能说清「这次拒绝到底动了什么」——否则排查时只能去翻数据库。
+//
+// 直接作为 POST /reviews/{i}/{a} 的响应体序列化，故带 json tag（snake_case）。
 type ReviewResult struct {
-	Decision   ReviewDecision
-	IncidentID int64
-	AlertID    int64
-	Suppressed bool // 是否写入了抑制行（reject 时为真）
-	Unlinked   bool // 是否把该告警从事件中解除（reject 且它已无其他关联边）
+	Decision   ReviewDecision `json:"decision"`
+	IncidentID int64          `json:"incident_id"`
+	AlertID    int64          `json:"alert_id"`
+	Suppressed bool           `json:"suppressed"` // 是否写入了抑制行（reject 时为真）
+	Unlinked   bool           `json:"unlinked"`   // 是否把该告警从事件中解除（reject 且它已无其他关联边）
 }
 
 // ReviewListResult 是待确认队列的一页（与列表同样用 limit+1 探测）。
