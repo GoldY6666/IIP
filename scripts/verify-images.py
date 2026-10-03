@@ -135,14 +135,27 @@ def port_in_use(port: int) -> bool:
 
     注意：这是「能否连上」的探测，用于确认待用端口是否被占用。
     早先这个函数名叫 port_free 但语义相反，容易误读，已改名。
+
+    **超时必须算「未占用」**（2026-10-03 修）：Windows 防火墙会对本机某些
+    端口的 SYN 静默丢包，connect() 抛 TimeoutError 而非 ConnectionRefused。
+    原实现只 except OSError 就一律判「占用」，于是 8080 因一次
+    `netstat` 里只见到 TIME_WAIT 残留（无 LISTEN）却被判为占用，
+    整个容器链路 BLOCKED。丢包说明**没有任何进程在那个端口上**——
+    真有服务在监听时 connect 一定成功（回 RST 或握手完成）。
     """
     sk = socket.socket()
     sk.settimeout(1.0)
     try:
         sk.connect(("127.0.0.1", port))
         return True
-    except OSError:
+    except (ConnectionRefusedError, socket.timeout, TimeoutError):
+        # 连不上 / 超时 = 没人监听。ConnectionRefused 是「明确无人」，
+        # 超时是「被丢包」，两者对「能否 bind」而言答案相同：可以 bind。
         return False
+    except OSError:
+        # 其余 OSError（权限、地址族不匹配等）保守判为占用 ——
+        # 宁可误报阻塞，也不要在判断错误时把容器拉起来撞端口。
+        return True
     finally:
         sk.close()
 
