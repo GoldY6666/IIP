@@ -11,8 +11,31 @@ import (
 )
 
 type Querier interface {
+	// 领取一批可执行任务：FOR UPDATE SKIP LOCKED。
+	//
+	// SKIP LOCKED 是本查询的核心：没有它，两个 worker 并发领取时第二个会
+	// 阻塞在第一个的事务上（而不是各拿各的），任务吞吐会退化成串行；
+	// 更糟的是若第一个 worker 崩溃持锁，第二个会一直等到超时。
+	//
+	// ORDER BY available_at 保证退避中的任务按「到期先后」被领，
+	// 不加排序会让长尾任务被无限期饿死。
+	//
+	// attempts 在**领取时就 +1**（而不是失败时）。理由：worker 领完就崩溃的情况
+	// 同样消耗了一次机会，把它记在失败上会漏计；而 attempts 同时被
+	// 「超时回收」复用（回收时也 +1），这样任何一次「被领走但没成功」
+	// 都会推进 attempts，最终能进死信而不是无限重试。
+	//
+	// COALESCE(claimed_by, '') 用于让 RETURNING 的列类型确定为非空，
+	// 避免 sqlc 因两处类型不一致生成不出结构体。
+	ClaimTasks(ctx context.Context, arg ClaimTasksParams) ([]Task, error)
 	// 把告警的 incident_id 置 NULL（该告警已不属于任何事件）。
 	ClearAlertIncident(ctx context.Context, alertID int64) (int64, error)
+	// 任务成功：置 done，并清掉 claimed_by。
+	//
+	// 返回受影响行数（:execrows）让调用方能判断「这行是否还存在」——
+	// 若任务已被超时回收并被别人领走，本 UPDATE 会命中 0 行，
+	// 此时本次执行的结果不该被当作权威（可能有另一个 worker 也在做同一件事）。
+	CompleteTask(ctx context.Context, id int64) (int64, error)
 	// 确认合并：清掉待确认标记，**保留**关联边（确认的含义是「这条关联是对的」）。
 	ConfirmReviewEdge(ctx context.Context, arg ConfirmReviewEdgeParams) (int64, error)
 	// 拒绝后判断该告警是否还有别的归属：没有才把 alerts.incident_id 回写为 NULL。
@@ -28,6 +51,8 @@ type Querier interface {
 	// 该事件下仍待确认的关联边总数。同 CountIncidentAlertsByIncident 的理由：
 	// 截断后切片里的 needs_review 统计会漏掉被截掉的部分。
 	CountNeedsReviewAlertsByIncident(ctx context.Context, incidentID int64) (int64, error)
+	// 按状态计数，供 worker 心跳与端到端断言使用。
+	CountTasksByStatus(ctx context.Context) (CountTasksByStatusRow, error)
 	// M2 关联引擎：Incident 创建、候选集查询、关联写入。
 	// 规格依据：docs/IIP-M2详细开发手册.md §4.3 / §4.7。
 	// NEW 档：为一条无法与既有 Incident 关联的 firing 告警新建 Incident。
@@ -35,6 +60,40 @@ type Querier interface {
 	CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error)
 	// 拒绝合并：删除该关联边。
 	DeleteIncidentAlert(ctx context.Context, arg DeleteIncidentAlertParams) (int64, error)
+	// ============================================================================
+	// IIP M4 · tasks 表查询（任务队列）
+	// 规格来源：docs/IIP-M4详细开发手册.md §4.1
+	//
+	// 队列语义见手册 §4.1 的五点设计。要点复述（因为 SQL 本身不解释「为什么」）：
+	//   * 领取用 SKIP LOCKED —— 多 worker 并行时各自取到不重叠的行，互不阻塞。
+	//   * 退避用 available_at（可见性）而非 sleep —— 进程重启不丢退避状态。
+	//   * 死信保留行（status='dead'），不删 —— 删掉就看不出「曾经试过」。
+	//   * in_flight 超时可回收（ReclaimStaleTasks）—— worker 崩溃不会让任务永久卡住。
+	// ============================================================================
+	// 入队一个任务。幂等由调用方保证（payload 里的 incident_id + 「未采集过」判定）。
+	EnqueueTask(ctx context.Context, arg EnqueueTaskParams) (Task, error)
+	// 条件入队：仅当该事件没有「未完成」的采集任务时才插入。
+	//
+	// 用 INSERT ... SELECT ... WHERE NOT EXISTS 而非「先查再插」：
+	// 后者在两个 worker 同时判定时会插出两条重复任务，而这个重复
+	// 会表现为「同一事件被采集两次，证据翻倍」。
+	//
+	// NOT EXISTS 的判定范围刻意包含 in_flight —— 已领取但未完成的也算，
+	// 否则重试逻辑可能在采集进行中又插一条。
+	EnqueueTaskIfAbsent(ctx context.Context, arg EnqueueTaskIfAbsentParams) (Task, error)
+	// 任务失败：重试或进死信。
+	//
+	// 用 SQL 表达式而不是在 Go 里算延迟，原因有二：
+	//   1) available_at 用数据库的 NOW() 计算，与「是否可见」的判断同一时钟源；
+	//      若在 Go 侧算，两边时钟不一致会让任务刚退避完就立刻可领（退避形同虚设）
+	//      或迟迟不可领。
+	//   2) 「是否进死信」需要同时看 attempts 与 max_attempts，二者在同一条 UPDATE
+	//      的 WHERE/表达式里判定，不会出现「读到 attempts=2 时另一个 worker 已改成 3」
+	//      的竞态。
+	//
+	// delay_seconds 由调用方按指数退避算好（手册 §4.1 决策 3：base * 2^(n-1)，封顶 5 分钟）。
+	// 封顶在 Go 侧做而非 SQL，因为「封顶值」是业务决策、不该散落到 SQL 里。
+	FailTask(ctx context.Context, arg FailTaskParams) (Task, error)
 	// 历史相似度的数据源：统计两个 fingerprint 在「同一 Incident」中的共现比例。
 	//   co    = 同时包含两者的 Incident 数
 	//   total = 包含任一者的 Incident 数（并集）
@@ -151,6 +210,18 @@ type Querier interface {
 	// 在翻页时顺序漂移（只按 timestamp 排序时，同秒事件的前后关系是未定义的）。
 	// row_limit 由调用方传入（默认 200），不写死在 SQL 里。
 	ListTimelineByIncident(ctx context.Context, arg ListTimelineByIncidentParams) ([]Timeline, error)
+	// 回收超时的 in_flight 任务：worker 领走任务后崩溃，行会永远停在 in_flight。
+	//
+	// 这里把它们**置回 pending**（而不是直接删）：任务本身没做错，重新排队即可。
+	// attempts 不在此处 +1 —— ClaimTasks 已经在领取时 +1 了；此处再 +1 会让
+	// 「领取即计数」与「回收即计数」混在一处，无法从表上判断真实尝试次数。
+	//
+	// available_at 设为 NOW()：超时的任务没有退避理由（不是它失败，
+	// 是持有它的进程没了），立即可领。
+	//
+	// last_error 写明是被回收而非业务失败 —— 否则日志里会出现
+	// 「任务失败原因：持有者超时回收」这种自相矛盾的记录。
+	ReclaimStaleTasks(ctx context.Context, staleSeconds float64) (int64, error)
 	// M1 的 resolved 生命周期：**更新既有行**，而不是插新行（见手册 §4.4）。
 	// Alertmanager 的 send_resolved: true 会把同一指纹再推一次，status=resolved。
 	//

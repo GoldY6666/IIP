@@ -20,6 +20,7 @@ sql:
       - "migrations/0002_alerts_fingerprint_firing_uq.up.sql"
       - "migrations/0003_correlation_m2.up.sql"
       - "migrations/0004_incident_lifecycle_m3.up.sql"
+      - "migrations/0005_evidence_tasks_m4.up.sql"
     queries:
       - "internal/db/queries/"
     gen:

@@ -91,6 +91,20 @@ type ReviewSuppression struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type Task struct {
+	ID          int64              `json:"id"`
+	Kind        string             `json:"kind"`
+	Payload     json.RawMessage    `json:"payload"`
+	Status      string             `json:"status"`
+	Attempts    int32              `json:"attempts"`
+	AvailableAt pgtype.Timestamptz `json:"available_at"`
+	ClaimedAt   pgtype.Timestamptz `json:"claimed_at"`
+	ClaimedBy   pgtype.Text        `json:"claimed_by"`
+	LastError   pgtype.Text        `json:"last_error"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Timeline struct {
 	ID          int64              `json:"id"`
 	IncidentID  int64              `json:"incident_id"`
