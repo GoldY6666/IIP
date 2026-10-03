@@ -188,6 +188,477 @@ def rev_alert_name(alert_id):
     return q("SELECT labels->>'alertname' FROM alerts WHERE id = %s" % alert_id)
 
 
+# ================================================================
+# M4：证据采集闭环
+#
+# 验的是**从未在真实进程里跑过**的那条链：
+#   告警落库 -> 关联建事件 -> 入队 -> worker 领取 -> 采集器发真实 HTTP
+#   -> 证据落库 -> 写 timeline -> 任务置 done -> API 读回
+#
+# 采集器用**进程内假 HTTP 服务**（不是 Go 单测里的 httptest）：
+# 端到端验的就是「worker 拿着配置里的 URL 真的发出去请求」，
+# 用 httptest 就等于把要验的东西替换掉了。
+# ================================================================
+
+EXE_WORKER = os.path.join(tempfile.gettempdir(), "_func_iip-worker.exe")
+PORT_PROM = int(os.environ.get("IIP_FUNC_PROM_PORT", "9099"))
+PORT_LOKI = int(os.environ.get("IIP_FUNC_LOKI_PORT", "3100"))
+# worker 轮询间隔压到 1s：门禁要的是「2 分钟内 ≥5 条证据」，
+# 用默认 30s 会让这一段白等 30 秒才跑第一轮。
+WORKER_POLL = "1s"
+
+
+class _MockDown(Exception):
+    """假采集器被置为宕机态时由 handler 抛出，触发 503 响应。"""
+
+
+class _MockCollector(object):
+    """可控的假采集器。
+
+    **用 503 而不是真的关掉端口**：真实事故里 Prometheus 挂掉通常是
+    进程还在、查询返回 5xx 或超时；直接关端口会让 worker 拿到
+    connection refused，走的是另一条错误分支。保持端口活着才能
+    验到「数据源故障」这条真实路径。
+    """
+
+    def __init__(self, name, handler):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.name = name
+        self.handler = handler
+        self.down = False
+        self.hits = 0
+
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler 规定名
+                outer.hits += 1
+                if outer.down:
+                    raw = b'{"status":"error","error":"mock down"}'
+                    self.send_response(503)
+                else:
+                    try:
+                        raw = json.dumps(outer.handler(self.path)).encode("utf-8")
+                    except Exception as e:  # handler 自身出错也要有响应
+                        raw = json.dumps({"status": "error",
+                                          "error": str(e)}).encode("utf-8")
+                        self.send_response(500)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
+                    self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *_a):
+                pass  # 静默：采集器每轮打多次请求，不静音会淹没报告
+
+        self._srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self._srv.server_address[1]
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
+        w("  假 %s 已起：127.0.0.1:%d" % (name, self.port))
+
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d" % self.port
+
+    def stop(self):
+        try:
+            self._srv.shutdown()
+        except Exception:
+            pass
+
+
+def _prom_handler(path):
+    """Prometheus /api/v1/query 的响应。
+
+    值随「查询时刻」变化，好让 worker 的**基线对比**有东西可比。
+    判据：查询时刻早于事故起点算基线窗口（返回 1），否则算事故窗口（返回 10）。
+
+    用 calendar.timegm 而不是 time.mktime：FIXED_START 带 Z（UTC），
+    而 mktime 把 struct_time 当**本地时间**解释 —— 本机在 UTC+8 时
+    锚点会偏 8 小时，基线窗口也被判成事故窗口，对比就恒为 1.0 倍，
+    断言「有变化幅度」会假失败。
+    """
+    import calendar
+    import urllib.parse as up
+    qs = up.parse_qs(up.urlparse(path).query)
+    try:
+        ts = int((qs.get("time") or ["0"])[0])
+    except ValueError:
+        ts = 0
+    anchor = calendar.timegm(time.strptime(FIXED_START, "%Y-%m-%dT%H:%M:%SZ"))
+    val = "1" if ts < anchor else "10"
+    return {"status": "success",
+            "data": {"resultType": "vector",
+                     "result": [{"metric": {}, "value": [ts, val]}]}}
+
+
+def _loki_handler(path):
+    """Loki /loki/api/v1/query_range 的响应。
+
+    返回两条同类错误（行内数字不同）—— 验证**归一化聚合**：
+    两条若不被归一化成同一模式，Top1 就会是「各 1 条」而突增倍数也不对。
+    """
+    import urllib.parse as up
+    qs = up.parse_qs(up.urlparse(path).query)
+    try:
+        start_ns = int((qs.get("start") or ["0"])[0])
+    except ValueError:
+        start_ns = 0
+    # 纳秒 -> 秒，落在查询区间内（§4.4：证据时间必须来自日志自身）。
+    t0 = start_ns // 1000000000
+    if t0 <= 0:
+        t0 = int(time.time())
+    return {"status": "success",
+            "data": {"resultType": "streams",
+                     "result": [{
+                         "stream": {"service": "checkout"},
+                         "values": [
+                             ["%d000000000" % (t0 + 60), "db timeout after 5000ms"],
+                             ["%d000000000" % (t0 + 120), "db timeout after 7000ms"],
+                         ]}]}}
+
+
+def _time_webhook(tag, service):
+    """投一条告警并返回 webhook 往返耗时（毫秒）。
+
+    `tag` 必须**每轮唯一**：指纹 = 除 instance/pod/container/node 外的全部
+    label，alertname + service 相同就是同一指纹，而「仍在 firing」的行
+    已在库时会**被去重 skip** —— 那样测到的是 skip 分支的耗时，
+    不是完整的「落库 + 关联 + 入队」路径。判据 #3 会被这种假通过架空。
+
+    采集完全不在这条路径上（采集在 worker 进程里），
+    所以这个数字就是「告警接入链路自身的延迟」，数据源宕机时它不该变。
+    """
+    t0 = time.time()
+    st, body = post_alert(tag, service)
+    ms = int((time.time() - t0) * 1000)
+    # 必须确认真的走完了全链路：accepted=0 说明被去重了，这个样本作废。
+    ok = isinstance(body, dict) and body.get("accepted") == 1
+    w("  [%s] 投递 %s 耗时 %d ms（accepted=%s）"
+      % ("ok" if ok else "!!", tag, ms,
+         body.get("accepted") if isinstance(body, dict) else body))
+    return ms, ok
+
+
+def _q1(sql):
+    """取单值查询结果（q 的别名，语义上强调「拿来打日志/断言的小值」）。"""
+    return q(sql)
+
+
+def _wait_tasks_settled(timeout_s):
+    """等所有任务离开 pending/in_flight。返回是否在超时前settle。"""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if q("SELECT count(*) FROM tasks "
+             "WHERE status IN ('pending','in_flight')") == "0":
+            return True
+        time.sleep(1.0)
+    return False
+
+
+def _wait_attempts(task_id, want, timeout_s):
+    """等某任务的 attempts 涨到 want 以上。返回是否达到。"""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        v = _q1("SELECT attempts FROM tasks WHERE id = %s" % task_id)
+        if v.isdigit() and int(v) >= want:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _wait_task_done(task_id, timeout_s):
+    """等某任务变 done（或 dead）。返回 (是否 done, 最终 status)。"""
+    deadline = time.time() + timeout_s
+    st = ""
+    while time.time() < deadline:
+        st = _q1("SELECT status FROM tasks WHERE id = %s" % task_id)
+        if st in ("done", "dead"):
+            return st == "done", st
+        time.sleep(1.0)
+    return False, st
+
+
+def m4_section(inc):
+    """M4 端到端。返回 0 继续，非 0 表示脚本应中止。"""
+    section("F5b M4 证据采集闭环（真实 worker + 真实 HTTP 采集）")
+
+    prom_stop = loki_stop = None
+    wrk = None
+    wrk_log = None
+    wrk_log_path = os.path.splitext(OUT)[0] + "_worker.log"
+    prom = loki = None
+    try:
+        prom = _MockCollector("Prometheus", _prom_handler)
+        loki = _MockCollector("Loki", _loki_handler)
+        prom_url, loki_url = prom.url, loki.url
+
+        # --- 编译 worker ---
+        t0 = time.time()
+        b = subprocess.run(["go", "build", "-o", EXE_WORKER, "./cmd/iip-worker"],
+                           cwd=REPO, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=600)
+        w("  go build iip-worker rc=%d (%.1fs) %s"
+          % (b.returncode, time.time() - t0, (b.stderr or "")[:300]))
+        if b.returncode != 0:
+            return 20
+
+        # --- 起 worker ---
+        try:
+            wrk_log = open(wrk_log_path, "wb")
+            wrk_out = wrk_log
+        except OSError:
+            wrk_log = None
+            wrk_out = subprocess.DEVNULL
+        wrk = subprocess.Popen(
+            [EXE_WORKER,
+             "--pg-url=" + DSN,
+             "--worker-poll=" + WORKER_POLL,
+             "--prom-url=" + prom_url,
+             "--loki-url=" + loki_url,
+             "--log-level=info"],
+            cwd=REPO, stdout=wrk_out, stderr=subprocess.STDOUT)
+
+        # --- 等任务被处理完 ---
+        # 不按固定 sleep 判成功：轮询「证据条数」直到达标或超时，
+        # 固定 sleep 在慢机器上会假失败、快机器上白等。
+        deadline = time.time() + 90
+        n_ev = "0"
+        while time.time() < deadline:
+            n_ev = q("SELECT count(*) FROM evidence WHERE incident_id = %s" % inc)
+            if n_ev.isdigit() and int(n_ev) >= 5:
+                break
+            if wrk.poll() is not None:
+                w("  worker 提前退出 rc=%s" % wrk.poll())
+                break
+            time.sleep(1.0)
+        w("  证据条数=%s（阈值 ≥5）" % n_ev)
+        check("M4 验收标准：2 分钟内该事件证据 ≥5 条",
+              n_ev.isdigit() and int(n_ev) >= 5, "count=%s" % n_ev)
+
+        # --- 任务终态 ---
+        st_tasks = q("SELECT status FROM tasks WHERE kind='collect_evidence' "
+                     "ORDER BY id DESC LIMIT 1")
+        check("采集任务已置 done（不是死信）", st_tasks == "done",
+              "status=%s" % st_tasks)
+        n_dead = q("SELECT count(*) FROM tasks WHERE status='dead'")
+        check("无死信任务（采集器可达就不该重试到死）", n_dead == "0",
+              "dead=%s" % n_dead)
+
+        # --- 游标已回填 ---
+        cur = q("SELECT coalesce(to_char(window_end, 'YYYY-MM-DD HH24:MI:SS'), 'NULL') "
+                "FROM tasks WHERE kind='collect_evidence' ORDER BY id DESC LIMIT 1")
+        check("游标 window_end 已回填（增量采集的前提）", cur not in ("NULL", "ERR", ""),
+              "window_end=%s" % cur)
+
+        # --- API 读回 ---
+        st, ev = req("GET", "/api/v1/incidents/%d/evidence" % inc)
+        check("证据 API 200", st == 200, "status=%s" % st)
+        if isinstance(ev, dict):
+            items = ev.get("evidence", [])
+            check("API 返回的条数与库内一致（不截断到 50 以下）",
+                  len(items) == int(n_ev or -1),
+                  "api=%d db=%s" % (len(items), n_ev))
+            # 键名契约：解成 dict 比，与结构体定义解耦，
+            # 否则漏写 json tag 时读写都自洽、测试永远绿。
+            need = {"id", "type", "source", "query", "value", "metadata", "timestamp"}
+            check("每条证据含契约要求的全部键名",
+                  all(need <= set(i.keys()) for i in items) if items else False,
+                  "keys=%s" % (sorted(items[0].keys()) if items else []))
+            check("by_type 覆盖全部 6 种类型（未采集的类型也应为 0）",
+                  isinstance(ev.get("by_type"), dict)
+                  and len(ev["by_type"]) == 6,
+                  "by_type=%s" % (ev.get("by_type") if isinstance(ev, dict) else None))
+            check("truncated=false（未超 50 条预算）",
+                  ev.get("truncated") is False, "truncated=%s" % ev.get("truncated"))
+            check("total 与 count 一致",
+                  ev.get("total") == len(items),
+                  "total=%s count=%d" % (ev.get("total"), len(items)))
+            # 采集器来源必须都能区分，否则页面无法按来源过滤
+            srcs = sorted(set(i.get("source") for i in items))
+            check("证据来源含 prometheus 与 loki 两个采集器",
+                  "prometheus" in srcs and "loki" in srcs, "sources=%s" % srcs)
+            # 事故窗口 vs 基线窗口的对比幅度（RED 采集器的核心产出）
+            metrics = [i for i in items if i.get("type") == "metric"]
+            check("含 metric 类证据（RED 指标）", len(metrics) >= 1,
+                  "metric=%d" % len(metrics))
+            if metrics:
+                md = metrics[0].get("metadata") or {}
+                # 键名以实现为准（value_before / value_after），
+                # 断言的是「有前后两个值 + 有变化幅度」这个语义，
+                # 而不是某个具体键名 —— 改键名时这条不该跟着红。
+                check("metric 证据带前后两个值（窗口对比而非单点取值）",
+                      "value_before" in md and "value_after" in md,
+                      "metadata keys=%s" % sorted(md.keys()))
+                check("metric 证据算出变化幅度（RED 采集器的核心产出）",
+                      "change_ratio" in md, "metadata keys=%s" % sorted(md.keys()))
+            logs = [i for i in items if i.get("type") == "log"]
+            check("含 log 类证据（Loki 错误模式）", len(logs) >= 1,
+                  "log=%d" % len(logs))
+            # 不按顺序取 logs[0]：log 证据有「模式 TopN」与「错误量突增」两类，
+            # 排序（created_at DESC, id DESC）决定哪条在前面 ——
+            # 写死 logs[0] 就是在断言顺序而非语义。
+            # 改为「存在一条带 pattern 计数的证据，且计数 ≥2」。
+            pat = [i for i in logs if "count" in (i.get("metadata") or {})]
+            check("log 证据含按模式聚合的条目", len(pat) >= 1,
+                  "带 count 的=%d / 共 %d" % (len(pat), len(logs)))
+            if pat:
+                cnt = pat[0]["metadata"]["count"]
+                check("同类日志被归一化聚合（count ≥2 而非各为 1）",
+                      cnt.isdigit() and int(cnt) >= 2,
+                      "pattern=%s count=%s"
+                      % (pat[0]["metadata"].get("pattern"), cnt))
+            burst = [i for i in logs if "count_after" in (i.get("metadata") or {})]
+            check("log 证据含独立的「错误量突增」条目（与 TopN 是两个问题）",
+                  len(burst) == 1,
+                  "burst 条数=%d" % len(burst))
+        else:
+            check("证据 API 返回 JSON 对象", False, "body=%r" % (ev,))
+
+        # --- 类型过滤 ---
+        st, ev2 = req("GET", "/api/v1/incidents/%d/evidence?type=metric" % inc)
+        only_metric = all(i.get("type") == "metric"
+                          for i in (ev2.get("evidence", []) if isinstance(ev2, dict) else []))
+        check("type=metric 过滤只返回 metric", st == 200 and only_metric,
+              "n=%d" % len(ev2.get("evidence", []) if isinstance(ev2, dict) else []))
+
+        st, ev3 = req("GET", "/api/v1/incidents/%d/evidence?type=bogus" % inc)
+        check("非法 type -> 400 且错误信息列出合法值", st == 400,
+              "status=%s body=%r" % (st, ev3))
+
+        # --- timeline 有 evidence_found ---
+        st, det = req("GET", "/api/v1/incidents/%d" % inc)
+        ev_types = [e.get("event_type") for e in (det.get("timeline", [])
+                                                  if isinstance(det, dict) else [])]
+        check("时间线记录了 evidence_found", "evidence_found" in ev_types,
+              "timeline=%s" % ev_types)
+
+        # ============ 判据 #3：数据源宕机时 webhook 延迟无变化 ============
+        section("F5c 数据源宕机：webhook 零阻塞 + 任务重试 + 恢复后自动补采")
+        # **先取基线，再制造故障**。且用一个**尚不存在的服务**，
+        # 保证这条告警一定走完整链路（新建事件 + 入队），
+        # 而不是被去重 skip 掉。
+        base_ms, base_ok = _time_webhook("M4BaselineProbe", "m4-probe-svc")
+        check("基线投递走了完整链路（未被去重）", base_ok, "accepted 见上一行")
+        w("  数据源正常时 webhook 延迟 = %d ms" % base_ms)
+
+        # 等基线任务的首次采集完成（数据源正常 → 应成功），
+        # 这样后面「数据源宕机」造出的新任务才是干净的首次尝试。
+        _wait_tasks_settled(60)
+
+        # 两个数据源同时宕机。
+        prom.down = True
+        loki.down = True
+        w("  已把 Prometheus 与 Loki 置为宕机（HTTP 503）")
+
+        # 宕机期间投递：**另一个**新服务，确保是新事件新任务。
+        down_ms, down_ok = _time_webhook("M4DownProbe", "m4-down-svc")
+        check("宕机期间投递走了完整链路（未被去重）", down_ok, "accepted 见上一行")
+        w("  数据源宕机时 webhook 延迟 = %d ms" % down_ms)
+        # 判据是「没有量级差异」而不是「毫秒级相等」：本机负载会抖动，
+        # 5s 级的超时阻塞一定看得出来，几十毫秒的波动看不出来。
+        # 阈值 max(3x, +500ms)：能抓住阻塞，又不会被调度噪声误报。
+        budget = max(base_ms * 3, base_ms + 500)
+        check("判据#3 数据源宕机时 webhook 延迟无量级变化（零阻塞）",
+              down_ok and down_ms <= budget,
+              "before=%dms after=%dms 预算=%dms" % (base_ms, down_ms, budget))
+
+        # 事件仍应创建（采集失败不得影响关联）。
+        time.sleep(0.5)
+        n_down_inc = q("SELECT count(*) FROM incidents WHERE service='m4-down-svc'")
+        check("宕机期间事件照常创建（采集不阻断关联）", n_down_inc == "1",
+              "m4-down-svc 事件数=%s" % n_down_inc)
+
+        # 任务必须**真的被重试过**：attempts 递增 + 状态退回 pending。
+        # 断言「attempts >= 1」太弱 —— 入队那一刻 attempts 就是 0，
+        # 被领取一次就变 1，失败退回 pending 后还是 1。
+        # 「被重试」的标志是 attempts 涨到 **2 以上**（第二次被领取）。
+        down_task = q("SELECT id FROM tasks WHERE kind='collect_evidence' "
+                      "ORDER BY id DESC LIMIT 1")
+        retried = _wait_attempts(down_task, 2, 60)
+        check("判据#4a 宕机期间任务被反复尝试（attempts 涨到 ≥2，即进入重试）",
+              retried,
+              "task=%s attempts=%s status=%s"
+              % (down_task, _q1("SELECT attempts FROM tasks WHERE id=%s" % down_task),
+                 _q1("SELECT status FROM tasks WHERE id=%s" % down_task)))
+        check("宕机期间任务未进死信（还有重试机会）",
+              _q1("SELECT status FROM tasks WHERE id=%s" % down_task) != "dead",
+              "status=%s" % _q1("SELECT status FROM tasks WHERE id=%s" % down_task))
+        # 有退避可见性：available_at 被推到未来
+        av = _q1("SELECT (available_at > NOW())::text FROM tasks WHERE id=%s" % down_task)
+        w("  宕机任务的 available_at 在未来 = %s（指数退避可见）" % av)
+
+        # ============ 判据 #4：恢复后自动补采 ============
+        prom.down = False
+        loki.down = False
+        w("  已恢复两个数据源，等 worker 自动补采")
+        # 退避 5s → 10s → 死信（最多 3 次尝试）。等 120s 足够走完两轮退避。
+        got, stt = _wait_task_done(down_task, 120)
+        check("判据#4b 恢复后该任务自动补采成功（无需人工干预）", got,
+              "task=%s status=%s attempts=%s"
+              % (down_task, stt,
+                 _q1("SELECT attempts FROM tasks WHERE id=%s" % down_task)))
+        check("恢复后无残留未完成任务", q(
+            "SELECT count(*) FROM tasks WHERE status IN ('pending','in_flight')") == "0",
+            "pending+in_flight=%s"
+            % q("SELECT count(*) FROM tasks WHERE status IN ('pending','in_flight')"))
+        check("无任务进死信（数据源最终恢复，不该有任务被放弃）",
+              q("SELECT count(*) FROM tasks WHERE status='dead'") == "0",
+              "dead=%s" % q("SELECT count(*) FROM tasks WHERE status='dead'"))
+
+        # 补采应真的写入了证据（该任务对应事件从 0 条变成有）。
+        n_down_ev = q("SELECT count(*) FROM evidence e JOIN incidents i "
+                      "ON i.id = e.incident_id WHERE i.service = 'm4-down-svc'")
+        check("判据#4c 补采写入了证据（此前因数据源宕机一条都没采到）",
+              n_down_ev.isdigit() and int(n_down_ev) >= 5,
+              "m4-down-svc 证据数=%s" % n_down_ev)
+        return 0
+    finally:
+        for mock in (prom, loki):
+            try:
+                if mock:
+                    mock.stop()
+            except Exception:
+                pass
+        if wrk is not None:
+            # 先 terminate 再等：worker 的 drain 最多等 15s，
+            # 直接 kill 会让「已采集但未落库」的证据看起来像没采到。
+            try:
+                wrk.terminate()
+                wrk.wait(timeout=25)
+            except Exception:
+                try:
+                    wrk.kill()
+                except Exception:
+                    pass
+            w("  [m4] worker 已停")
+        if wrk_log is not None:
+            try:
+                wrk_log.flush()
+                with open(wrk_log_path, "rb") as f:
+                    txt = f.read().decode("utf-8", errors="replace")
+                w("  [m4] worker 日志 %d 字节，尾部 20 行：" % len(txt))
+                for line in txt.splitlines()[-20:]:
+                    w("        | " + line)
+            except Exception as e:
+                w("  [m4] 读 worker 日志失败: %s" % e)
+        if os.path.exists(EXE_WORKER):
+            try:
+                os.remove(EXE_WORKER)
+            except Exception:
+                pass
+
+
 def main():
     pg = None
     srv = None
@@ -532,7 +1003,14 @@ def main():
         st, b = req("GET", "/api/v1/alerts?limit=abc&status=bogus")
         check("告警列表脏参数退化 200", st == 200, "status=%s" % st)
 
-        # ============ 场景 6：healthz ============
+        # ============ 场景 6：M4 证据采集闭环 ============
+        # 排在 healthz 之前：这一段要起 iip-worker 与两个假采集器，
+        # 涉及进程生命周期，失败时不该让后面的 healthz 三态也一起丢。
+        rc = m4_section(inc)
+        if rc != 0:
+            return rc
+
+        # ============ 场景 7：healthz ============
         section("F6 健康检查")
         # 契约是 **text/plain 的 ok / unavailable**（README 与 M0 计划明文规定，
         # --healthcheck 与 compose healthcheck 依赖这个字符串），不是 JSON。

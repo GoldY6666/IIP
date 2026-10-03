@@ -103,6 +103,8 @@ type Task struct {
 	LastError   pgtype.Text        `json:"last_error"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	// 本任务实际采集到的窗口终点；NULL 表示尚未采集过。下一轮采集的窗口起点取该值，只采新增区间（手册 §4.2）。注意：采到 0 条证据时也要写入 —— 否则空窗口会被反复重采，游标永不推进。
+	WindowEnd pgtype.Timestamptz `json:"window_end"`
 }
 
 type Timeline struct {

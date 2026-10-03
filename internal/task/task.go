@@ -85,6 +85,21 @@ var (
 type CollectEvidencePayload struct {
 	// IncidentID 是要采集证据的事件主键。
 	IncidentID int64 `json:"incident_id"`
+
+	// WindowStart 是本次采集窗口的**起点游标**，即「上次采到哪儿了」。
+	//
+	// **零值表示首次采集**：此时窗口起点由 worker 按事件开始时间推导
+	// （见 evidence.ResolveWindow）。
+	//
+	// 为什么要游标而不是每次都重采整个窗口：新告警合入已有事件会触发
+	// 新一轮采集，若每次都从事故起点重采，同一批 RED 指标会以完全相同的
+	// (source, query, timestamp) 再落库一份，页面上出现两份一模一样的证据。
+	// 带游标后每轮只采「上次之后」的新增区间。
+	//
+	// 用零值而非 `*time.Time`：JSON 里 null 与缺字段都会解成 nil，
+	// 而「首次」与「上次采到 1970 年」在业务上不可能同时成立，
+	// 多一个指针只是多一个可写错的状态。
+	WindowStart time.Time `json:"window_start,omitempty"`
 }
 
 // Task 是一个任务行（领域视图，不带 pgtype 泄漏）。
@@ -120,15 +135,36 @@ func (t *Task) IncidentID() (int64, error) {
 }
 
 // NewCollectEvidencePayload 构造采集任务的 payload。
-func NewCollectEvidencePayload(incidentID int64) ([]byte, error) {
+// NewCollectEvidencePayload 构造采集任务的 payload。windowStart 为零值表示首次采集。
+func NewCollectEvidencePayload(incidentID int64, windowStart time.Time) ([]byte, error) {
 	if incidentID <= 0 {
 		return nil, fmt.Errorf("incident_id 必须为正整数，当前为 %d", incidentID)
 	}
-	b, err := json.Marshal(CollectEvidencePayload{IncidentID: incidentID})
+	b, err := json.Marshal(CollectEvidencePayload{
+		IncidentID:  incidentID,
+		WindowStart: windowStart.UTC(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("序列化任务参数失败: %w", err)
 	}
 	return b, nil
+}
+
+// Cursor 返回该任务带的窗口起点游标；零值表示首次采集。
+//
+// 与 IncidentID 分开成两个方法而不是让调用方自己解 JSON：
+// payload 的形状是本包的实现细节，暴露 json.RawMessage 给执行层
+// 意味着「以后加字段要记得同步改所有调用点」——而漏改的那个会静默
+// 拿不到游标，从「只采增量」退回「每次全量重采」。
+func (t *Task) Cursor() (time.Time, error) {
+	if t.Kind != KindCollectEvidence {
+		return time.Time{}, nil
+	}
+	var p CollectEvidencePayload
+	if err := json.Unmarshal(t.Payload, &p); err != nil {
+		return time.Time{}, fmt.Errorf("解析任务 %d 的采集游标失败: %w", t.ID, err)
+	}
+	return p.WindowStart.UTC(), nil
 }
 
 // IsTerminal 报告任务是否已到终态（不再会被领取）。
@@ -150,15 +186,30 @@ type Store interface {
 	// Claim 领取一批可执行任务并标记为 in_flight。
 	Claim(ctx context.Context, batch int, claimedBy string) ([]Task, error)
 
-	// Complete 标记成功。受影响行数为 0 时返回 ErrTaskNotFound
+	// Complete 标记成功，并把本任务实际采到的窗口终点写成下一轮的游标。
+	//
+	// windowEnd 传零值表示「本次没拿到窗口」，此时**不写游标**：
+	// 写一个零值会让下一轮从 1970 年开始，等于每次重采全部历史。
+	//
+	// 即使一条证据都没采到也要传真实窗口终点 —— 否则游标不推进，
+	// 同一个空窗口会被下一轮重新采一遍（手册 §4.2 修订段）。
+	//
+	// 受影响行数为 0 时返回 ErrTaskNotFound
 	// —— 说明这行已被超时回收并被别人领走，本次结果不该视为权威。
-	Complete(ctx context.Context, id int64) error
+	Complete(ctx context.Context, id int64, windowEnd time.Time) error
 
 	// Fail 记录一次失败并决定重试或判死信，返回更新后的任务。
 	Fail(ctx context.Context, id int64, delay time.Duration, maxAttempts int, lastErr string) (Task, error)
 
 	// ReclaimStale 回收持有者已消失的 in_flight 任务，返回回收条数。
 	ReclaimStale(ctx context.Context, staleAfter time.Duration) (int64, error)
+
+	// LastWindowEnd 返回该事件最近一次**成功采集**到的窗口终点。
+	//
+	// 零值表示「从未采过」，调用方据此走首次采集的窗口推导。
+	// 只认 status='done' 的行：pending/in_flight 还没采完，
+	// dead 是采失败了 —— 拿它们的游标会让下一轮跳过还没采过的区间。
+	LastWindowEnd(ctx context.Context, incidentID int64) (time.Time, error)
 }
 
 // BackoffDelay 返回第 attempts 次失败后的退避时长。

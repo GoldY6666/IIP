@@ -35,7 +35,18 @@ type Querier interface {
 	// 返回受影响行数（:execrows）让调用方能判断「这行是否还存在」——
 	// 若任务已被超时回收并被别人领走，本 UPDATE 会命中 0 行，
 	// 此时本次执行的结果不该被当作权威（可能有另一个 worker 也在做同一件事）。
-	CompleteTask(ctx context.Context, id int64) (int64, error)
+	//
+	// window_end 写入本任务**实际采到的窗口终点**（0007 新增列），它是下一轮
+	// 采集的起点游标。三点必须坚持：
+	//   1) **采到 0 条证据时也要写**。否则空窗口的游标永不推进，
+	//      下一轮又从同一个起点重采一遍，事件会永远卡在「采不到东西」的状态，
+	//      而每轮都白白消耗一次 attempts 直到进死信。
+	//   2) 由**调用方**传窗口终点而非用 NOW()：窗口是采集器实际查询的区间，
+	//      任务的完成时刻可能比窗口终点晚几十秒（落库 + 写留痕），
+	//      用 NOW() 会让游标跳过这段没采过的区间。
+	//   3) narg：首次采集的窗口终点可能不存在（拿不到窗口时不该写游标，
+	//      否则下一轮会从一个空区间开始，永远采不到东西）。
+	CompleteTask(ctx context.Context, arg CompleteTaskParams) (int64, error)
 	// 确认合并：清掉待确认标记，**保留**关联边（确认的含义是「这条关联是对的」）。
 	ConfirmReviewEdge(ctx context.Context, arg ConfirmReviewEdgeParams) (int64, error)
 	// 拒绝后判断该告警是否还有别的归属：没有才把 alerts.incident_id 回写为 NULL。
@@ -242,6 +253,20 @@ type Querier interface {
 	// 关联流程判定为 REVIEW 档时先查这里；命中则不建边、按 NEW 档处理。
 	// 用 EXISTS 而不是 count(*)：只关心「有没有」，EXISTS 命中即可短路返回。
 	IsSuppressed(ctx context.Context, arg IsSuppressedParams) (bool, error)
+	// 取该事件最近一次**成功采集**到的窗口终点，作为下一轮的起点游标。
+	//
+	// 只看 status='done'：pending/in_flight 的任务还没采完，
+	// 拿它们的游标会让下一轮跳过一段还没采过的区间 —— 那段数据就永远丢了。
+	// dead 同理：它采失败了（数据源挂了），用它当游标等于宣布那段区间已采过。
+	//
+	// 排除 window_end IS NULL 的行：那表示「完成时没拿到窗口」，
+	// 拿它当游标会让下一轮从零值开始，等于每次都重采整个历史区间。
+	//
+	// ORDER BY window_end DESC 而非 id DESC：游标语义是「时间上最远采到哪儿」，
+	// 按 id 排会在并发补采（两个任务都成功，游标一个比一个远）时取错。
+	//
+	// 找不到时 sqlc 返回 pgx.ErrNoRows，由调用方映射成「首次采集」。
+	LastCollectWindowEnd(ctx context.Context, incidentID string) (pgtype.Timestamptz, error)
 	// 关联一条告警到 Incident。(incident_id, alert_id) 为主键，重复链接静默跳过（幂等）。
 	// correlation_score 为 0.0000-1.0000；NEW 档传 NULL（无关联对象）。
 	// needs_review = true 表示 REVIEW 档，待人工确认。

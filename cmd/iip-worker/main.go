@@ -1,8 +1,10 @@
 // Command iip-worker 是 IIP 的后台 Worker 入口（polling 循环）。
 //
-// M0 阶段 runOnce 仅为 SELECT 1 占位；任务队列在 M4 落地
-// （claim tasks ... FOR UPDATE SKIP LOCKED）。
-// 规格依据：docs/IIP-M0详细开发计划.md §T0.3 / §T0.5。
+// M0 阶段 runOnce 仅为 SELECT 1 占位；M4 起改为「领取采集任务 → 调采集器 →
+// 证据落库」（手册 §六 B8）。执行逻辑在 internal/worker，本文件只做装配。
+//
+// 规格依据：docs/IIP-M0详细开发计划.md §T0.3 / §T0.5；
+// M4 部分见 docs/IIP-M4详细开发手册.md §4.3 / §4.5 / §4.6。
 package main
 
 import (
@@ -12,23 +14,20 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
+	"github.com/yu/iip/internal/collectors"
 	"github.com/yu/iip/internal/config"
+	"github.com/yu/iip/internal/evidence"
 	"github.com/yu/iip/internal/logging"
+	"github.com/yu/iip/internal/repository"
 	"github.com/yu/iip/internal/store"
+	"github.com/yu/iip/internal/worker"
 )
-
-// dbPinger 是 worker 对数据库的最小依赖（便于单测注入）。
-// 与 *pgxpool.Pool 的方法签名完全一致，可直接满足。
-type dbPinger interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
 
 const (
 	heartbeatInterval = 60 * time.Second // 心跳日志间隔
@@ -64,35 +63,144 @@ func run() error {
 	defer pool.Close()
 	logger.Info("worker 已连接 PostgreSQL", slog.Duration("poll_interval", cfg.WorkerPoll))
 
-	w := newWorker(logger, pool)
-	return w.loop(ctx, cfg.WorkerPoll)
+	registry := buildRegistry(cfg, logger)
+	proc := worker.NewProcessor(
+		repository.NewTasks(pool),
+		repository.NewEvidence(pool),
+		repository.NewCollectTargets(pool),
+		registry,
+		repository.NewLifecycle(pool),
+		worker.Config{
+			Batch:          cfg.WorkerTaskBatch,
+			StaleAfter:     cfg.WorkerTaskStaleAfter,
+			MaxAttempts:    cfg.WorkerMaxAttempts,
+			MaxPerIncident: cfg.EvidenceMaxPerIncident,
+			WindowWidth:    cfg.EvidenceWindow,
+			ClaimedBy:      instanceID(),
+		},
+		logger,
+	)
+
+	p := newPoller(logger, proc)
+	return p.loop(ctx, cfg.WorkerPoll)
 }
 
-// worker 持有 polling 循环的运行态。
-type worker struct {
+// buildRegistry 按配置装配采集器注册表。
+//
+// **采集器缺席时打 INFO 而不是让 worker 起不来**（手册 §4.6 的修订）：
+// 默认部署没有 Prometheus / Loki 地址，若因此拒绝启动，
+// 就等于「为了让默认值好看而让默认部署不可用」。
+// 采集器缺席时日志明确说明，运维一眼能看出「为什么没有证据」。
+func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
+	reg := evidence.NewRegistry()
+
+	// Prometheus：开关默认 true，但没配地址就不注册（见函数头说明）。
+	if cfg.EvidencePromEnabled {
+		if strings.TrimSpace(cfg.PromURL) == "" {
+			logger.Info("prometheus 采集器未配置地址，已跳过注册",
+				slog.String("env", "IIP_PROM_URL"))
+		} else {
+			reg.MustRegister(collectors.NewPrometheusCollector(
+				cfg.PromURL, collectors.WithTimeout(cfg.EvidenceTimeout)))
+		}
+	} else {
+		logger.Info("prometheus 采集器已禁用", slog.String("env", "IIP_EVIDENCE_PROM_ENABLED"))
+	}
+
+	if cfg.EvidenceLokiEnabled {
+		if strings.TrimSpace(cfg.LokiURL) == "" {
+			logger.Info("loki 采集器未配置地址，已跳过注册",
+				slog.String("env", "IIP_LOKI_URL"))
+		} else {
+			reg.MustRegister(collectors.NewLokiCollector(
+				cfg.LokiURL, collectors.WithTimeout(cfg.EvidenceTimeout)))
+		}
+	} else {
+		logger.Info("loki 采集器已禁用", slog.String("env", "IIP_EVIDENCE_LOKI_ENABLED"))
+	}
+
+	// K8s 采集器：M4 只做客户端 + mock 单测，**默认关闭**
+	// （手册偏差 B1：仓库零 K8s 依赖，写一个接不上真实集群的采集器
+	// 比不写更危险 —— 它看起来在工作，但永远采不到东西）。
+	if !cfg.EvidenceK8sEnabled {
+		logger.Info("k8s 采集器已禁用（M4 不接真实集群，见手册偏差 B1）",
+			slog.String("env", "IIP_EVIDENCE_K8S_ENABLED"))
+	} else if strings.TrimSpace(cfg.K8sURL) == "" {
+		logger.Info("k8s 采集器已启用但未配置地址，已跳过注册",
+			slog.String("env", "IIP_K8S_URL"))
+	}
+
+	// 正向日志：只有「至少注册了一个」才打。
+	// 「一个都没注册」要单独说，否则「采不到证据」与「采到了零条」在日志上无法区分。
+	if reg.Len() == 0 {
+		logger.Warn("没有任何采集器注册，采集任务将只能推进游标而采不到证据",
+			slog.Bool("prom_enabled", cfg.EvidencePromEnabled),
+			slog.Bool("loki_enabled", cfg.EvidenceLokiEnabled),
+			slog.Bool("k8s_enabled", cfg.EvidenceK8sEnabled))
+	} else {
+		logger.Info("证据采集器已注册", slog.Any("sources", reg.Sources()))
+	}
+	return reg
+}
+
+// instanceID 生成本 worker 实例标识，落在 tasks.claimed_by 上。
+//
+// hostname-pid 而不是随机 UUID：出问题时能从库里看出
+// 「这批任务被哪台机器领走过」，而随机 ID 只能告诉你「某个 worker 领走过」。
+func instanceID() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		// 拿不到主机名不该让 worker 起不来，退化成 pid 仍然可区分多实例。
+		host = "unknown"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
+}
+
+// taskRunner 是 poller 对执行层的最小依赖。
+//
+// 抽成接口而不是直接持有 *worker.Processor：
+// drain 与 panic recovery 是 polling 循环自身的机制（手册 §六 B8 只要求
+// 装配，不要求这两项重测），而它们与「怎么采集证据」毫无关系。
+// 打成接口后，这两条用例能用假实现精确控制「任务在跑 / 任务 panic」，
+// 不必为了测 drain 去造一个真的 Processor + 数据库。
+type taskRunner interface {
+	// RunOnce 执行一轮，返回处理的任务数与遇到的第一个错误。
+	RunOnce(ctx context.Context) (int, error)
+}
+
+// poller 持有 polling 循环的运行态。
+//
+// 命名说明：M0 时本类型叫 worker，与 M4 新增的 internal/worker 包同名冲突。
+// 改叫 poller 如实反映它的职责 —— 它只管「按节奏调执行器」，
+// 不再自己实现任何业务（原 M0 的 SELECT 1 占位已由 Processor 取代）。
+//
+// 刻意**不再持有 dbPinger**：M0 靠它做 SELECT 1 连通性检查，
+// M4 的连通性由 Processor 领取任务时验证（领取失败即已记日志），
+// 留着一个再也不用的字段只会让人以为「worker 不用 DB」。
+type poller struct {
 	logger *slog.Logger
-	pool   dbPinger
+	proc   taskRunner
 
 	pollCount int64        // 已完成的轮询次数（原子）
 	inFlight  atomic.Int64 // 当前 in-flight 任务数
 }
 
-func newWorker(logger *slog.Logger, pool dbPinger) *worker {
-	return &worker{logger: logger, pool: pool}
+func newPoller(logger *slog.Logger, proc taskRunner) *poller {
+	return &poller{logger: logger, proc: proc}
 }
 
 // loop 是 polling 主循环。ctx 取消后进入 drain 并返回。
 //
 // 每轮任务在独立 goroutine 中执行，并计入 in-flight，
 // 使 drain 能真实等待正在执行的任务（而非等主循环栈上的串行调用）。
-func (w *worker) loop(ctx context.Context, poll time.Duration) error {
+func (p *poller) loop(ctx context.Context, poll time.Duration) error {
 	ticks := time.NewTicker(poll)
 	defer ticks.Stop()
 
 	beat := time.NewTicker(heartbeatInterval)
 	defer beat.Stop()
 
-	w.logger.Info("worker 启动", slog.Duration("poll_interval", poll))
+	p.logger.Info("worker 启动", slog.Duration("poll_interval", poll))
 
 	// 用 WaitGroup 等待所有已派发的任务 goroutine，供 drain 使用。
 	var wg sync.WaitGroup
@@ -100,54 +208,68 @@ func (w *worker) loop(ctx context.Context, poll time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
-			w.drain(&wg)
+			p.drain(&wg)
 			return nil
 		case <-beat.C:
-			w.heartbeat()
+			p.heartbeat()
 		case <-ticks.C:
 			// 每次 tick 派发一个任务 goroutine，递增 in-flight。
-			w.inFlight.Add(1)
+			//
+			// 传的是 **WithoutCancel** 的 ctx：收到 SIGTERM 时，
+			// 直接把 signal ctx 传下去会让在跑的 HTTP 采集请求**立刻中断**，
+			// 于是 drain 永远等不到东西、drainTimeout 形同虚设，
+			// 而这一轮采到一半的证据要等 stale_after（默认 5 分钟）
+			// 回收后才有人重采 —— 运维刚要重启反而丢了证据。
+			//
+			// WithoutCancel 保留 ctx 的值（trace id 等）但切断取消信号，
+			// 真正兜住执行时长的是两个已有的超时：
+			// 采集器 5s（EvidenceTimeout）+ drain 15s。
+			workCtx := context.WithoutCancel(ctx)
+			p.inFlight.Add(1)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				defer w.inFlight.Add(-1)
-				w.runOnce(ctx)
-				atomic.AddInt64(&w.pollCount, 1)
+				defer p.inFlight.Add(-1)
+				p.runOnce(workCtx)
+				atomic.AddInt64(&p.pollCount, 1)
 			}()
 		}
 	}
 }
 
-// runOnce 执行一轮轮询。M0 用 SELECT 1 占位。
+// runOnce 执行一轮轮询：领取采集任务并逐条执行。
 //
 // 内置 panic recovery：单个任务 panic 不得带崩整个 worker。
-func (w *worker) runOnce(ctx context.Context) {
+func (p *poller) runOnce(ctx context.Context) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			w.logger.Error("runOnce panic 已恢复",
+			p.logger.Error("runOnce panic 已恢复",
 				slog.Any("panic", rec),
-				slog.Int64("poll_count", atomic.LoadInt64(&w.pollCount)),
+				slog.Int64("poll_count", atomic.LoadInt64(&p.pollCount)),
 			)
 		}
 	}()
 
-	// M0 占位：仅验证 DB 连通性。
-	// M4: 在此 claim tasks（FOR UPDATE SKIP LOCKED）并分派执行。
-	var one int
-	if err := w.pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
-		// ctx 取消导致的失败在 drain 期间属预期，降级为 debug。
+	// ctx 取消导致的失败在 drain 期间属预期，降级为 debug。
+	n, err := p.proc.RunOnce(ctx)
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			w.logger.Debug("runOnce 被取消", slog.String("error", err.Error()))
+			p.logger.Debug("runOnce 被取消", slog.String("error", err.Error()))
 			return
 		}
-		w.logger.Error("runOnce 查询失败", slog.String("error", err.Error()))
+		// 任务级失败已在 Processor 内逐条记过日志；这里只记一条汇总，
+		// 避免同一个错误在日志里出现 N 次。
+		p.logger.Error("本轮采集有任务失败", slog.String("error", err.Error()))
+	}
+	if n > 0 {
+		p.logger.Info("本轮处理任务数", slog.Int("count", n))
 	}
 }
 
 // drain 停止接新任务，等待 in-flight 完成，上限 drainTimeout。
-func (w *worker) drain(wg *sync.WaitGroup) {
-	w.logger.Info("收到退出信号，进入 drain",
-		slog.Int64("in_flight", w.inFlight.Load()),
+func (p *poller) drain(wg *sync.WaitGroup) {
+	p.logger.Info("收到退出信号，进入 drain",
+		slog.Int64("in_flight", p.inFlight.Load()),
 		slog.Duration("timeout", drainTimeout),
 	)
 
@@ -160,21 +282,21 @@ func (w *worker) drain(wg *sync.WaitGroup) {
 
 	select {
 	case <-done:
-		w.logger.Info("drain 完成，worker 已干净退出",
-			slog.Int64("poll_count", atomic.LoadInt64(&w.pollCount)),
+		p.logger.Info("drain 完成，worker 已干净退出",
+			slog.Int64("poll_count", atomic.LoadInt64(&p.pollCount)),
 		)
 	case <-time.After(drainTimeout):
-		w.logger.Warn("drain 超时，仍有 in-flight 任务未完成",
-			slog.Int64("in_flight", w.inFlight.Load()),
+		p.logger.Warn("drain 超时，仍有 in-flight 任务未完成",
+			slog.Int64("in_flight", p.inFlight.Load()),
 		)
 	}
 }
 
 // heartbeat 每 60s 输出一条存活日志。
-func (w *worker) heartbeat() {
-	n := atomic.LoadInt64(&w.pollCount)
-	w.logger.Info(fmt.Sprintf("worker alive, poll_count=%d", n),
+func (p *poller) heartbeat() {
+	n := atomic.LoadInt64(&p.pollCount)
+	p.logger.Info(fmt.Sprintf("worker alive, poll_count=%d", n),
 		slog.Int64("poll_count", n),
-		slog.Int64("in_flight", w.inFlight.Load()),
+		slog.Int64("in_flight", p.inFlight.Load()),
 	)
 }

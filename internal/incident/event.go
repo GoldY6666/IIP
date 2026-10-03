@@ -2,7 +2,9 @@ package incident
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -31,8 +33,74 @@ const (
 // 复用既不扩大取值集合，也省掉一次迁移。
 const EventAlertFired EventType = "alert_fired"
 
-// EventUserComment 是 0001 就存在的既有类型，用于用户备注。
+// EventEvidenceFound 是 0001 就存在、0004 保留的类型，M4 起赋予它明确语义：
+// **一轮证据采集完成**（手册 §一 的交接物说明）。
 //
+// 复用而不新增：CHECK 里本就有这个值且 M3 之前零存量行，
+// 复用既不扩大取值集合，也省掉一次迁移 —— 与 EventAlertFired 同样的理由。
+const EventEvidenceFound EventType = "evidence_found"
+
+// NewEvidenceFoundEntry 构造「一轮证据采集完成」留痕（M4 worker 采集后写入）。
+//
+// 存在的理由：证据列表页只显示**最新 50 条**（手册 §4.2 的硬上限），
+// 而用户会问「这个事件一共采了多少条、是不是被截断了」。
+// 答案不该只存在于 API 响应的 truncated 字段里 —— 那是程序读的；
+// 时间线是给人读的，而「采到 73 条只留了 50 条」正是需要人说清的事。
+//
+// metadata 固定带四个键，前端不必解析 description 文本：
+//   - collected：本次实际采到的条数（截断前）
+//   - kept：落库条数
+//   - truncated：是否因超限被截断
+//   - window：采集窗口 [start, end]，RFC3339
+//
+// sources 记各采集器的产出条数（形如 "prometheus=3,loki=11"）：
+// 只给总数的话，用户看到「采到 14 条」仍不知道是哪个数据源在工作，
+// 而「Loki 一次贡献 11 条」直接说明日志量才是本次事故的主体。
+func NewEvidenceFoundEntry(
+	incidentID int64, collected, kept int, truncated bool,
+	windowStart, windowEnd time.Time, sources map[string]int, ts time.Time,
+) Entry {
+	md := map[string]string{
+		"collected": strconv.Itoa(collected),
+		"kept":      strconv.Itoa(kept),
+		"truncated": strconv.FormatBool(truncated),
+	}
+	if !windowStart.IsZero() && !windowEnd.IsZero() {
+		md["window"] = windowStart.UTC().Format(time.RFC3339) + "/" +
+			windowEnd.UTC().Format(time.RFC3339)
+	}
+	if len(sources) > 0 {
+		// 按来源名字典序拼，保证同一批采集的留痕可逐字比对
+		// （map 遍历顺序随机会让每次刷新看到的字符串都不一样）。
+		keys := make([]string, 0, len(sources))
+		for k := range sources {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%d", k, sources[k]))
+		}
+		md["sources"] = strings.Join(parts, ",")
+	}
+
+	desc := fmt.Sprintf("证据采集完成，采到 %d 条", collected)
+	if truncated {
+		desc += fmt.Sprintf("，超出单事件上限，仅保留最新 %d 条", kept)
+	} else if kept == 0 {
+		desc += "，本轮没有新证据"
+	}
+	return Entry{
+		IncidentID:  incidentID,
+		EventType:   EventEvidenceFound,
+		Description: desc,
+		Actor:       SystemActor,
+		Metadata:    md,
+		Timestamp:   ts,
+	}
+}
+
+// EventUserComment 是 0001 就存在的既有类型，用于用户备注。//
 // REVIEW 的确认 / 拒绝也复用它（metadata 带 action=review_confirm / review_reject），
 // 而不是再新增两个专用类型——用户已锁定只新增 7 个专用值（手册 §4.2）。
 const EventUserComment EventType = "user_comment"

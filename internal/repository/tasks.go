@@ -125,13 +125,24 @@ func (r *Tasks) Claim(ctx context.Context, batch int, claimedBy string) ([]task.
 	return out, nil
 }
 
-// Complete 标记成功。
+// Complete 标记成功，并把本任务实际采到的窗口终点写成下一轮的游标。
 //
 // 受影响 0 行时返回 task.ErrTaskNotFound：说明这行已被超时回收并被别人领走，
 // 此时本次采集的结果**不该被当作权威**（可能有另一个 worker 也在采同一个事件），
 // 调用方需要知道「我的完成没生效」而不是被静默吞掉。
-func (r *Tasks) Complete(ctx context.Context, id int64) error {
-	n, err := r.queries.CompleteTask(ctx, id)
+//
+// windowEnd 传零值时不写游标：写零值会让下一轮从 1970 年开始，
+// 等于把全部历史区间重采一遍。
+func (r *Tasks) Complete(ctx context.Context, id int64, windowEnd time.Time) error {
+	var end pgtype.Timestamptz
+	if !windowEnd.IsZero() {
+		end = pgtype.Timestamptz{Time: windowEnd.UTC(), Valid: true}
+	}
+
+	n, err := r.queries.CompleteTask(ctx, db.CompleteTaskParams{
+		WindowEnd: end,
+		ID:        id,
+	})
 	if err != nil {
 		return fmt.Errorf("repository: 标记任务成功失败: %w", err)
 	}
@@ -139,6 +150,62 @@ func (r *Tasks) Complete(ctx context.Context, id int64) error {
 		return fmt.Errorf("repository: 标记任务 %d 成功: %w", id, task.ErrTaskNotFound)
 	}
 	return nil
+}
+
+// EnqueueEvidence 为事件入队一个证据采集任务（correlation.EvidenceEnqueuer 的实现）。
+//
+// 幂等由 EnqueueIfAbsent 保证：同事件已有 pending/in_flight 任务时不重复插。
+// 因此关联路径可以对同一批告警的多次合入连续调用，无需先查再判。
+//
+// 游标在这里读而不是由调用方传：调用方（关联服务）不该知道窗口的存在，
+// 而「上次采到哪儿」是队列自己的状态。把它做成参数会诱使调用方
+// 从别处（evidence 表的 max(timestamp)）取一个错的游标。
+//
+// 拿不到游标不是错误：走首次采集的窗口推导，由 worker 完成时写回。
+func (r *Tasks) EnqueueEvidence(ctx context.Context, incidentID int64) error {
+	if incidentID <= 0 {
+		return fmt.Errorf("repository: incident_id 必须为正整数，当前为 %d", incidentID)
+	}
+
+	cursor, err := r.LastWindowEnd(ctx, incidentID)
+	if err != nil {
+		// 游标读失败**不阻断入队**：拿零值入队的后果是最多重采一次
+		// （产生重复证据），而不入队的后果是这次合入完全没有证据，
+		// 且要等到下一次告警合入才会有人想起这件事。
+		cursor = time.Time{}
+	}
+
+	payload, err := task.NewCollectEvidencePayload(incidentID, cursor)
+	if err != nil {
+		return fmt.Errorf("repository: 构造采集任务参数失败: %w", err)
+	}
+	if _, err := r.EnqueueIfAbsent(ctx, task.KindCollectEvidence, payload); err != nil {
+		return fmt.Errorf("repository: 证据采集任务入队失败: %w", err)
+	}
+	return nil
+}
+
+// LastWindowEnd 返回该事件最近一次成功采集到的窗口终点。
+//
+// 从未采过时返回零值 + nil（不是错误）：「还没采过」是完全正常的状态，
+// 首次采集的调用方要据此走窗口推导，返回错误会让它无从区分
+// 「首次」与「查询失败」。
+func (r *Tasks) LastWindowEnd(ctx context.Context, incidentID int64) (time.Time, error) {
+	if incidentID <= 0 {
+		return time.Time{}, fmt.Errorf("repository: incident_id 必须为正整数，当前为 %d", incidentID)
+	}
+
+	row, err := r.queries.LastCollectWindowEnd(ctx, strconv.FormatInt(incidentID, 10))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("repository: 读取事件 %d 的采集游标失败: %w", incidentID, err)
+	}
+	if !row.Valid {
+		return time.Time{}, nil
+	}
+	return row.Time.UTC(), nil
 }
 
 // Fail 记录一次失败并决定重试或判死信。

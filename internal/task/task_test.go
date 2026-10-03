@@ -107,7 +107,7 @@ func TestShouldDeadLetterIsZeroValueSafe(t *testing.T) {
 // 返回 0 会让调用方去查 incident 0，然后拿到「事件不存在」，
 // 掩盖真正的问题（这个任务压根不是采集任务）。
 func TestTaskIncidentIDRejectsWrongKind(t *testing.T) {
-	payload, err := NewCollectEvidencePayload(12)
+	payload, err := NewCollectEvidencePayload(12, time.Time{})
 	if err != nil {
 		t.Fatalf("构造 payload 失败: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestTaskIncidentIDRejectsWrongKind(t *testing.T) {
 
 // TestTaskIncidentIDRoundTrip 覆盖正常路径。
 func TestTaskIncidentIDRoundTrip(t *testing.T) {
-	payload, err := NewCollectEvidencePayload(42)
+	payload, err := NewCollectEvidencePayload(42, time.Time{})
 	if err != nil {
 		t.Fatalf("构造 payload 失败: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestTaskIncidentIDRoundTrip(t *testing.T) {
 // TestNewCollectEvidencePayloadRejectsNonPositive 覆盖入队参数校验。
 func TestNewCollectEvidencePayloadRejectsNonPositive(t *testing.T) {
 	for _, id := range []int64{0, -1} {
-		if _, err := NewCollectEvidencePayload(id); err == nil {
+		if _, err := NewCollectEvidencePayload(id, time.Time{}); err == nil {
 			t.Errorf("NewCollectEvidencePayload(%d) 应报错，实得 nil —— "+
 				"0/负数主键会在执行时查不到事件", id)
 		}

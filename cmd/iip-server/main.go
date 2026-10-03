@@ -242,9 +242,17 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	// 两者都在 correlation 内部做成 best-effort（失败只记日志），
 	// 因此这里的注入不会让 webhook 的成功与否取决于它们。
 	lifecycle := repository.NewLifecycle(pool)
+	// M4：挂上「证据采集入队」。同样 best-effort ——
+	// 入队失败只记日志，绝不让 webhook 失败（否则 Alertmanager 会重投整批告警）。
+	//
+	// 挂在 iip-server 而不是 iip-worker：事件在这里创建/合入，
+	// 队列是入库的同一批事务外动作，而 worker 只消费不生产。
+	// 若把入队放到 worker 里，就得让 worker 反查「哪些事件还没采过」，
+	// 那是把「谁创建了事件」这个事实藏进轮询逻辑里。
 	corrSvc := correlation.NewService(repository.NewIncidents(pool), cfgStore, topo, logger).
 		WithTimeline(lifecycle).
-		WithSuppressions(repository.NewReviews(pool))
+		WithSuppressions(repository.NewReviews(pool)).
+		WithEvidenceTasks(repository.NewTasks(pool))
 
 	// M1：告警接入。此处只有装配——五阶段流水线在 internal/alert，
 	// SQL 在 internal/repository，handler 只负责 HTTP 契约（手册 §4.5）。

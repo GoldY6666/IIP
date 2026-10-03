@@ -27,7 +27,7 @@ import (
 // enqueueCollect 造一个采集任务，返回其领域对象。
 func enqueueCollect(t *testing.T, repo *Tasks, incidentID int64) task.Task {
 	t.Helper()
-	payload, err := task.NewCollectEvidencePayload(incidentID)
+	payload, err := task.NewCollectEvidencePayload(incidentID, time.Time{})
 	if err != nil {
 		t.Fatalf("构造 payload 失败: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestEnqueueIfAbsentIsIdempotent(t *testing.T) {
 	repo := NewTasks(pool)
 	ctx := context.Background()
 
-	payload, err := task.NewCollectEvidencePayload(99)
+	payload, err := task.NewCollectEvidencePayload(99, time.Time{})
 	if err != nil {
 		t.Fatalf("构造 payload 失败: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestEnqueueIfAbsentIsIdempotent(t *testing.T) {
 	}
 
 	// 不同事件应各入一条（否则幂等键就过宽，退化成全局只入一条）。
-	otherPayload, err := task.NewCollectEvidencePayload(100)
+	otherPayload, err := task.NewCollectEvidencePayload(100, time.Time{})
 	if err != nil {
 		t.Fatalf("构造 payload 失败: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestCompleteOnRecycledTaskReportsNotFound(t *testing.T) {
 		t.Fatalf("回收超时任务失败: %v", err)
 	}
 
-	err := repo.Complete(ctx, tk.ID)
+	err := repo.Complete(ctx, tk.ID, time.Time{})
 	if !errors.Is(err, task.ErrTaskNotFound) {
 		t.Errorf("已被回收的任务 Complete 返回 %v，期望 ErrTaskNotFound", err)
 	}
@@ -421,7 +421,7 @@ func TestTasksRejectsInvalidArguments(t *testing.T) {
 	pool := testsupport.NewDB(t)
 	repo := NewTasks(pool)
 	ctx := context.Background()
-	payload, err := task.NewCollectEvidencePayload(1)
+	payload, err := task.NewCollectEvidencePayload(1, time.Time{})
 	if err != nil {
 		t.Fatalf("构造 payload 失败: %v", err)
 	}

@@ -34,6 +34,8 @@ type Service struct {
 	timeline TimelineWriter
 	// suppressions 为 nil 时不查抑制（M2 行为）。
 	suppressions SuppressionStore
+	// evidenceTasks 为 nil 时不入队采集任务（M2 行为，M4 挂上）。
+	evidenceTasks EvidenceEnqueuer
 	// now 是可注入时钟；nil 时取 time.Now().UTC()，让「留痕时间」可被精确断言。
 	now func() time.Time
 }
@@ -146,6 +148,10 @@ func (s *Service) correlateOne(
 			return Result{}, err
 		}
 		s.appendTimeline(ctx, incident.NewAlertLinkedEntry(bestIncident, v.ID, bestScore, false, s.nowUTC()), "merge")
+		// 合入后重新入队：新告警可能来自另一个服务实例或另一个节点，
+		// 指标形态与原事件不同时，已采到的证据不再完整。
+		// 重复采集由 task 侧的窗口游标兜住（只采新增区间）。
+		s.enqueueEvidence(ctx, bestIncident, "merge")
 		byIncident[bestIncident] = append(byIncident[bestIncident], v)
 		return Result{Action: ActionMerge, IncidentID: bestIncident, Score: bestScore}, nil
 
@@ -154,6 +160,7 @@ func (s *Service) correlateOne(
 			return Result{}, err
 		}
 		s.appendTimeline(ctx, incident.NewAlertLinkedEntry(bestIncident, v.ID, bestScore, true, s.nowUTC()), "review")
+		s.enqueueEvidence(ctx, bestIncident, "review")
 		byIncident[bestIncident] = append(byIncident[bestIncident], v)
 		return Result{Action: ActionReview, IncidentID: bestIncident, Score: bestScore}, nil
 
@@ -173,6 +180,10 @@ func (s *Service) correlateOne(
 		if err := s.link(ctx, inc.ID, v, nil, false); err != nil {
 			return Result{}, err
 		}
+		// 事件一创建就入队采集：证据的时效性要求是「2 分钟内出现」
+		//（手册 DoD 第 4 条），而关联发生在 webhook 请求内 ——
+		// 在这里入队是最早的时机，交给 worker 异步采。
+		s.enqueueEvidence(ctx, inc.ID, "create")
 		byIncident[inc.ID] = append(byIncident[inc.ID], v)
 		return Result{Action: ActionNew, IncidentID: inc.ID, Score: 0}, nil
 	}
