@@ -35,6 +35,8 @@ _tmp/
 _probe.txt
 _tree.txt
 _*.txt
+# 验证脚本的服务日志（scripts/verify-*.py 会落 _verify_*_srv.log）
+_*.log
 
 # --- 编辑器 / 系统 ---
 .idea/
