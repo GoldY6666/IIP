@@ -8,7 +8,10 @@ package migrations_test
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"math"
+	"path"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,12 +26,6 @@ import (
 	"github.com/yu/iip/internal/testsupport"
 	"github.com/yu/iip/migrations"
 )
-
-// latestVersion 是当前迁移文件到达的版本号（0004）。
-//
-// 新增迁移时必须同步修改此常量——它让「忘记把新迁移纳入 embed/schema」这类
-// 沉默失败变成一条明确的测试失败。
-const latestVersion = 4
 
 // dedupeIndex 是 0002 建立的部分唯一索引名。
 const dedupeIndex = "uq_alerts_fingerprint_firing"
@@ -71,8 +68,9 @@ func TestMigrateUpDownUp(t *testing.T) {
 
 	// 1) up
 	mustUp(t, m)
-	if v, dirty := currentVersion(t, m); v != latestVersion || dirty {
-		t.Fatalf("up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion, v, dirty)
+	latest := latestVersion(t)
+	if v, dirty := currentVersion(t, m); v != latest || dirty {
+		t.Fatalf("up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latest, v, dirty)
 	}
 	assertIndexesExist(t, dsn, true)
 
@@ -87,8 +85,8 @@ func TestMigrateUpDownUp(t *testing.T) {
 
 	// 3) 再 up —— 证明可重复执行（"down 未真正回滚" 会在此暴露）
 	mustUp(t, m)
-	if v, dirty := currentVersion(t, m); v != latestVersion || dirty {
-		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion, v, dirty)
+	if v, dirty := currentVersion(t, m); v != latest || dirty {
+		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latest, v, dirty)
 	}
 	assertIndexesExist(t, dsn, true)
 }
@@ -96,7 +94,7 @@ func TestMigrateUpDownUp(t *testing.T) {
 // TestCorrelationM2Migration 覆盖 0003 的两项改动在**数据库层**确实生效且可完整回滚：
 // incident_alerts.needs_review 列（REVIEW 档标记）与 correlation_rules 的默认配置行。
 //
-// 刻意用 Steps(-1) **只回滚 0003**，而不是 Down() 全量回滚：
+// 刻意**只回滚 0003**，而不是 Down() 全量回滚：
 // 全量回滚会把 0001 建的表一并删掉，届时"默认配置行不存在"是必然的，
 // 根本测不出 0003 的 down 是否漏删了种子行。隔离到单步才有判别力。
 func TestCorrelationM2Migration(t *testing.T) {
@@ -111,15 +109,11 @@ func TestCorrelationM2Migration(t *testing.T) {
 
 	// 2) 只回滚 0003：0001/0002 保持不动，correlation_rules 表仍在。
 	//
-	// 用 Steps(-2) 而不是 Steps(-1)：0004 落地后「回退一步」落到的已是 0004 自己，
-	// 那样测的是 0004 的 down 而非 0003 的。写成 latestVersion-2 的相对形式，
-	// 后续再新增迁移也不会把本用例的语义带偏。
-	if err := m.Steps(-2); err != nil {
-		t.Fatalf("回滚 0004+0003 失败: %v", err)
-	}
-	if v, dirty := currentVersion(t, m); v != latestVersion-2 || dirty {
-		t.Fatalf("回滚两步后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion-2, v, dirty)
-	}
+	// 用 mustDownTo(绝对版本) 而不是 Steps(-N)：后者「退几步」的语义随迁移总数
+	// 漂移。M4 新增 0005/0006/0007 之后，Steps(-2) 落到的是 0005 而不是 0003，
+	// 断言「版本应为 latestVersion-2」也跟着一起漂 —— 于是本用例转红，
+	// 而被测的 0003 的 down 从头到尾没被测过。绝对版本不随库变化。
+	mustDownTo(t, m, migrationCorrelation)
 	assertNeedsReviewColumn(t, dsn, false)
 	assertDefaultCorrelationRule(t, dsn, false)
 	assertIndexExists(t, dsn, needsReviewIndex, false)
@@ -127,8 +121,9 @@ func TestCorrelationM2Migration(t *testing.T) {
 
 	// 3) 重新 up 到最新：验证 0003 可重复执行（幂等）。
 	mustUp(t, m)
-	if v, dirty := currentVersion(t, m); v != latestVersion || dirty {
-		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion, v, dirty)
+	want := latestVersion(t)
+	if v, dirty := currentVersion(t, m); v != want || dirty {
+		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", want, v, dirty)
 	}
 	assertNeedsReviewColumn(t, dsn, true)
 	assertDefaultCorrelationRule(t, dsn, true)
@@ -137,7 +132,7 @@ func TestCorrelationM2Migration(t *testing.T) {
 // TestIncidentLifecycleM3Migration 覆盖 0004 的三项改动在**数据库层**确实生效且可单步回滚：
 // incidents.status 放宽到 6 值、timeline.event_type 放宽到 12 值、review_suppressions 建表。
 //
-// 与 TestCorrelationM2Migration 同理，刻意用 Steps(-1) **只回滚 0004**：
+// 与 TestCorrelationM2Migration 同理，刻意**只回滚 0004**：
 // 全量回滚会把两个 CHECK 所在的表一并删掉，届时「插入被拒」是必然的，
 // 根本测不出 0004 的 down 是否真的把约束还原了。隔离到单步才有判别力。
 //
@@ -182,14 +177,9 @@ func TestIncidentLifecycleM3Migration(t *testing.T) {
 
 	// 2) 只回滚 0004：0001/0002/0003 保持不动。
 	//
-	// 写成 latestVersion-1：将来再新增迁移时，这里会立刻转红提醒「本用例测的
-	// 已不是 0004」，而不是静默改测别的迁移。
-	if err := m.Steps(-1); err != nil {
-		t.Fatalf("回滚 0004 失败: %v", err)
-	}
-	if v, dirty := currentVersion(t, m); v != latestVersion-1 || dirty {
-		t.Fatalf("回滚一步后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion-1, v, dirty)
-	}
+	// 绝对版本而非 Steps(-1)：理由同 0003 那条——相对步数会随迁移总数漂移，
+	// 漂移后本用例测的不再是 0004 的 down，而断言却仍可能自洽。
+	mustDownTo(t, m, migrationIncidentLifecycle)
 	assertTableExists(t, dsn, reviewSuppressionsTable, false)
 	assertIndexExists(t, dsn, timelineIncidentTSIndex, false)
 	assertIndexExists(t, dsn, reviewSuppressionsIndex, false)
@@ -230,8 +220,9 @@ func TestIncidentLifecycleM3Migration(t *testing.T) {
 
 	// 3) 重新 up 到最新：验证 0004 可重复执行（幂等）。
 	mustUp(t, m)
-	if v, dirty := currentVersion(t, m); v != latestVersion || dirty {
-		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion, v, dirty)
+	want := latestVersion(t)
+	if v, dirty := currentVersion(t, m); v != want || dirty {
+		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", want, v, dirty)
 	}
 	assertTableExists(t, dsn, reviewSuppressionsTable, true)
 	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
@@ -303,7 +294,74 @@ ON CONFLICT (fingerprint) WHERE status = 'firing' DO NOTHING`
 	}
 }
 
-// --- 测试内小工具 ---
+// 被单步回滚用例引用的迁移版本号。
+//
+// 写常量而非从文件名推导是刻意的：用例要断言的是「回滚到**某个具体迁移之后**」，
+// 那个「之后」必须由用例作者明确指定。latestVersion(t) 是「库现在到哪」，
+// 两者语义不同：前者是本用例的测试目标，后者是仓库现状。
+const (
+	// migrationCorrelation 是 0003（correlation：needs_review 列 + 种子行）。
+	migrationCorrelation = 2
+	// migrationIncidentLifecycle 是 0004（incident 生命周期：status/timeline 放宽 + 抑制表）。
+	//
+	// 「回滚到 0004 之后」= 版本 3，因为 migrate 的版本号是**已应用的最大编号**。
+	// 写成 3 而不是 4 是这一行的全部含义，写错会让回滚多退或少退一个迁移，
+	// 而断言仍可能通过——测的就已经不是 0004 的 down 了。
+	migrationIncidentLifecycle = 3
+)
+
+// latestVersion 是当前迁移文件到达的版本号。
+//
+// **从 embed 里数出来，不是手写常量** —— 原先是 `const latestVersion = 4`，
+// 于是 M4 新增 0005/0006/0007 之后它没跟着改，而依赖它的断言全部失真：
+// 「回滚一步后版本应为 latestVersion-1」实际落到的已不是本用例要测的迁移。
+// 表现是两条历史用例（0003 / 0004 的单步回滚）转红，而产品行为完全正确。
+//
+// 这正是手写版本号的固有风险：它要求每个写迁移的人记得同步改一个数字，
+// 而「记得」不是可验证的。数出来则把同步成本降到零。
+func latestVersion(t *testing.T) uint {
+	t.Helper()
+	entries, err := fs.Glob(migrations.FS, "*.up.sql")
+	if err != nil {
+		t.Fatalf("遍历嵌入迁移失败: %v", err)
+	}
+	var max uint
+	for _, name := range entries {
+		base, _, ok := strings.Cut(path.Base(name), "_")
+		if !ok {
+			t.Fatalf("迁移文件名不规范（应为 NNNN_xxx.up.sql）: %s", name)
+		}
+		n, err := strconv.ParseUint(base, 10, 32)
+		if err != nil {
+			t.Fatalf("迁移文件名的版本号不是数字: %s", name)
+		}
+		if uint(n) > max {
+			max = uint(n)
+		}
+	}
+	if max == 0 {
+		t.Fatal("未在 embed 中找到任何 .up.sql 迁移")
+	}
+	return max
+}
+
+// mustDownTo 把库回滚到指定版本（**向下迁移，不允许 dirty**）。
+//
+// 用 Migrate(目标版本) 而不是 Steps(-N)：
+//   - Steps(-N) 的语义随迁移总数漂移。新增一个迁移后，「回退一步」
+//     落到的就不再是被测的那个，回滚测的全是别的东西——而且**不报错**，
+//     只会让「0003 的 down 漏了种子行」这类缺陷蒙混过关。
+//   - Migrate(版本) 把「我要退到哪」写死在用例里，与库里有几个迁移无关。
+func mustDownTo(t *testing.T, m *migrate.Migrate, target uint) {
+	t.Helper()
+	if err := m.Migrate(target); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("回滚到版本 %d 失败: %v", target, err)
+	}
+	if v, dirty := currentVersion(t, m); v != target || dirty {
+		t.Fatalf("回滚后版本应为 %d 且非 dirty，实际 version=%d dirty=%v",
+			target, v, dirty)
+	}
+}
 
 func newMigrator(t *testing.T, dsn string) *migrate.Migrate {
 	t.Helper()
