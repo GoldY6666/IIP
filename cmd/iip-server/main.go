@@ -274,6 +274,13 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	r.Get("/api/v1/reviews", api.ReviewList(incidentSvc, logger))
 	r.Post("/api/v1/reviews/{incidentID}/{alertID}", api.ReviewDecide(incidentSvc, logger))
 
+	// M4：证据查询（手册 T4.6 / §4.2）。挂在事件路由下而不是独立的
+	// /api/v1/evidence —— 证据必须挂在一个事件上才有意义
+	//（evidence 表 incident_id 是 NOT NULL 外键），而路径里带上事件 id
+	// 也让「这是谁的证据」不用看 body 就知道。
+	evidenceRepo := repository.NewEvidence(pool)
+	r.Get("/api/v1/incidents/{id}/evidence", api.EvidenceList(evidenceRepo, logger))
+
 	return r
 }
 
