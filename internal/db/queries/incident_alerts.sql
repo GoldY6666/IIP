@@ -18,6 +18,26 @@ WHERE ia.incident_id = sqlc.arg('incident_id')
 ORDER BY ia.correlated_at DESC, ia.alert_id DESC
 LIMIT sqlc.arg('row_limit')::int;
 
+-- name: CountIncidentAlertsByIncident :one
+-- 详情页的关联告警**总数**（不分页、不受 200 条上限影响）。
+--
+-- 为什么要单独一条而不是用 len(ListIncidentAlertsByIncident)：
+-- 详情内联告警有 200 条上限，截断后切片的长度不是总数。
+-- 拿它当 alert_count，300 条的事件会显示成 200 条 —— 前端据此渲染
+--「200 条关联告警」，把「只显示了前 200」说成了「一共 200 条」。
+-- 列表端用 LEFT JOIN 的 count(*) 已是真值，两个端点必须一致。
+SELECT count(*)
+FROM incident_alerts
+WHERE incident_id = sqlc.arg('incident_id');
+
+-- name: CountNeedsReviewAlertsByIncident :one
+-- 该事件下仍待确认的关联边总数。同 CountIncidentAlertsByIncident 的理由：
+-- 截断后切片里的 needs_review 统计会漏掉被截掉的部分。
+SELECT count(*)
+FROM incident_alerts
+WHERE incident_id = sqlc.arg('incident_id')
+  AND needs_review;
+
 -- name: ListReviewEdges :many
 -- 待确认队列：needs_review 为真的关联边（0003 已建部分索引，直接可用）。
 -- 与列表接口同样用 limit+1 探测分页，故 limit 由调用方按 limit+1 传入。

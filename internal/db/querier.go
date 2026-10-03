@@ -17,6 +17,17 @@ type Querier interface {
 	ConfirmReviewEdge(ctx context.Context, arg ConfirmReviewEdgeParams) (int64, error)
 	// 拒绝后判断该告警是否还有别的归属：没有才把 alerts.incident_id 回写为 NULL。
 	CountIncidentAlertsByAlert(ctx context.Context, alertID int64) (int64, error)
+	// 详情页的关联告警**总数**（不分页、不受 200 条上限影响）。
+	//
+	// 为什么要单独一条而不是用 len(ListIncidentAlertsByIncident)：
+	// 详情内联告警有 200 条上限，截断后切片的长度不是总数。
+	// 拿它当 alert_count，300 条的事件会显示成 200 条 —— 前端据此渲染
+	//「200 条关联告警」，把「只显示了前 200」说成了「一共 200 条」。
+	// 列表端用 LEFT JOIN 的 count(*) 已是真值，两个端点必须一致。
+	CountIncidentAlertsByIncident(ctx context.Context, incidentID int64) (int64, error)
+	// 该事件下仍待确认的关联边总数。同 CountIncidentAlertsByIncident 的理由：
+	// 截断后切片里的 needs_review 统计会漏掉被截掉的部分。
+	CountNeedsReviewAlertsByIncident(ctx context.Context, incidentID int64) (int64, error)
 	// M2 关联引擎：Incident 创建、候选集查询、关联写入。
 	// 规格依据：docs/IIP-M2详细开发手册.md §4.3 / §4.7。
 	// NEW 档：为一条无法与既有 Incident 关联的 firing 告警新建 Incident。

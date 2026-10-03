@@ -198,6 +198,24 @@ func (o *lifecycleOps) Alerts(ctx context.Context, incidentID int64, limit int) 
 	return out, nil
 }
 
+// CountAlerts 统计事件的关联告警总数（不受详情页 200 条内联上限影响）。
+func (o *lifecycleOps) CountAlerts(ctx context.Context, incidentID int64) (int, error) {
+	n, err := o.queries.CountIncidentAlertsByIncident(ctx, incidentID)
+	if err != nil {
+		return 0, fmt.Errorf("repository: 统计事件 %d 的关联告警数失败: %w", incidentID, err)
+	}
+	return int(n), nil
+}
+
+// CountNeedsReviewAlerts 统计该事件下仍待确认的关联边总数。
+func (o *lifecycleOps) CountNeedsReviewAlerts(ctx context.Context, incidentID int64) (int, error) {
+	n, err := o.queries.CountNeedsReviewAlertsByIncident(ctx, incidentID)
+	if err != nil {
+		return 0, fmt.Errorf("repository: 统计事件 %d 的待确认关联边失败: %w", incidentID, err)
+	}
+	return int(n), nil
+}
+
 // ListReviews 取待确认队列的一页。
 func (o *lifecycleOps) ListReviews(ctx context.Context, limit, offset int) ([]incident.ReviewEdge, error) {
 	rows, err := o.queries.ListReviewEdges(ctx, db.ListReviewEdgesParams{

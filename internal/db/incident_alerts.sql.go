@@ -64,6 +64,42 @@ func (q *Queries) CountIncidentAlertsByAlert(ctx context.Context, alertID int64)
 	return count, err
 }
 
+const countIncidentAlertsByIncident = `-- name: CountIncidentAlertsByIncident :one
+SELECT count(*)
+FROM incident_alerts
+WHERE incident_id = $1
+`
+
+// 详情页的关联告警**总数**（不分页、不受 200 条上限影响）。
+//
+// 为什么要单独一条而不是用 len(ListIncidentAlertsByIncident)：
+// 详情内联告警有 200 条上限，截断后切片的长度不是总数。
+// 拿它当 alert_count，300 条的事件会显示成 200 条 —— 前端据此渲染
+// 「200 条关联告警」，把「只显示了前 200」说成了「一共 200 条」。
+// 列表端用 LEFT JOIN 的 count(*) 已是真值，两个端点必须一致。
+func (q *Queries) CountIncidentAlertsByIncident(ctx context.Context, incidentID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countIncidentAlertsByIncident, incidentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countNeedsReviewAlertsByIncident = `-- name: CountNeedsReviewAlertsByIncident :one
+SELECT count(*)
+FROM incident_alerts
+WHERE incident_id = $1
+  AND needs_review
+`
+
+// 该事件下仍待确认的关联边总数。同 CountIncidentAlertsByIncident 的理由：
+// 截断后切片里的 needs_review 统计会漏掉被截掉的部分。
+func (q *Queries) CountNeedsReviewAlertsByIncident(ctx context.Context, incidentID int64) (int64, error) {
+	row := q.db.QueryRow(ctx, countNeedsReviewAlertsByIncident, incidentID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const deleteIncidentAlert = `-- name: DeleteIncidentAlert :execrows
 DELETE FROM incident_alerts
 WHERE incident_id = $1

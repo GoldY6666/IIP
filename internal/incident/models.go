@@ -177,6 +177,21 @@ type Store interface {
 	// Alerts 取事件的关联告警（含 score / needs_review），limit 由调用方给出。
 	Alerts(ctx context.Context, incidentID int64, limit int) ([]AlertLink, error)
 
+	// CountAlerts 统计事件的关联告警**总数**（不分页、不截断）。
+	//
+	// 单独一个方法而不是复用 len(Alerts(...))：详情页内联关联告警有 200 条上限，
+	// 用截断后的切片长度当总数，会让「实际 300 条」的事件显示成 200 条 ——
+	// 前端会照着这个数渲染「200 条关联告警」，把「只显示了前 200」说成了
+	//「一共 200 条」。列表端的 AlertCount 走 SQL count(*) 是真值，
+	// 两个端点必须一致。
+	CountAlerts(ctx context.Context, incidentID int64) (int, error)
+
+	// CountNeedsReviewAlerts 统计该事件下仍待确认的关联边**总数**。
+	//
+	// 与 CountAlerts 同样的理由：详情内联有 200 条上限，被截断掉的部分里
+	// 也可能有待确认的边。只在真发生截断时才需要调用（未截断时切片统计即真值）。
+	CountNeedsReviewAlerts(ctx context.Context, incidentID int64) (int, error)
+
 	// --- 以下为 REVIEW 队列（T3.4）所需，全部可在事务内执行 ---
 
 	// ListReviews 取待确认队列的一页（limit 已含 +1 探测余量）。

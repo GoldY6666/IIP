@@ -34,6 +34,13 @@ type fakeStore struct {
 	alertRows    []AlertLink
 	alertErr     error
 
+	// 真计数的覆盖值与故障注入。nil 表示「跟随 alertRows 推导」，
+	// 让「未截断」的既有用例不必为了新方法而改断言。
+	countAlertsOverride *int
+	countAlertsErr      error
+	countNeedsOverride  *int
+	countNeedsErr       error
+
 	// REVIEW 队列相关：与上面同样的「记录调用 + 返回预设值」套路。
 	reviewEdges    []ReviewEdge
 	reviewEdge     ReviewEdge
@@ -97,6 +104,34 @@ func (f *fakeStore) Timeline(_ context.Context, _ int64, _ int) ([]Entry, error)
 
 func (f *fakeStore) Alerts(_ context.Context, _ int64, _ int) ([]AlertLink, error) {
 	return f.alertRows, f.alertErr
+}
+
+// CountAlerts / CountNeedsReviewAlerts：真计数。默认跟随切片长度，
+// 这样「未截断」的既有用例无需改断言；截断相关的用例显式设两个独立字段。
+func (f *fakeStore) CountAlerts(_ context.Context, _ int64) (int, error) {
+	if f.countAlertsErr != nil {
+		return 0, f.countAlertsErr
+	}
+	if f.countAlertsOverride != nil {
+		return *f.countAlertsOverride, nil
+	}
+	return len(f.alertRows), nil
+}
+
+func (f *fakeStore) CountNeedsReviewAlerts(_ context.Context, _ int64) (int, error) {
+	if f.countNeedsErr != nil {
+		return 0, f.countNeedsErr
+	}
+	if f.countNeedsOverride != nil {
+		return *f.countNeedsOverride, nil
+	}
+	n := 0
+	for i := range f.alertRows {
+		if f.alertRows[i].NeedsReview {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // --- REVIEW 队列相关（T3.4）---
@@ -182,6 +217,14 @@ func (f *fakeTransactor) Timeline(ctx context.Context, id int64, limit int) ([]E
 
 func (f *fakeTransactor) Alerts(ctx context.Context, id int64, limit int) ([]AlertLink, error) {
 	return f.store.Alerts(ctx, id, limit)
+}
+
+func (f *fakeTransactor) CountAlerts(ctx context.Context, id int64) (int, error) {
+	return f.store.CountAlerts(ctx, id)
+}
+
+func (f *fakeTransactor) CountNeedsReviewAlerts(ctx context.Context, id int64) (int, error) {
+	return f.store.CountNeedsReviewAlerts(ctx, id)
 }
 
 func (f *fakeTransactor) ListReviews(ctx context.Context, limit, offset int) ([]ReviewEdge, error) {

@@ -98,6 +98,30 @@ func (s *Service) Detail(ctx context.Context, id int64) (Detail, error) {
 		}
 	}
 
+	// 两个计数字段都必须用**真值**，不能用截断后的切片长度：
+	// 上面已把 alerts 截到 200 条，拿 len(alerts) 当总数，250 条的事件会显示
+	//「200 条关联告警」—— 前端据此渲染，把「只显示了前 200」说成了「一共 200 条」。
+	// 列表端的 AlertCount 走 SQL count(*) 已是真值，两个端点必须一致。
+	//
+	// 未截断时切片长度本身就是真值，直接复用，省掉两次 count 查询 ——
+	// 详情页是值守时最常打开的接口，而绝大多数事件远不到 200 条关联告警。
+	alertCount := len(alerts)
+	needsReviewTotal := needsReview
+	if truncatedAlerts {
+		total, errCount := s.tx.CountAlerts(ctx, id)
+		if errCount != nil {
+			return Detail{}, errCount
+		}
+		alertCount = total
+
+		// 待确认数同样要查真值：被截掉的那部分里可能也有待确认的边。
+		needs, errNeeds := s.tx.CountNeedsReviewAlerts(ctx, id)
+		if errNeeds != nil {
+			return Detail{}, errNeeds
+		}
+		needsReviewTotal = needs
+	}
+
 	return Detail{
 		Summary: Summary{
 			ID:               snap.ID,
@@ -108,8 +132,8 @@ func (s *Service) Detail(ctx context.Context, id int64) (Detail, error) {
 			StartedAt:        snap.StartedAt,
 			ResolvedAt:       snap.ResolvedAt,
 			UpdatedAt:        snap.UpdatedAt,
-			AlertCount:       len(alerts),
-			NeedsReviewCount: needsReview,
+			AlertCount:       alertCount,
+			NeedsReviewCount: needsReviewTotal,
 		},
 		Alerts:            alerts,
 		Timeline:          timeline,
