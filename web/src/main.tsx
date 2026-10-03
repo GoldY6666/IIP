@@ -3,17 +3,37 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App as AntApp, ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
+import { BrowserRouter } from 'react-router-dom'
 import App from './App'
+import { iipDarkTheme } from './theme'
+import './index.css'
 
-const queryClient = new QueryClient()
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      // 不自动重试：事件列表是只读查询，失败时让用户看到错误并手动刷新，
+      // 默默重试三次只会让「后端挂了」看起来像「加载慢」。
+      retry: false,
+      // 事件详情在流转后由失效机制主动刷新，无需窗口聚焦重取 ——
+      // 值守时切回标签页就重新拉一次会让页面无谓地闪。
+      refetchOnWindowFocus: false,
+      staleTime: 10_000,
+    },
+  },
+})
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN}>
+    <ConfigProvider locale={zhCN} theme={iipDarkTheme}>
       {/* AntApp 提供 message/notification/modal 的 Context，供页面内 App.useApp() 调用 */}
       <AntApp>
         <QueryClientProvider client={queryClient}>
-          <App />
+          {/* BrowserRouter 必须在 ConfigProvider 内层无要求，但放在这里
+              与 QueryClientProvider 同级：两者的 Provider 顺序无所谓，
+              写在一起便于一眼看全全局 Provider。 */}
+          <BrowserRouter>
+            <App />
+          </BrowserRouter>
         </QueryClientProvider>
       </AntApp>
     </ConfigProvider>

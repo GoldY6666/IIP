@@ -1,0 +1,68 @@
+/* 全局样式。
+ *
+ * 只写**antd token 覆盖不到**的部分：主题在 theme.ts 里配，
+ * 这里仅处理滚动条、行 hover 过渡这类纯 CSS 行为。
+ *
+ * 不要在这里写颜色常量：散落的十六进制会让「换主题」变成全局搜索，
+ * 而令牌集中在 theme.ts 才改得动。
+ *
+ * 注意：本文件用 /* *\/ 块注释而非 // —— CSS 里 // 不是注释，
+ * vite会告警（tsc 查不出来，只有构建期才暴露）。 */
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/* 暗底上滚动条默认很亮（尤其 Windows 上 Chrome 的默认灰白条），
+   在整屏深色的控制台里非常刺眼。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3d444d transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #3d444d;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #586069;
+  background-clip: content-box;
+}
+
+/* 事件列表的整行可点。antd 只给了行内元素的 hover，
+   整行可点时若不补这个，用户悬停在空白单元格上得不到任何反馈，
+   会以为只有文字能点。 */
+.clickable-row {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+/* 表格里的代码块（事件 ID / 指纹）在暗底上不该是默认浅色底。 */
+.ant-table .ant-typography code {
+  background: #1c2128;
+  color: #79c0ff;
+  padding-inline: 5px;
+  border-radius: 4px;
+}
+
+/* 数字列：单元格右对齐时，表头也必须右对齐。
+   否则「告警」两个字贴在左边、数字贴右边线，中间一大片空白，
+   看着像表头与数据是两列错开了。 */
+.ant-table .num-col {
+  text-align: right;
+}
+/* 表头单元格上的 th.ant-table-cell.num-col 优先级更高，单独自带一份。 */
+.ant-table th.num-col {
+  text-align: right;
+}

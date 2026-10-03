@@ -3,3 +3,8 @@
 node_modules/
 dist/
 .vite/
+
+# TypeScript 增量构建的缓存（tsc -b 会写）。
+# 它是**构建产物且含绝对路径**，换机器后必然与本地不符 —— 入库只会制造
+# 无意义的 diff噪声，并让人误以为 tsconfig 变了。关闭 M3 报告 §10.3 的 OPEN 项。
+*.tsbuildinfo
