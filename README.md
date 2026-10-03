@@ -513,7 +513,8 @@ SYN **静默丢包**，`TimeoutError` 也属 `OSError`——「没人监听」�
 | 死信与超时回收 | **达成** | 真库用例；退避 5s→10s 封顶 5min |
 | 超 50 条时截断且 API 能读到标记 | **达成** | 响应含 `truncated`/`total`/`limit`，真计数来自 `count(*)` |
 | 迁移 `0005` up→down→up 三连 | **达成** | `migrations` 包 4/4 全绿（164s） |
-| build / vet / gofmt / lint / 真库 SKIP=0 | **达成** | 全部 rc=0，SKIP=0 |
+| build / vet / gofmt / lint | **达成** | 全部 rc=0 |
+| 全量真库测试 | **达成** | **425 PASS / 0 FAIL / 0 SKIP**，串行 22.5 分钟 |
 | 前端证据 Tab 接真实数据 | **达成** | `tsc -b` + `vite build` rc=0 |
 
 ### 未达成 / 降级（如实标注，不得记为通过）
