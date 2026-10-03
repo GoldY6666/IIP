@@ -492,3 +492,60 @@ SYN **静默丢包**，`TimeoutError` 也属 `OSError`——「没人监听」�
 > 本地库隔离粒度是 **schema 而非 database**——`testsupport.NewDB` 用「共享 session 库 + 每用例一个
 > `iip_case_<hex>` schema」，因本机 `CREATE DATABASE` 恒定 35 秒且调 PG 参数无效（已实测证伪），
 > 改后 61.2s/条 → 13.1s/条。
+
+---
+
+## M4 验收状态（如实标注）
+
+**阶段**：M4（Evidence 自动收集）功能代码与验收脚本已全部落地，B1–B8 逐批提交。
+详细报告见 `docs/M4-交付详细报告.md`；决策记录见 `docs/decisions.md`（ADR-017 / ADR-018）。
+
+### 已完成并实测
+
+| 判据（手册 §八） | 状态 | 实测 |
+|------|------|------|
+| 事件创建后 2 分钟内 ≥5 条证据 | **达成** | 3 个事件各 5 条，任务全 `done`，无死信 |
+| `query` 字段可复制后复现 | **达成** | 断言非空 + 前端一键复制 |
+| webhook 延迟在数据源宕机时无变化 | **达成** | 31ms → 61ms（预算 531ms）；采集不在接入路径上 |
+| 恢复后自动补采 | **达成** | `attempts` 1→2→3 走完，该事件从 0 条变 5 条 |
+| 三类采集器均有 mock server 单测 | **达成** | Prometheus / Loki / K8s（K8s 24 个用例） |
+| 并发领取不重复 | **达成** | 真库并发用例，`FOR UPDATE SKIP LOCKED` |
+| 死信与超时回收 | **达成** | 真库用例；退避 5s→10s 封顶 5min |
+| 超 50 条时截断且 API 能读到标记 | **达成** | 响应含 `truncated`/`total`/`limit`，真计数来自 `count(*)` |
+| 迁移 `0005` up→down→up 三连 | **达成** | `migrations` 包 4/4 全绿（164s） |
+| build / vet / gofmt / lint / 真库 SKIP=0 | **达成** | 全部 rc=0，SKIP=0 |
+| 前端证据 Tab 接真实数据 | **达成** | `tsc -b` + `vite build` rc=0 |
+
+### 未达成 / 降级（如实标注，不得记为通过）
+
+| 项 | 状态 | 原因 |
+|----|------|------|
+| **容器链路断言 0 失败** | **本轮未复跑** | 本机 Docker 环境未确认；M4 新增 `tasks` 表与证据 API，断言数会变。补做：`python scripts/verify-images.py` |
+| K8s 采集器接真实集群 | **未验证** | 偏差 B1（ADR-017）：仓库零 K8s 依赖，只有 mock server 单测。**默认关闭** |
+| `evidence.confidence` | **全部为空** | OPEN-M4-1：无采集器评估它。留空而非填 1.0 —— 填 1.0 等于宣称「确凿」而没有依据 |
+| `trace` 类型证据 | **无采集器** | OPEN-M4-2 |
+| 前端自动化测试 | **NOT DONE** | ADR-016：延到 M5。`web/package.json` 无 test 脚本，手册 §4.8 类条款在 M4 仍为 NOT DONE |
+
+### 本阶段发现并修复的缺陷（四处，均由新写的测试抓出）
+
+1. **K8s 事件被挂到错误的服务上**（ADR-017）。原用字符串前缀匹配判归属，
+   `checkout-staging-1` 被算作 `checkout` 的事件 —— 等于把 A 服务的事故证据挂到 B 上，
+   而页面上完全看不出来。改为「先在全命名空间定出唯一主人（最长匹配），再判归属」。
+   中间踩过坑：只在「本服务的 Deployment 集合」内找最长匹配仍不够，
+   因为 `checkout-staging` 不在集合里，于是被 `checkout` 认领。
+2. **K8s 采集器开关是死配置**（ADR-017）。`EvidenceK8sEnabled=true` 且地址已配时，
+   装配函数只打日志、**从不注册**。表现是「开关已开、地址已填、日志说已启用，
+   但证据恒为 0 条且无任何报错」。之前没测出来是因为采集器的 24 个单测
+   **全部用自己 new 的实例、绕过了 `buildRegistry`** —— 替身验不了装配链路。
+   已补 `cmd/iip-worker/main_test.go` 的 3 个装配用例。
+3. **迁移单步回滚用例的断言随迁移总数漂移**（ADR-018）。M4 加了 3 个迁移后，
+   0003/0004 的单步回滚用例转红（断言 `latestVersion-2` = 2，实测 5）——
+   **产品行为完全正确，红的是测试本身**，而且被测的 down 从头到尾没被测过。
+   改用绝对版本 `Migrate(v)`，并把 `latestVersion` 改为从 embed 数出来。
+4. **端到端判据 #3、#4 曾是假通过**。#4 的「证据 5→15 条」是因为新告警创建了新事件，
+   而 `tasks` 3→3、`done=3` 第一轮就满足了 —— worker 从未重试过任何东西；
+   #3 第二次投的告警与前面同指纹被去重 `skipped`。两处都改成真正能判别的断言。
+
+> 复现方式：M4 真库门禁 `python D:\_iip_setup\m4_final_gate.py`（约 25 分钟，含全量 `./...`）；
+> 业务闭环 `python scripts\verify-func.py`（约 3 分钟，M4 段含宕机与补采两场景）；
+> 前端构建 `python D:\_iip_setup\build_web.py`（`tsc -b` + `vite build`）。
