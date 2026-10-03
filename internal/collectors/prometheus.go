@@ -2,6 +2,7 @@
 //
 // 本文件是 Prometheus 采集器（T4.3）：按 service label 查 RED 指标，
 // 做**窗口前后对比**，把对比结果作为证据落库。
+// 通用部分（超时、HTTP 骨架、数值解析）在 collectors.go。
 //
 // 设计要点（每条都有理由，不是默认值抄来的）：
 //
@@ -9,14 +10,14 @@
 //     的绝对值说明不了问题：一个服务 QPS 1000、错误率 0.1% 可能完全正常。
 //     有意义的是「事故窗口内的错误率比事故前高了多少倍」。
 //
-//  2. **query 字段存可复现的 PromQL。** 验收标准第2 条要求
+//  2. **query 字段存可复现的 PromQL。** 验收标准第 2 条要求
 //     「query 字段可复制后复现」—— 存一句人话（"错误率上升"）无法复现。
 //
 //  3. **降级不阻塞。** 手册 §4.5：超时 5s，失败只记 error 日志，
 //     其余采集器照常落库。外部数据源宕机时告警主链路的延迟不能有变化。
 //
 //  4. **不给真实时间的证据不写**（§4.4）：Prometheus 返回的样本自带时间戳，
-//     直接用；没有样本时间就用查询区间的中点，并**在metadata 里标明**。
+//     直接用；没有样本时间就丢弃这条证据，不用采集时刻兜底。
 package collectors
 
 import (
@@ -24,7 +25,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -35,12 +35,6 @@ import (
 	"github.com/yu/iip/internal/evidence"
 )
 
-// SourcePrometheus 是 Prometheus 采集器的来源标识，落库到 evidence.source。
-const SourcePrometheus = "prometheus"
-
-// 默认查询超时（手册 §4.5：三类采集器均为 5s）。
-const defaultCollectorTimeout = 5 * time.Second
-
 // PrometheusCollector 从 Prometheus 查 RED 指标并产出证据。
 //
 // **无状态且并发安全**（evidence.Collector 的硬契约）：
@@ -50,28 +44,13 @@ type PrometheusCollector struct {
 	client  *http.Client
 }
 
-// PromCollectorOption 是 PrometheusCollector 的可选参数。
-type PromCollectorOption func(*PrometheusCollector)
-
-// WithTimeout 设置查询超时。
-func WithTimeout(d time.Duration) PromCollectorOption {
-	return func(c *PrometheusCollector) {
-		if d > 0 {
-			c.client.Timeout = d
-		}
-	}
-}
-
 // NewPrometheusCollector 建一个 Prometheus 采集器。
-func NewPrometheusCollector(baseURL string, opts ...PromCollectorOption) *PrometheusCollector {
-	c := &PrometheusCollector{
+func NewPrometheusCollector(baseURL string, opts ...Option) *PrometheusCollector {
+	o := resolveOptions(opts)
+	return &PrometheusCollector{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		client:  &http.Client{Timeout: defaultCollectorTimeout},
+		client:  &http.Client{Timeout: o.timeout},
 	}
-	for _, o := range opts {
-		o(c)
-	}
-	return c
 }
 
 // Source 返回来源标识。
@@ -242,34 +221,10 @@ func (c *PrometheusCollector) query(
 	v.Set("time", strconv.FormatInt(w.End.Unix(), 10))
 
 	endpoint := c.baseURL + "/api/v1/query?" + v.Encode()
-	// 用 http.NoBody 而非 nil：Go 1.8 起 NewRequest 会为 nil body 填 NoBody，
-	// 但显式写出来能表明「这是刻意的 GET 无请求体」，而不是漏传。
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
-	if err != nil {
-		return sample{}, fmt.Errorf("构造请求失败: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.client.Do(req)
-	if err != nil {
-		return sample{}, fmt.Errorf("请求失败: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// 上限保护：Prometheus 挂起时可能返回很大的错误页，
-	// 不限量读会把内存吃满。
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return sample{}, fmt.Errorf("读取响应失败: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return sample{}, fmt.Errorf("HTTP %d: %s",
-			resp.StatusCode, strings.TrimSpace(truncate(string(body), 200)))
-	}
 
 	var parsed promResult
-	if uErr := json.Unmarshal(body, &parsed); uErr != nil {
-		return sample{}, fmt.Errorf("解析响应失败: %w", uErr)
+	if err := httpGetJSON(ctx, c.client, endpoint, &parsed); err != nil {
+		return sample{}, err
 	}
 	if parsed.Status != "success" {
 		return sample{}, fmt.Errorf("查询未成功: %s", truncate(parsed.Error, 200))
@@ -283,21 +238,17 @@ func (c *PrometheusCollector) query(
 		return sample{}, fmt.Errorf("样本结构异常：期望 2 元素，实得 %d", len(first.Value))
 	}
 
-	var secs float64
-	if uErr := json.Unmarshal(first.Value[0], &secs); uErr != nil {
-		return sample{}, fmt.Errorf("解析样本时间失败: %w", uErr)
+	// 样本时间与值都取自响应（§4.4），一个都不拿采集时刻兜底。
+	secs, err := parseUnixSeconds(first.Value[0])
+	if err != nil {
+		return sample{}, fmt.Errorf("解析样本时间失败: %w", err)
 	}
-	// Prometheus 的 value 恒为字符串（"NaN" / "+Inf" 都可能出现）。
-	var raw string
-	if uErr := json.Unmarshal(first.Value[1], &raw); uErr != nil {
-		return sample{}, fmt.Errorf("解析样本值失败: %w", uErr)
-	}
-	f, pErr := parsePromValue(raw)
-	if pErr != nil {
-		return sample{}, pErr
+	f, err := parseNumeric(first.Value[1])
+	if err != nil {
+		return sample{}, fmt.Errorf("解析样本值失败: %w", err)
 	}
 
-	return sample{timestamp: time.Unix(int64(secs), 0).UTC(), value: f}, nil
+	return sample{timestamp: time.Unix(secs, 0).UTC(), value: f}, nil
 }
 
 // splitNoData 把「无样本」从错误里剥出来，返回「是否有数据」与「真正的错误」。
@@ -323,29 +274,6 @@ func splitNoData(s sample, err error) (hasData bool, realErr error) {
 var errNoData = errors.New("该区间无样本")
 
 // parsePromValue 解析 Prometheus 的数值字符串。
-func parsePromValue(raw string) (float64, error) {
-	s := strings.TrimSpace(raw)
-	switch s {
-	case "NaN":
-		return math.NaN(), nil
-	case "+Inf", "Inf":
-		return math.Inf(1), nil
-	case "-Inf":
-		return math.Inf(-1), nil
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, fmt.Errorf("数值 %q 无法解析: %w", s, err)
-	}
-	return f, nil
-}
-
-// buildRedEvidence 组装一条 RED 对比证据。
-//
-// baselineReason 说明「为什么没有基线」：nil 表示有基线；
-// 非nil 时必须**如实区分**「无样本」与「查询失败」——
-// 前者是客观事实（服务本来就没这段数据），后者是数据源故障（该重试）。
-// 一律说成「无数据」会把故障伪装成正常，运维查不出来。
 func buildRedEvidence(
 	q redQuery, in evidence.Input,
 	cur sample, prev sample, hasPrev bool, prevErr error,
@@ -402,57 +330,4 @@ func buildRedEvidence(
 		// Confidence 刻意留空（手册 OPEN-M4-1）：采集器没有判断
 		// 「这条证据有多可靠」的能力，填 1.0 等于宣称确凿。
 	}, nil
-}
-
-// ratio 计算后值相对前值的倍数。
-//
-// 分母为 0 时返回 0 而非 +Inf：+Inf 在 JSON 里不合法，
-// 而「从 0 涨到 100」用「无可比基线」表达更诚实——
-// 这个区分由 hasPrev 与 baseline 字段承担。
-func ratio(after, before float64) float64 {
-	if before == 0 {
-		return 0
-	}
-	return after / before
-}
-
-// formatFloat 统一浮点格式，避免 0.30000000000000004 这类噪声进证据。
-func formatFloat(f float64) string {
-	if math.IsNaN(f) {
-		return "NaN"
-	}
-	if math.IsInf(f, 1) {
-		return "+Inf"
-	}
-	if math.IsInf(f, -1) {
-		return "-Inf"
-	}
-	return strconv.FormatFloat(f, 'f', 4, 64)
-}
-
-// escapeLabelValue 转义 PromQL label 值里的引号与反斜杠。
-//
-// 不转义的话，服务名里出现 " 就会让表达式语法错误，
-// 而 Prometheus 返回的 4xx 错误体会在解析阶段才暴露 —��
-// 排查时容易误以为是「网络问题」。
-func escapeLabelValue(s string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return r.Replace(s)
-}
-
-// withFailures 给 metadata 追加失败原因。
-func withFailures(md map[string]string, failures []string) map[string]string {
-	if md == nil {
-		md = make(map[string]string, 1)
-	}
-	md["failures"] = strings.Join(failures, "; ")
-	return md
-}
-
-// truncate 截断长文本，保留前 n 个字符。
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

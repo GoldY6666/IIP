@@ -89,12 +89,6 @@ func writePromEmpty(t *testing.T, w http.ResponseWriter) {
 	}
 }
 
-// 固定窗口，起点为 Unix 整点便于构造样本时间。
-func testWindow() evidence.Window {
-	end := time.Unix(1_700_000_000, 0).UTC()
-	return evidence.Window{Start: end.Add(-time.Hour), End: end}
-}
-
 // isAfterWindow 判断请求的查询时刻是否落在**事故窗口**内。
 //
 // 判据用「严格大于窗口起点」而非「小于等于」：实现里前窗口的查询时刻
