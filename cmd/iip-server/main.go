@@ -30,6 +30,7 @@ import (
 	"github.com/yu/iip/internal/api"
 	"github.com/yu/iip/internal/config"
 	"github.com/yu/iip/internal/correlation"
+	"github.com/yu/iip/internal/incident"
 	"github.com/yu/iip/internal/logging"
 	appmw "github.com/yu/iip/internal/middleware"
 	"github.com/yu/iip/internal/repository"
@@ -237,7 +238,13 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	}
 
 	cfgStore := repository.NewCorrelationConfig(pool)
-	corrSvc := correlation.NewService(repository.NewIncidents(pool), cfgStore, topo, logger)
+	// M3：给关联路径挂上「时间线留痕」与「REVIEW 抑制」两个可选能力。
+	// 两者都在 correlation 内部做成 best-effort（失败只记日志），
+	// 因此这里的注入不会让 webhook 的成功与否取决于它们。
+	lifecycle := repository.NewLifecycle(pool)
+	corrSvc := correlation.NewService(repository.NewIncidents(pool), cfgStore, topo, logger).
+		WithTimeline(lifecycle).
+		WithSuppressions(repository.NewReviews(pool))
 
 	// M1：告警接入。此处只有装配——五阶段流水线在 internal/alert，
 	// SQL 在 internal/repository，handler 只负责 HTTP 契约（手册 §4.5）。
@@ -255,9 +262,17 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	r.Get("/api/v1/correlation/config", api.CorrelationConfigGet(cfgStore, logger))
 	r.Put("/api/v1/correlation/config", api.CorrelationConfigPut(cfgStore, logger))
 
-	// M3 起：事件（incident）查询与生命周期，不在 M2 范围（手册 §3.2 已列明不做）。
-	// M3: r.Get("/api/v1/incidents", ...)
-	// M3: r.Get("/api/v1/incidents/{id}", ...)
+	// M3：事件查询与生命周期（手册 §4.3）。装配处只连线，业务在 internal/incident，
+	// SQL 在 internal/repository —— 与 M1/M2 的分层一致。
+	incidentSvc := incident.NewService(lifecycle)
+	r.Get("/api/v1/incidents", api.IncidentList(incidentSvc, logger))
+	r.Get("/api/v1/incidents/{id}", api.IncidentDetail(incidentSvc, logger))
+	r.Post("/api/v1/incidents/{id}/transition", api.IncidentTransition(incidentSvc, logger))
+	r.Post("/api/v1/incidents/{id}/comments", api.IncidentComment(incidentSvc, logger))
+
+	// M3：REVIEW 队列与人工复核（手册 §4.5）。
+	r.Get("/api/v1/reviews", api.ReviewList(incidentSvc, logger))
+	r.Post("/api/v1/reviews/{incidentID}/{alertID}", api.ReviewDecide(incidentSvc, logger))
 
 	return r
 }

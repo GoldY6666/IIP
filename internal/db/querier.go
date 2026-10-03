@@ -11,11 +11,19 @@ import (
 )
 
 type Querier interface {
+	// 把告警的 incident_id 置 NULL（该告警已不属于任何事件）。
+	ClearAlertIncident(ctx context.Context, alertID int64) (int64, error)
+	// 确认合并：清掉待确认标记，**保留**关联边（确认的含义是「这条关联是对的」）。
+	ConfirmReviewEdge(ctx context.Context, arg ConfirmReviewEdgeParams) (int64, error)
+	// 拒绝后判断该告警是否还有别的归属：没有才把 alerts.incident_id 回写为 NULL。
+	CountIncidentAlertsByAlert(ctx context.Context, alertID int64) (int64, error)
 	// M2 关联引擎：Incident 创建、候选集查询、关联写入。
 	// 规格依据：docs/IIP-M2详细开发手册.md §4.3 / §4.7。
 	// NEW 档：为一条无法与既有 Incident 关联的 firing 告警新建 Incident。
 	// status 固定 'open'（M3 状态机负责后续流转）；service 取自告警 labels.service。
 	CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error)
+	// 拒绝合并：删除该关联边。
+	DeleteIncidentAlert(ctx context.Context, arg DeleteIncidentAlertParams) (int64, error)
 	// 历史相似度的数据源：统计两个 fingerprint 在「同一 Incident」中的共现比例。
 	//   co    = 同时包含两者的 Incident 数
 	//   total = 包含任一者的 Incident 数（并集）
@@ -58,6 +66,11 @@ type Querier interface {
 	// 详情本体。M3 的状态流转需要「先读到当前 status 再决定能否转」，
 	// 故按主键直取单行；不存在时 sqlc 返回 pgx.ErrNoRows，由调用方映射为 404。
 	GetIncidentByID(ctx context.Context, id int64) (Incident, error)
+	// 判定前确认「这条待确认边还在」。
+	//
+	// 带上 needs_review 条件：已经确认过的边（needs_review=FALSE）不应再被操作一次，
+	// 否则重复 reject 会往抑制表写第二次、重复 confirm 会产生重复留痕。
+	GetReviewEdge(ctx context.Context, arg GetReviewEdgeParams) (GetReviewEdgeRow, error)
 	// 持久化归一化后的告警（见手册 §4.2 阶段五 Persist）。
 	//
 	// ON CONFLICT 是 M1 的**数据库层去重兜底**：应用层的「先查后写」防不住并发投递，
@@ -66,6 +79,10 @@ type Querier interface {
 	// 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
 	// （而不是错误），详见 internal/repository/alerts.go。
 	InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert, error)
+	// 写一条抑制行。同一 (fingerprint, incident_id) 重复写入静默跳过：
+	// 唯一约束已在 0004 建好，这里用 ON CONFLICT DO NOTHING 让它成为幂等操作，
+	// 而不是让「同一个人连点两次拒绝」变成 500。
+	InsertReviewSuppression(ctx context.Context, arg InsertReviewSuppressionParams) error
 	// M3 事件生命周期：timeline 留痕。
 	// 规格依据：docs/IIP-M3详细开发手册.md §4.2 / §4.7。
 	// 写入一条时间线条目并返回整行（含数据库生成的 id / timestamp）。
@@ -73,6 +90,14 @@ type Querier interface {
 	// 见 ADR-003）——状态流转是「刚刚发生」的，故 incident 服务层传 time.Now()。
 	// actor 与 metadata 可空：系统自动写入的事件（如 alert_linked）可能没有操作人。
 	InsertTimelineEntry(ctx context.Context, arg InsertTimelineEntryParams) (Timeline, error)
+	// M3 REVIEW 抑制（手册 §4.5）。
+	//
+	// 抑制键是 **(fingerprint, incident_id)**，不是 alert_id 对：新告警到来时 ID 必然不同，
+	// 按 ID 记的抑制永远命中不了第二次。fingerprint 已剔除 instance/pod/container/node
+	// 四个动态键，因此能跨实例、跨次复用。
+	// 关联流程判定为 REVIEW 档时先查这里；命中则不建边、按 NEW 档处理。
+	// 用 EXISTS 而不是 count(*)：只关心「有没有」，EXISTS 命中即可短路返回。
+	IsSuppressed(ctx context.Context, arg IsSuppressedParams) (bool, error)
 	// 关联一条告警到 Incident。(incident_id, alert_id) 为主键，重复链接静默跳过（幂等）。
 	// correlation_score 为 0.0000-1.0000；NEW 档传 NULL（无关联对象）。
 	// needs_review = true 表示 REVIEW 档，待人工确认。
@@ -86,10 +111,31 @@ type Querier interface {
 	// 事件详情页展示其关联告警（走 idx_alerts_incident_id）。
 	// M1 不调用（须等 M2 建立关联），保留供 M3 / M5 使用。
 	ListAlertsByIncident(ctx context.Context, incidentID pgtype.Int8) ([]Alert, error)
+	// M3 详情页：关联告警与 REVIEW 队列（手册 §4.4 / §4.5 / §4.7）。
+	// 详情页的「关联告警」列表。逐行读 incident_alerts，再 JOIN alerts 补齐展示字段。
+	// correlation_score 为 NULL 表示 NEW 档（该告警是事件的起因），前端显示「—」而不是 0。
+	ListIncidentAlertsByIncident(ctx context.Context, arg ListIncidentAlertsByIncidentParams) ([]ListIncidentAlertsByIncidentRow, error)
+	// 列表（手册 §4.3）：过滤 + 排序 + limit/offset。
+	//
+	// 三个过滤口径的取舍：
+	//   * status / severity 用**数组全量兜底**：调用方不过滤时传入全部合法取值，
+	//     而不是在 SQL 里写「参数为 NULL 则不过滤」的分支——后者让同一条 SQL 有两种执行形态，
+	//     计划缓存与索引选择都跟着摇摆。
+	//   * service / from / to 用 narg 的 NULL 分支：这三个是真正的「可选」条件，
+	//     用 NULL 表达「不限」比传哨兵值（如空串、零时间）更不容易歧义。
+	//   * 关联告警数与待确认数用 LEFT JOIN 子查询聚合（手册 §4.4：这两个计数在关联边上，
+	//     incidents 表没有），没有关联边的事件按 0 计而不是被 JOIN 掉。
+	//
+	// 排序以 id DESC 收尾（ADR-007 的口径）：starts_at 可能完全相同，
+	// 只按它排序会让同一时刻的事件在翻页时顺序漂移。
+	ListIncidents(ctx context.Context, arg ListIncidentsParams) ([]ListIncidentsRow, error)
 	// 取所有 open / investigating 的 Incident 及其已关联告警（供逐对评分）。
 	// 每行是「一条已关联告警」；调用方按 incident_id 聚合。
 	// ends_at 可能为 NULL（仍 firing），由 Go 侧按当前时刻兜底。
 	ListOpenIncidentsWithAlerts(ctx context.Context) ([]ListOpenIncidentsWithAlertsRow, error)
+	// 待确认队列：needs_review 为真的关联边（0003 已建部分索引，直接可用）。
+	// 与列表接口同样用 limit+1 探测分页，故 limit 由调用方按 limit+1 传入。
+	ListReviewEdges(ctx context.Context, arg ListReviewEdgesParams) ([]ListReviewEdgesRow, error)
 	// 详情页时间线：新近在上。id DESC 作为次级排序键，避免同一时刻的多条事件
 	// 在翻页时顺序漂移（只按 timestamp 排序时，同秒事件的前后关系是未定义的）。
 	// row_limit 由调用方传入（默认 200），不写死在 SQL 里。

@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -22,6 +23,35 @@ type fakeStore struct {
 	appendErr  error
 	statusArgs []UpdateStatusArg
 	entries    []Entry
+
+	// 列表相关：记录每次查询的入参，并返回预设行（供 limit+1 探测断言）。
+	listArgs  []ListFilter
+	summaries []Summary
+	listErr   error
+
+	timelineRows []Entry
+	timelineErr  error
+	alertRows    []AlertLink
+	alertErr     error
+
+	// REVIEW 队列相关：与上面同样的「记录调用 + 返回预设值」套路。
+	reviewEdges    []ReviewEdge
+	reviewEdge     ReviewEdge
+	reviewErr      error
+	listReviewsErr error
+	listReviewArgs int
+	confirmOK      bool
+	confirmErr     error
+	confirmCalls   int
+	deleteOK       bool
+	deleteErr      error
+	deleteCalls    int
+	alertEdgeCount int
+	countErr       error
+	clearedAlerts  []int64
+	clearErr       error
+	suppressions   []string
+	suppressErr    error
 }
 
 func (f *fakeStore) GetByID(_ context.Context, _ int64) (Snapshot, error) {
@@ -51,6 +81,69 @@ func (f *fakeStore) AppendTimelineEntry(_ context.Context, e Entry) error {
 	return nil
 }
 
+// 列表 / 时间线 / 关联告警三个读方法：记录入参并返回预设结果，
+// 让 List 的分页与截断逻辑可以脱离数据库验证。
+func (f *fakeStore) List(_ context.Context, arg ListFilter) ([]Summary, error) {
+	f.listArgs = append(f.listArgs, arg)
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.summaries, nil
+}
+
+func (f *fakeStore) Timeline(_ context.Context, _ int64, _ int) ([]Entry, error) {
+	return f.timelineRows, f.timelineErr
+}
+
+func (f *fakeStore) Alerts(_ context.Context, _ int64, _ int) ([]AlertLink, error) {
+	return f.alertRows, f.alertErr
+}
+
+// --- REVIEW 队列相关（T3.4）---
+
+func (f *fakeStore) ListReviews(_ context.Context, _, _ int) ([]ReviewEdge, error) {
+	f.listReviewArgs++
+	if f.listReviewsErr != nil {
+		return nil, f.listReviewsErr
+	}
+	return f.reviewEdges, nil
+}
+
+func (f *fakeStore) GetReviewEdge(_ context.Context, _, _ int64) (ReviewEdge, error) {
+	if f.reviewErr != nil {
+		return ReviewEdge{}, f.reviewErr
+	}
+	return f.reviewEdge, nil
+}
+
+func (f *fakeStore) ConfirmReviewEdge(_ context.Context, _, _ int64) (bool, error) {
+	f.confirmCalls++
+	return f.confirmOK, f.confirmErr
+}
+
+func (f *fakeStore) DeleteAlertEdge(_ context.Context, _, _ int64) (bool, error) {
+	f.deleteCalls++
+	return f.deleteOK, f.deleteErr
+}
+
+func (f *fakeStore) CountAlertEdges(_ context.Context, _ int64) (int, error) {
+	return f.alertEdgeCount, f.countErr
+}
+
+func (f *fakeStore) ClearAlertIncident(_ context.Context, alertID int64) error {
+	f.clearedAlerts = append(f.clearedAlerts, alertID)
+	return f.clearErr
+}
+
+func (f *fakeStore) AddSuppression(_ context.Context, fingerprint string, incidentID int64, _, _ string) error {
+	if f.suppressErr != nil {
+		return f.suppressErr
+	}
+	f.suppressions = append(f.suppressions,
+		fingerprint+"#"+strconv.FormatInt(incidentID, 10))
+	return nil
+}
+
 // fakeTransactor 给 fakeStore 套上事务边界，并记录事务被开了几次。
 type fakeTransactor struct {
 	store     *fakeStore
@@ -77,6 +170,46 @@ func (f *fakeTransactor) UpdateStatus(ctx context.Context, arg UpdateStatusArg) 
 
 func (f *fakeTransactor) AppendTimelineEntry(ctx context.Context, e Entry) error {
 	return f.store.AppendTimelineEntry(ctx, e)
+}
+
+func (f *fakeTransactor) List(ctx context.Context, arg ListFilter) ([]Summary, error) {
+	return f.store.List(ctx, arg)
+}
+
+func (f *fakeTransactor) Timeline(ctx context.Context, id int64, limit int) ([]Entry, error) {
+	return f.store.Timeline(ctx, id, limit)
+}
+
+func (f *fakeTransactor) Alerts(ctx context.Context, id int64, limit int) ([]AlertLink, error) {
+	return f.store.Alerts(ctx, id, limit)
+}
+
+func (f *fakeTransactor) ListReviews(ctx context.Context, limit, offset int) ([]ReviewEdge, error) {
+	return f.store.ListReviews(ctx, limit, offset)
+}
+
+func (f *fakeTransactor) GetReviewEdge(ctx context.Context, incidentID, alertID int64) (ReviewEdge, error) {
+	return f.store.GetReviewEdge(ctx, incidentID, alertID)
+}
+
+func (f *fakeTransactor) ConfirmReviewEdge(ctx context.Context, incidentID, alertID int64) (bool, error) {
+	return f.store.ConfirmReviewEdge(ctx, incidentID, alertID)
+}
+
+func (f *fakeTransactor) DeleteAlertEdge(ctx context.Context, incidentID, alertID int64) (bool, error) {
+	return f.store.DeleteAlertEdge(ctx, incidentID, alertID)
+}
+
+func (f *fakeTransactor) CountAlertEdges(ctx context.Context, alertID int64) (int, error) {
+	return f.store.CountAlertEdges(ctx, alertID)
+}
+
+func (f *fakeTransactor) ClearAlertIncident(ctx context.Context, alertID int64) error {
+	return f.store.ClearAlertIncident(ctx, alertID)
+}
+
+func (f *fakeTransactor) AddSuppression(ctx context.Context, fingerprint string, incidentID int64, actor, reason string) error {
+	return f.store.AddSuppression(ctx, fingerprint, incidentID, actor, reason)
 }
 
 // newTestService 组装一个「状态为 from、更新成功」的服务与它的假存储。

@@ -49,6 +49,19 @@ func AllStatuses() []Status {
 	return out
 }
 
+// severities 是事件严重度的合法取值，与 0001 的 chk_incidents_severity 一致。
+var severities = []string{"critical", "warning", "info"}
+
+// AllSeverities 返回全部合法严重度（副本，理由同 AllStatuses）。
+//
+// 列表过滤里「不过滤」= 传入全部合法取值，而不是在 SQL 里写 NULL 分支；
+// 因此这个集合必须与数据库的 CHECK 约束保持同步。
+func AllSeverities() []string {
+	out := make([]string, len(severities))
+	copy(out, severities)
+	return out
+}
+
 // StatusList 返回以逗号分隔的合法取值，用于错误信息里直接给出可选范围。
 func StatusList() string {
 	parts := make([]string, len(ladder))

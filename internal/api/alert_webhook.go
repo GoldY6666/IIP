@@ -45,10 +45,8 @@ type AlertIngestor interface {
 	Ingest(ctx context.Context, p *alert.Payload) (alert.Result, error)
 }
 
-// errorBody 是错误响应的统一形状。
-type errorBody struct {
-	Error string `json:"error"`
-}
+// errorBody 已迁到 errors.go（M3 为其加了可选的 code 字段）。
+// 本文件与既有调用点因此一行未改，序列化结果仍是 {"error":"..."}。
 
 // AlertWebhook 返回 POST /api/v1/alerts/webhook 的 handler。
 //
@@ -139,7 +137,4 @@ func writeJSON(w http.ResponseWriter, logger *slog.Logger, status int, v any) {
 	}
 }
 
-// writeError 写出统一的错误响应体。
-func writeError(w http.ResponseWriter, logger *slog.Logger, status int, msg string) {
-	writeJSON(w, logger, status, errorBody{Error: msg})
-}
+// writeError / errorBody 已迁到 errors.go（M3 扩展了 code 字段，实现未变）。

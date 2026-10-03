@@ -50,6 +50,39 @@ SELECT id, title, severity, status, service, started_at, resolved_at,
 FROM incidents
 WHERE id = sqlc.arg('id');
 
+-- name: ListIncidents :many
+-- 列表（手册 §4.3）：过滤 + 排序 + limit/offset。
+--
+-- 三个过滤口径的取舍：
+--   * status / severity 用**数组全量兜底**：调用方不过滤时传入全部合法取值，
+--     而不是在 SQL 里写「参数为 NULL 则不过滤」的分支——后者让同一条 SQL 有两种执行形态，
+--     计划缓存与索引选择都跟着摇摆。
+--   * service / from / to 用 narg 的 NULL 分支：这三个是真正的「可选」条件，
+--     用 NULL 表达「不限」比传哨兵值（如空串、零时间）更不容易歧义。
+--   * 关联告警数与待确认数用 LEFT JOIN 子查询聚合（手册 §4.4：这两个计数在关联边上，
+--     incidents 表没有），没有关联边的事件按 0 计而不是被 JOIN 掉。
+--
+-- 排序以 id DESC 收尾（ADR-007 的口径）：starts_at 可能完全相同，
+-- 只按它排序会让同一时刻的事件在翻页时顺序漂移。
+SELECT i.id, i.title, i.severity, i.status, i.service, i.started_at, i.resolved_at, i.updated_at,
+       COALESCE(agg.alert_count, 0)        AS alert_count,
+       COALESCE(agg.needs_review_count, 0) AS needs_review_count
+FROM incidents i
+LEFT JOIN (
+    SELECT incident_id,
+           count(*)                                  AS alert_count,
+           count(*) FILTER (WHERE needs_review)      AS needs_review_count
+    FROM incident_alerts
+    GROUP BY incident_id
+) agg ON agg.incident_id = i.id
+WHERE i.status   = ANY(sqlc.arg('statuses')::text[])
+  AND i.severity = ANY(sqlc.arg('severities')::text[])
+  AND (sqlc.narg('service')::text IS NULL OR i.service = sqlc.narg('service')::text)
+  AND (sqlc.narg('from_ts')::timestamptz IS NULL OR i.started_at >= sqlc.narg('from_ts')::timestamptz)
+  AND (sqlc.narg('to_ts')::timestamptz IS NULL OR i.started_at <= sqlc.narg('to_ts')::timestamptz)
+ORDER BY i.started_at DESC, i.id DESC
+LIMIT sqlc.arg('row_limit')::int OFFSET sqlc.arg('row_offset')::int;
+
 -- name: UpdateIncidentStatus :execrows
 -- M3 状态流转的唯一写入点（手册 §4.1 / §4.7）。
 --

@@ -2,6 +2,7 @@ package incident
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -30,6 +31,131 @@ type Service struct {
 // NewService 构造处置服务。
 func NewService(tx Transactor) *Service {
 	return &Service{tx: tx, now: time.Now}
+}
+
+// List 取事件列表（过滤 + 分页），返回本页数据与「是否还有下一页」。
+//
+// 两件容易做错的事，这里都刻意做对：
+//  1. **脏分页参数退化为默认值而不是报错**：列表是只读查询，参数脏不该挡掉页面加载
+//     （手册 §4.3）。故 limit ≤ 0 → 默认 100，超上限 → 夹紧 1000，offset < 0 → 0。
+//  2. **has_more 用 limit+1 探测**，不做 COUNT：全表 COUNT 在大表上是全扫描，
+//     且返回的 total 立刻就会过期，不如给一个「还有没有」的布尔。
+func (s *Service) List(ctx context.Context, f ListFilter) (ListResult, error) {
+	f = normalizeListFilter(f)
+
+	probe := f
+	probe.Limit = f.Limit + 1
+	if len(probe.Statuses) == 0 {
+		probe.Statuses = AllStatuses()
+	}
+	if len(probe.Severities) == 0 {
+		probe.Severities = AllSeverities()
+	}
+
+	rows, err := s.tx.List(ctx, probe)
+	if err != nil {
+		return ListResult{}, err
+	}
+	hasMore := len(rows) > f.Limit
+	if hasMore {
+		rows = rows[:f.Limit]
+	}
+	return ListResult{Items: rows, HasMore: hasMore}, nil
+}
+
+// Detail 取事件详情：本体 + 关联告警 + 时间线。
+//
+// 两个内联列表各按上限 +1 查询，超出即截断并把 truncated 置真——
+// 与列表的 has_more 同理：宁可明确告诉前端「还有更多」，也不要静默丢数据。
+func (s *Service) Detail(ctx context.Context, id int64) (Detail, error) {
+	snap, err := s.tx.GetByID(ctx, id)
+	if err != nil {
+		return Detail{}, err
+	}
+
+	alerts, err := s.tx.Alerts(ctx, id, MaxIncidentAlerts+1)
+	if err != nil {
+		return Detail{}, err
+	}
+	truncatedAlerts := len(alerts) > MaxIncidentAlerts
+	if truncatedAlerts {
+		alerts = alerts[:MaxIncidentAlerts]
+	}
+
+	timeline, err := s.tx.Timeline(ctx, id, MaxTimelineRows+1)
+	if err != nil {
+		return Detail{}, err
+	}
+	truncatedTimeline := len(timeline) > MaxTimelineRows
+	if truncatedTimeline {
+		timeline = timeline[:MaxTimelineRows]
+	}
+
+	needsReview := 0
+	for i := range alerts {
+		if alerts[i].NeedsReview {
+			needsReview++
+		}
+	}
+
+	return Detail{
+		Summary: Summary{
+			ID:               snap.ID,
+			Title:            snap.Title,
+			Severity:         snap.Severity,
+			Status:           snap.Status,
+			Service:          snap.Service,
+			StartedAt:        snap.StartedAt,
+			ResolvedAt:       snap.ResolvedAt,
+			UpdatedAt:        snap.UpdatedAt,
+			AlertCount:       len(alerts),
+			NeedsReviewCount: needsReview,
+		},
+		Alerts:            alerts,
+		Timeline:          timeline,
+		TruncatedAlerts:   truncatedAlerts,
+		TruncatedTimeline: truncatedTimeline,
+	}, nil
+}
+
+// Comment 给事件加一条备注；返回写入的留痕。
+//
+// 先读事件是为了把「事件不存在」与「留痕写失败」区分开：
+// 前者是 404，后者是 503——混在一起会让前端无法判断该提示什么。
+func (s *Service) Comment(ctx context.Context, id int64, actor, note string) (Entry, error) {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return Entry{}, ErrEmptyNote
+	}
+	if _, err := s.tx.GetByID(ctx, id); err != nil {
+		return Entry{}, err
+	}
+
+	entry := Entry{
+		IncidentID:  id,
+		EventType:   EventUserComment,
+		Description: note,
+		Actor:       actor,
+		Timestamp:   s.now(),
+	}
+	if err := s.tx.AppendTimelineEntry(ctx, entry); err != nil {
+		return Entry{}, err
+	}
+	return entry, nil
+}
+
+// normalizeListFilter 夹紧分页参数；规范化后可直接用于查询。
+func normalizeListFilter(f ListFilter) ListFilter {
+	if f.Limit <= 0 {
+		f.Limit = DefaultListLimit
+	}
+	if f.Limit > MaxListLimit {
+		f.Limit = MaxListLimit
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	return f
 }
 
 // Transition 执行一次状态流转，返回流转后的最新快照。

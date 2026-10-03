@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yu/iip/internal/alert"
+	"github.com/yu/iip/internal/incident"
 )
 
 // Result 是单条告警的关联结论。
@@ -20,11 +21,21 @@ type Result struct {
 // Service 编排关联：读配置 → 取候选 → 逐对打分 → 三档决策 → 落库。
 //
 // 依赖方向：api → correlation → repository → db，与 M1 的 internal/alert 一致。
+//
+// timeline / suppressions 是 M3 挂上来的**可选**能力（见 lifecycle.go）：
+// 为 nil 时关联行为与 M2 完全一致，便于既有调用点零改动地升级。
 type Service struct {
 	incidents IncidentStore
 	config    ConfigStore
 	topo      *Topology
 	logger    *slog.Logger
+
+	// timeline 为 nil 时不做时间线补写（M2 行为）。
+	timeline TimelineWriter
+	// suppressions 为 nil 时不查抑制（M2 行为）。
+	suppressions SuppressionStore
+	// now 是可注入时钟；nil 时取 time.Now().UTC()，让「留痕时间」可被精确断言。
+	now func() time.Time
 }
 
 // NewService 构造关联服务。logger 为 nil 时退化为 slog.Default()。
@@ -119,11 +130,22 @@ func (s *Service) correlateOne(
 		action = ActionNew // 无候选事件，必然新建（避免 0 分被判成 REVIEW）
 	}
 
+	// 抑制命中（M3 §4.5）：该指纹曾被人工判为「不该合入这个事件」，
+	// 则本次不再建边，直接降级为 NEW 档另起一个事件。
+	// 判据用 fingerprint 而非 alert_id——新告警的 ID 必然不同，按 ID 记的抑制永远命中不了。
+	if action == ActionReview && s.isSuppressed(ctx, v.Fingerprint, bestIncident) {
+		s.logger.Info("命中 REVIEW 抑制，降级为 NEW 档",
+			slog.String("fingerprint", v.Fingerprint),
+			slog.Int64("incident_id", bestIncident))
+		action = ActionNew
+	}
+
 	switch action {
 	case ActionMerge:
 		if err := s.link(ctx, bestIncident, v, &bestScore, false); err != nil {
 			return Result{}, err
 		}
+		s.appendTimeline(ctx, incident.NewAlertLinkedEntry(bestIncident, v.ID, bestScore, false, s.nowUTC()), "merge")
 		byIncident[bestIncident] = append(byIncident[bestIncident], v)
 		return Result{Action: ActionMerge, IncidentID: bestIncident, Score: bestScore}, nil
 
@@ -131,6 +153,7 @@ func (s *Service) correlateOne(
 		if err := s.link(ctx, bestIncident, v, &bestScore, true); err != nil {
 			return Result{}, err
 		}
+		s.appendTimeline(ctx, incident.NewAlertLinkedEntry(bestIncident, v.ID, bestScore, true, s.nowUTC()), "review")
 		byIncident[bestIncident] = append(byIncident[bestIncident], v)
 		return Result{Action: ActionReview, IncidentID: bestIncident, Score: bestScore}, nil
 
@@ -144,6 +167,9 @@ func (s *Service) correlateOne(
 		if err != nil {
 			return Result{}, fmt.Errorf("新建事件失败: %w", err)
 		}
+		// NEW 档写「事件创建」而不是「告警合入」：这条告警是事件的起因，
+		// 语义上不同于「并入一个已存在的事件」，前端要能区分两者。
+		s.appendTimeline(ctx, incident.NewAlertFiredEntry(inc.ID, v.ID, v.Fingerprint, s.nowUTC()), "create")
 		if err := s.link(ctx, inc.ID, v, nil, false); err != nil {
 			return Result{}, err
 		}

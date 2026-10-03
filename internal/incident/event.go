@@ -2,6 +2,7 @@ package incident
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -22,6 +23,25 @@ const (
 	EventIgnored              EventType = "ignored"               // 判为误报
 	EventReopened             EventType = "reopened"              // 重开
 )
+
+// EventAlertFired 是 0001 就存在的既有多余类型，M3 起赋予它明确语义：**事件创建**
+// （手册 §4.2：M2 NEW 档建事件时写一条）。
+//
+// 复用它而不是新增一个 incident_created：CHECK 里本就有这个值且零存量行，
+// 复用既不扩大取值集合，也省掉一次迁移。
+const EventAlertFired EventType = "alert_fired"
+
+// EventUserComment 是 0001 就存在的既有类型，用于用户备注。
+//
+// REVIEW 的确认 / 拒绝也复用它（metadata 带 action=review_confirm / review_reject），
+// 而不是再新增两个专用类型——用户已锁定只新增 7 个专用值（手册 §4.2）。
+const EventUserComment EventType = "user_comment"
+
+// SystemActor 是系统自动写入时落在 actor 列的值。
+//
+// 写具体字符串而不是留 NULL：时间线要能一眼区分「谁做的」——
+// NULL 只能表达「没有操作人」，表达不了「是系统做的」。
+const SystemActor = "system"
 
 // transitionEventTypes 是「目标状态 → 事件类型」的映射。
 //
@@ -47,6 +67,79 @@ func EventTypeForTransition(to Status) (EventType, error) {
 		return "", fmt.Errorf("目标状态 %q 没有对应的时间线事件类型", to)
 	}
 	return et, nil
+}
+
+// NewAlertFiredEntry 构造「事件创建」留痕（M2 NEW 档建事件时写入）。
+//
+// metadata 带 alert_id 与 fingerprint：前者供前端跳到告警，后者用于判断
+// 「同一指纹再次起火」这类重复（fingerprint 已剔除 instance/pod 等动态键）。
+func NewAlertFiredEntry(incidentID, alertID int64, fingerprint string, ts time.Time) Entry {
+	return Entry{
+		IncidentID:  incidentID,
+		EventType:   EventAlertFired,
+		Description: fmt.Sprintf("告警 #%d 触发，据此创建事件", alertID),
+		Actor:       SystemActor,
+		Metadata: map[string]string{
+			"alert_id":    strconv.FormatInt(alertID, 10),
+			"fingerprint": fingerprint,
+		},
+		Timestamp: ts,
+	}
+}
+
+// NewAlertLinkedEntry 构造「告警合入事件」留痕（M2 MERGE / REVIEW 档建边时写入）。
+//
+// score 保留 4 位小数，与 incident_alerts.correlation_score 的 DECIMAL(5,4) 对齐；
+// needs_review 直接写进 metadata，让前端不必为了标「待确认」再回查关联边。
+func NewAlertLinkedEntry(incidentID, alertID int64, score float64, needsReview bool, ts time.Time) Entry {
+	desc := fmt.Sprintf("告警 #%d 关联到本事件（score %.4f）", alertID, score)
+	if needsReview {
+		desc += "，待人工确认"
+	}
+	return Entry{
+		IncidentID:  incidentID,
+		EventType:   EventAlertLinked,
+		Description: desc,
+		Actor:       SystemActor,
+		Metadata: map[string]string{
+			"alert_id":     strconv.FormatInt(alertID, 10),
+			"score":        strconv.FormatFloat(score, 'f', 4, 64),
+			"needs_review": strconv.FormatBool(needsReview),
+		},
+		Timestamp: ts,
+	}
+}
+
+// 人工复核的两种动作，写在 user_comment 的 metadata.action 上（手册 §4.2）。
+const (
+	ReviewActionConfirm = "review_confirm"
+	ReviewActionReject  = "review_reject"
+)
+
+// NewReviewCommentEntry 构造一条人工复核留痕（confirm / reject 共用 user_comment）。
+//
+// 复用的原因：用户已锁定 M3 只新增 7 个专用事件类型，复核不再单列类型；
+// 区别靠 metadata.action 承载，前端据此决定显示「已确认」还是「已拒绝」。
+func NewReviewCommentEntry(incidentID, alertID int64, action, actor, reason string, ts time.Time) Entry {
+	desc := "人工复核：确认该告警属于本事件"
+	if action == ReviewActionReject {
+		desc = "人工复核：判定该告警不属于本事件，已解除关联"
+	}
+	metadata := map[string]string{
+		"action":   action,
+		"alert_id": strconv.FormatInt(alertID, 10),
+	}
+	if reason != "" {
+		metadata["reason"] = reason
+	}
+	return Entry{
+		IncidentID:  incidentID,
+		EventType:   EventUserComment,
+		Description: desc,
+		Actor:       actor,
+		Metadata:    metadata,
+		Timestamp:   ts,
+	}
 }
 
 // NewTransitionEntry 构造一条状态流转留痕。
