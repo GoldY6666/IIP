@@ -354,15 +354,26 @@ def main() -> int:
           rc == 0 and got in ("%d|false" % want_ver, "%d|f" % want_ver),
           "实际 %r" % got)
 
-    # 4.4 表数量（8 张：7 业务 + schema_migrations）
-    # 注意：M2 的 0003 迁移**不新增表**——只给 incident_alerts 加 needs_review 列 +
-    # 部分索引，并往既有的 correlation_rules 种一行 default 配置。
-    # 所以 M2 之后这里仍然是 8，不是「断言过期」，别顺手把它改成 9。
-    rc, out = docker("exec", PG_C, "psql", "-U", "postgres", "-d", "iip",
-                     "-t", "-A", "-c",
-                     "SELECT count(*) FROM information_schema.tables "
-                     "WHERE table_schema='public';", timeout=60)
-    check("public schema 表数 = 8", rc == 0 and out.strip() == "8", "实际 %s" % out.strip())
+    # 4.4 关键表齐全（不数张数，数张数必被下个迁移改红）
+    #
+    # 这条断言**三易其稿**，值得记下来：
+    #   * M2 时是「public schema 表数 = 8」（7 业务 + schema_migrations），
+    #     当时的注释还写着「M2 不新增表，别顺手改成 9」。
+    #   * M3 的 0004 **新增了 review_suppressions** → 张数变 9，
+    #     那句警告就此失效，但断言没跟着改，容器链路从 M3 起一直红着。
+    #   * 现在改成断言**关键表名单齐全**，加迁移不会再无谓变红；
+    #     真要少表（迁移漏跑 / 迁移失败）仍然会被抓到。
+    #
+    # 为什么不用「>= N」糊弄：少表与多表同样是故障，而 >= 对多表完全免疫。
+    for tbl in ("schema_migrations", "alerts", "incidents", "incident_alerts",
+                "correlation_rules", "timeline", "evidence", "review_suppressions"):
+        rc_t, out_t = docker("exec", PG_C, "psql", "-U", "postgres", "-d", "iip",
+                             "-t", "-A", "-c",
+                             "SELECT count(*) FROM information_schema.tables "
+                             "WHERE table_schema='public' AND table_name='%s';" % tbl,
+                             timeout=60)
+        check("关键表 %s 存在" % tbl, rc_t == 0 and out_t.strip() == "1",
+              "count=%s" % out_t.strip())
 
     # ------------------------------------------- 4.5 M2：关联引擎（容器内语义验收）
     # 把《IIP-M2详细开发手册》§八 的 M2 完成定义搬到容器里复验：

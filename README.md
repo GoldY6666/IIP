@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：M2（关联引擎）已完成，真库验收与容器链路实测均已通过**——M0 交付可运行的地基（monorepo 骨架、数据库迁移、本地编排、CI 流水线）；M1 接入告警接收与落库（含 ADR-007 修复）；M2 在其上实现五维加权评分 + 三档决策的关联引擎，把同根因告警自动聚合为 Incident（详见下文「M2 验收状态」）。容器链路已于 2026-10-01 在 Docker 29.8.0 下补验：清空 named volume 后 **27 项断言全绿**，镜像内内容物另有交叉编译 + ELF 解析的等价验证，二者的证据均已留存。
+> **当前阶段：M3（事件生命周期）S1 + S2 已交付，S3 前端未开工**——M0 交付可运行的地基；M1 接入告警接收与落库（含 ADR-007 修复）；M2 实现五维加权评分 + 三档决策的关联引擎，把同根因告警自动聚合为 Incident；M3 在其上实现事件状态机（6 态 / 36 格转换矩阵）、乐观并发控制、状态与留痕同事务、待确认队列与人工判定、关联抑制，并新增 6 个 HTTP 端点（详见下文「M3 验收状态」）。**验证链路共四条**：`verify-runtime.py`（宿主机全栈）、`verify-images.py`（容器链路，**41 项断言 0 失败**）、`verify-func.py`（业务闭环 **48 项断言**）、`check-binaries.py`（镜像内容物）；真库门禁 **PASS=250 FAIL=0 SKIP=0**，`golangci-lint` v1.61.0 rc=0，容器内 `-race` rc=0。**尚未交付**：前端（路由/布局壳/事件列表/详情双 Tab/处置交互）按 ADR-016 留待 S3 一次性交付，前端自动化测试延至 M5——两项均如实标注 NOT DONE，未修饰为通过。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -419,3 +419,76 @@ M2 的完成定义见 `docs/IIP-M2详细开发手册.md` §八。当前状态（
 
 > 复现方式：真库验收用 `python D:\_iip_setup\m2_pg_gate.py`（单次调用内起库 → 跑真库用例 → 回收，
 > 报告落在 `D:\_iip_setup\_m2_pg_gate_report.txt`）。
+
+---
+
+## M3 验收状态（如实标注）
+
+M3 的完成定义见 `docs/IIP-M3详细开发手册.md` §八，交付明细见 `docs/M3-交付详细报告.md`。
+**当前状态：S1 + S2 已交付，S3（D8–D10 前端）未开工。** 下表按「已实测」与「未开工」分开标注，
+未开工项一律不写成通过（AGENTS.md 约束 5 / 12）。
+
+### 已完成并实测（S1 + S2）
+
+| 验收项 | 状态 | 说明 |
+|--------|------|------|
+| `0004` 迁移 up/down/up 三连；`review_suppressions` 与约束放宽就位 | **PASS** | `migrations/0004_incident_lifecycle_m3.{up,down}.sql`；真库 4 用例全 PASS（`_m3_s1_mig.txt`），down 为**严格逆序**且三步破坏性写在文件头 |
+| 6×6 状态转换矩阵逐格可判 | **PASS** | `internal/incident/status.go`（零 SQL）+ `status_test.go` **36 格逐格断言**，并与手册规范表交叉复核；未知状态双向不放行 |
+| 乐观并发控制：条件更新 + 冲突回 409 | **PASS** | SQL `WHERE status = from_status` 用 `:execrows`，0 行即 `*ConflictError` → 409；真库 `TestLifecycleUpdateStatusOptimistic` |
+| `resolved_at` 三态副作用 | **PASS** | 由 `ResolveAtEffect` 计算后再执行，真库覆盖「写 / 清 / ignored 不动」三种；`ignored` 不写是刻意设计——误报不该污染 MTTR |
+| 状态转换与 Timeline **同事务**（两个方向都验） | **PASS** | 正向：冲突时 `return` 在 `AppendTimelineEntry` 之前 → 真库断言 **timeline 表不多一行**（2026-10-03 补，此前只在 handler 层用替身验过状态码）。反向：用 trigger 制造确定性写入失败，证明留痕失败时状态一起回滚 |
+| 冲突不得污染 `resolved_at` | **PASS** | 2026-10-03 补：冲突时若误写 `resolved_at`，一次失败的流转就会给事件盖上「已解决」时间戳 |
+| 6 个新端点（事件列表/详情/流转/待确认队列/判定/抑制）HTTP 契约 | **PASS** | `internal/api/incidents.go` + `reviews.go`；契约用例锁定 200/201/400/404/409/422/503 的**可判别性**，含两个路径参数都要校验 |
+| 列表过滤/排序/聚合计数 | **PASS** | 真库 `internal/repository/lifecycle_query_test.go`；分页夹紧、空过滤展开、时间窗下推逐项断言 |
+| 抑制（reject）生效且可幂等 | **PASS** | 真库 `internal/repository/reviews_test.go` 覆盖命中/幂等/级联/列值；`internal/repository/reviews.go` |
+| **业务闭环端到端**（M1 接入 → M2 关联 → M3 处置 → 抑制生效） | **PASS** | 新增 `scripts/verify-func.py`（真实 PG + 真实二进制 + 真实 HTTP），**48 项断言全 PASS，连跑 4 次一致**。首轮即抓到 250 条真库用例都没抓到的缺陷（JSON tag 全漏，真实字节流是 `{"ID":2}` 而非 `{"id":2}`）→ 已补 `internal/api/response_contract_test.go` 键名契约测试 |
+| 抑制后同指纹新告警降级为 NEW 并清空 `incident_id` | **PASS** | verify-func F1 / F2：抑制行落库、边被挡住、指针为 NULL |
+| healthz 三态闭环 | **PASS** | verify-func F7：200 `ok` → 停库 503 `unavailable` → 恢复 200（真查库，非假健康）；特意排在最后 |
+| `go build` / `go vet` / `gofmt` / `golangci-lint v1.61.0` | **PASS** | 四项 rc=0。S1 修 3 项 `sloppyReassign`、S2 修 2 项 `govet shadow`（改独立变量名，**未加排除规则**），查漏补缺轮 rc=0 |
+| 真库用例全绿 | **PASS** | S2：**PASS=250 FAIL=0 SKIP=0**（809.9s）；无库对照组 SKIP=49，证明用例确实依赖真库。查漏补缺轮新增 7 条真库用例全 PASS（`_gap_check.txt`） |
+| 容器内 `go test -race ./...` | **PASS** | S1 后 rc=0、8 包 ok（18m59s，`_race_s1.txt`），含新增的 `internal/incident` 与 `internal/repository` |
+| 容器链路 `verify-images.py` | **PASS**（2026-10-03 修复后重跑） | **41 项断言 0 失败**。此前从 M3 起一直红着：`0004` 新增 `review_suppressions` 使表数 8→9，而断言还停在 M2 的数字。**未改成硬编码 9**，改为断言 8 张关键表各自存在（加迁移不会再失效）。另修掉端口探测把「连接超时」误判为「已占用」的缺陷（Windows 防火墙静默丢包 → `TimeoutError` 也属 `OSError`） |
+| 验收脚本可重复执行 | **PASS** | `verify-func.py` 连跑 4 次一致；`verify-images.py` 在**脏数据环境**（named volume 未清）下同样 41/41，靠脚本内 4.5.0「干净起点」TRUNCATE 保证 |
+
+### 未开工（如实标注，不得记为通过）
+
+| 验收项 | 状态 | 说明 |
+|--------|------|------|
+| D8–D10 前端：路由与布局壳、事件列表、详情双 Tab、处置交互 | **NOT DONE** | 按 ADR-016 **S3 一次性交付**，不拆视觉壳。前端仍极薄：`web/src` 仅 5 个源文件 235 行，`App.tsx` 全文 7 行（直接 `return <Alerts />`），没有路由/布局壳/导航/主题定制——准确说法是「UI 还没搭」，不是「UI 要翻新」 |
+| 前端自动化测试 | **NOT DONE** | 禹于 2026-10-02 裁定**延到 M5**（ADR-016）。手册 §4.8 的前端单测在 M3 为 NOT DONE，**不得写成通过** |
+| `timeline` / `evidence` 两张表有写入方 | **NOT DONE** | 两表 0001 就建好，但 S1 的 `InsertTimelineEntry` **只经 `Transactor` 在流转路径写入**；`evidence` 至今**无任何代码写入**（`internal/db/queries/` 只有 alerts / correlation_rules / incidents / incident_alerts / reviews / timeline）。凡「信息丢弃由 timeline 承接」这类说法**目前不成立** |
+| CI 在 GitHub 上执行 | **无法验证** | 本仓库**没有 git remote**，`.github/workflows/ci.yml` 从未在 GitHub 上跑过。两个 job 已做**本地等价复现**（`-race` 容器内 PASS、`golangci-lint` v1.61.0 rc=0），但这不等于 CI 绿 |
+
+### 本轮（2026-10-03 查漏补缺）发现并修复的缺陷
+
+**产品缺陷 1 —— 详情页把「只显示前 200 条」说成「一共 200 条」。**
+M3 手册验收清单第 7 条「详情 API：超 200 条时 `truncated=true`」此前 **0 覆盖**——
+要触发它得在真库里造 200+ 条关联边，写用例时最容易退化成「造 5 条、断言不截断」这种
+没有信息量的检查。结果是**唯一会把「显示不全」说成「全部」的分支从未被真库跑过**，而它确实有缺陷：
+
+```go
+alerts, _ := s.tx.Alerts(ctx, id, MaxIncidentAlerts+1)   // 最多 201
+if truncatedAlerts { alerts = alerts[:MaxIncidentAlerts] }  // 截到 200
+AlertCount: len(alerts),   // ← 截断后的数，永远 ≤200
+```
+
+实际 250 条关联的事件，详情页显示「200 条关联告警」；而列表端走 SQL `count(*)` 是真值
+——**同一个字段、两个端点自相矛盾**。已新增两条纯 SELECT（`CountIncidentAlertsByIncident` /
+`CountNeedsReviewAlertsByIncident`）取真值，**迁移文件一行未改**。未截断时复用切片统计不多查库
+（详情页是值守时最常打开的接口），这一条是 `TestDetailQueriesCountsOnlyWhenTruncated` 抓出来的
+——第一版实现总在查，测试直接红了。
+
+**脚本缺陷 2 —— 容器链路从 M3 起一直红着，且端口探测假阻塞。**
+两处都是「测试自己坏了」而非产品坏，但同样让门禁失效：表数断言停留在 M2 的 8（`0004` 加了表）；
+端口探测用 `connect()` 且只 `except OSError` 就判「占用」，而 Windows 防火墙对本机某些端口的
+SYN **静默丢包**，`TimeoutError` 也属 `OSError`——「没人监听」被读成「被占用」，
+脚本在**前置检查**就 BLOCKED。已改为：`ConnectionRefused` 与 `Timeout` 都判「未占用」，
+其余 `OSError` 保守判占用（宁可误报阻塞，也不要判断错误时把容器拉起来撞端口）。
+单点复现 4/4 与 `netstat` 一致。
+
+> 复现方式：真库验收 `python D:\_iip_setup\m3_s2.py`（全量，约 30 分钟）；
+> 业务闭环 `python scripts\verify-func.py`（约 1 分钟，48 项断言）；
+> 容器链路 `python scripts\verify-images.py`（需 Docker daemon，约 4 分钟，41 项断言）。
+> 本地库隔离粒度是 **schema 而非 database**——`testsupport.NewDB` 用「共享 session 库 + 每用例一个
+> `iip_case_<hex>` schema」，因本机 `CREATE DATABASE` 恒定 35 秒且调 PG 参数无效（已实测证伪），
+> 改后 61.2s/条 → 13.1s/条。
