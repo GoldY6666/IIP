@@ -17,6 +17,40 @@
 默认 `up -d` 只起依赖组五个服务，与 T0.6 的验收标准（五服务全 healthy）一致。
 需要连应用一起起时显式带 profile。
 
+## 启动 UI（M5 起）
+
+UI 由 `iip-server` 自带静态托管（`IIP_WEB_ROOT`），**与 API 同源同端口**：
+
+| 用途 | 地址 |
+|------|------|
+| Web UI | <http://localhost:8080/> |
+| API | <http://localhost:8080/api/v1> |
+| 健康检查 | <http://localhost:8080/healthz> |
+
+**首次使用必须先构建前端**——compose 不会替你做这件事：
+
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm run build          # 产出 web/dist
+cd ..
+docker compose -f deploy/docker-compose.yml --profile app up -d
+```
+
+`web/dist` 是**挂载**进容器的（`../web/dist:/usr/share/iip/web:ro`），
+不是烧进镜像：运行层是 distroless 没有 node，把 dist 烧进去会让镜像
+从 14 MB 涨到 1 MB 以上，且前端每次改动都要重编 Go 镜像。
+
+**没构建就启动会怎样**：服务**照常启动**（静态托管是可选能力，不影响 API），
+但打开 UI 会看到 404 或「前端产物不完整，请先执行 pnpm run build」的 500。
+这是刻意设计的——前端问题不该拖垮后端可用性。看到这两条提示就是忘了构建。
+
+改前端后重新 `pnpm run build` 即可生效（`index.html` 不缓存，
+带 hash 的 `assets/*` 会长期缓存，不需要手动清浏览器缓存）。
+
+> `api/` 下的请求永远返回 JSON，不会被 SPA 回退吞掉。
+> 前端用相对路径 `/api/v1` 调接口，所以不需要任何 API 地址配置，也没有跨域问题。
+
 ## 镜像构建
 
 `iip-server` 与 `iip-worker` 由仓库根目录的 `Dockerfile` 多阶段构建产出，
@@ -53,7 +87,9 @@ docker compose -f deploy/docker-compose.yml --profile app down
 docker compose -f deploy/docker-compose.yml --profile app down -v
 ```
 
-## 两个需要知道的行为
+## 需要知道的行为
+
+（下面几条都是「看现象容易误判成别的问题」的那类，故单列。）
 
 **1. 容器内连库走服务名，不是宿主机端口**
 
@@ -75,3 +111,17 @@ compose 的 `healthcheck.test` 直接调用它。
 排查容器内问题时，distroless 下无法 `docker exec` 进 shell。
 需要调试时改为本地裸跑（见仓库根 `README.md` 的「无 Docker 的本地运行」一节），
 或临时把 `Dockerfile` 的运行层换成 `alpine`。
+
+**3. 静态托管不是「构建步骤」，是「挂载」**
+
+`web/dist` 通过 volume 挂进容器，**不在镜像里**。因此：
+
+- compose 不会替你构建前端（运行层是 distroless，没有 node）；
+- 改了前端要重新 `pnpm run build`，但**不需要**重启容器——
+  `index.html` 是 `no-cache`、带 hash 的 `assets/*` 走浏览器缓存，
+  重新构建后刷新即可生效；
+- 若前端代码更新但页面没变，先确认 `web/dist/index.html` 的时间戳是否更新了
+  （这说明 build 真的跑了），再看浏览器网络面板里 `assets/*` 是否 304。
+
+不启用静态托管（不设 `IIP_WEB_ROOT`）时，服务只提供 API，行为与引入 M5 之前完全一致——
+这让「后端能跑」不需要「先构建前端」。

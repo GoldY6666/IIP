@@ -92,6 +92,12 @@ type Config struct {
 	// EvidenceTimeout 是单个采集器的超时上限（手册 §4.5：三类均为 5s）。
 	EvidenceTimeout time.Duration // IIP_EVIDENCE_TIMEOUT，默认 5s
 
+	// --- M5：前端静态托管（手册 §4.3，实现见 m5.go）---
+
+	// WebRoot 是前端产物（vite build 的输出目录）路径。
+	// **空字符串即关闭静态托管**，此时服务行为与 M4 完全一致。
+	WebRoot string // IIP_WEB_ROOT，默认空（不启用）
+
 	// 三个 evidence*Explicit 记录采集器开关是否被**显式**配置过。
 	//
 	// 不导出给业务用，只服务 validateM4：见该方法的说明。
@@ -161,6 +167,8 @@ func Load(args []string) (*Config, error) {
 	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
 	fs.String("k8s-url", "", "K8s API Server 根地址（启用该采集器时必填）")
 	fs.String("k8s-namespace", "", "K8s 采集器要查询的命名空间（启用该采集器时必填）")
+	// M5：前端静态托管（手册 §4.3）。注册在 m5.go，默认空 = 关闭。
+	registerM5Flags(fs)
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -223,6 +231,9 @@ func Load(args []string) (*Config, error) {
 		// koanf 的 key 映射靠结构体 tag，k8s-namespace → K8sNamespace。
 		K8sNamespace: k.String("k8s-namespace"),
 	}
+
+	// M5：WebRoot 为空即不启用静态托管（手册 §4.3）。
+	readM5(k, cfg)
 
 	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
 	//

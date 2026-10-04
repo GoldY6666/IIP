@@ -152,12 +152,28 @@ services:
     environment:
       <<: *app-env
       IIP_TOPOLOGY_FILE: /config/topology.yaml
+      # M5 S3：启用前端静态托管（手册 §4.3）。
+      #
+      # UI 与 API 同源（都用 8080），因此前端 fetch 相对路径 '/api/v1' 直接成立，
+      # 不需要配 API 绝对地址、也不需要 CORS。
+      #
+      # 只加在 iip-server：worker 不起 HTTP 服务，给它这个变量是误导。
+      IIP_WEB_ROOT: /usr/share/iip/web
     volumes:
       # 拓扑是环境相关文件——config/topology.yaml 自述为「示例，请按真实环境替换」，
       # 因此走挂载而非烧进镜像，与 prometheus / alertmanager / loki 的配置供给方式一致。
       # 容器运行层没有 WORKDIR，默认工作目录为 /，故默认相对路径
       # config/topology.yaml 即 /config/topology.yaml，与本变量取值一致。
       - ../config:/config:ro
+      # 前端产物（M5 S3）。同样走挂载而非烧进镜像：运行层是 distroless，
+      # 没有 node，把 dist 烧进去要先把构建塞进多阶段构建，镜像从 14 MB
+      # 涨到 1 MB+ 且前端每次迭代都要重编 —— 与「前端独立迭代」相悖。
+      #
+      # **前置条件**：web/dist 必须已存在，即先跑过一次
+      #   cd web && pnpm install --frozen-lockfile && pnpm run build
+      # compose **不会**替你构建前端。dist 不存在时本服务仍能正常起
+      # （静态托管是可选能力），但 UI 会 404/500。已写进 deploy/README.md。
+      - ../web/dist:/usr/share/iip/web:ro
     ports:
       # 宿主机 8080 -> 容器 8080（与本地裸跑保持一致）
       - "8080:8080"

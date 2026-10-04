@@ -385,7 +385,7 @@ Playwright 需要浏览器二进制。CI/离线环境的处置：
 | 批次 | 内容 | 预估 | 依赖 | 状态 |
 |---|---|---|---|---|
 | **F1** | 前端测试设施底座：装 vitest + Testing Library + jsdom，配置 `pnpm test` | 0.5d | — | ✅ 完成（2026-10-04） |
-| **F2** | 静态托管 + SPA 回退 + `/api` 优先级（Go）+ compose 挂载 + `deploy/README.md` 更新 | 1d | — | 待开工 |
+| **F2** | 静态托管 + SPA 回退 + `/api` 优先级（Go）+ compose 挂载 + `deploy/README.md` 更新 | 1d | — | ✅ 完成（2026-10-04） |
 | **F3** | S2 直跳链接：`src/api/externalLinks.ts` + `EvidenceList` 集成 + 配置项注入 | 0.5d | F2（需知道 UI 从哪访问） | 待开工 |
 | **F4** | S1 配置页：`correlationConfig.ts` + `Settings.tsx` + `WeightRow.tsx` + 路由/导航挂入口 | 1d | F1 | 待开工 |
 | **F5** | 组件测试 7 条（§4.4.2） | 0.5d | F1/F3/F4 | 待开工 |
@@ -480,25 +480,124 @@ python scripts/verify-images.py                                 （0 失败）
 
 ## 八、验收清单（全过才算 M5 完成）
 
-| # | 判据 | 手段 |
-|---|------|------|
-| 1 | 配置页能读出当前权重/阈值，改动保存后**免重启生效** | `Settings` 页面 + **API 回读确认** |
-| 2 | 非法输入在提交前被拦，且错误信息指明字段 | 组件测试 7 条中的 3 条 + 手工 |
-| 3 | 每条 metric/log 证据有可点击的原始面板链接，query 被正确编码 | 组件测试 + 手工点击一次真实链接 |
-| 4 | `compose --profile app up -d` 后浏览器打开一个地址即可用 UI | 容器链路加断言 + 无头浏览器截图 |
-| 5 | 静态托管**不吞 `/api`** | 组件 + E2E 各一条，断言返回 JSON |
-| 6 | 深链接 `/incidents/{id}` 直接刷新可打开（SPA 回退） | E2E 直访 |
-| 7 | 目录穿越（`../../etc/passwd`）被拒 | 单测（Go 侧） |
-| 8 | 处置操作后**回读 timeline 确认落库** | E2E-3 |
-| 9 | 前端组件测试 ≥7 条且 rc=0 | `pnpm test` |
-| 10 | E2E 5 条且 rc=0 | `pnpm run test:e2e` |
-| 11 | 既有四条验证链路 0 失败 | 全跑 |
-| 12 | `tsc -b` + `vite build` rc=0 | `pnpm run build` |
-| 13 | 门禁：Go 四项全 rc=0、真库 SKIP=0、无 `nolint` | 静态门禁 + 真库门禁 |
+| # | 判据 | 手段 | 状态 |
+|---|------|------|------|
+| 1 | 配置页能读出当前权重/阈值，改动保存后**免重启生效** | `Settings` 页面 + **API 回读确认** | F4 待验 |
+| 2 | 非法输入在提交前被拦，且错误信息指明字段 | 组件测试 7 条中的 3 条 + 手工 | F4/F5 待验 |
+| 3 | 每条 metric/log 证据有可点击的原始面板链接，query 被正确编码 | 组件测试 + 手工点击一次真实链接 | F3 待验 |
+| 4 | `compose --profile app up -d` 后浏览器打开一个地址即可用 UI | 容器链路加断言 + 无头浏览器截图 | F2 部分（宿主全栈已验，容器链路待 F7） |
+| 5 | 静态托管**不吞 `/api`** | 组件 + E2E 各一条，断言返回 JSON| ✅ F2 实测（真进程 HTTP） |
+| 6 | 深链接 `/incidents/{id}` 直接刷新可打开（SPA 回退） | E2E 直访| ✅ F2 实测（真进程 HTTP） |
+| 7 | 目录穿越（`../../etc/passwd`）被拒 | 单测（Go 侧）| ✅ F2 实测（12 组穿越 + 真进程） |
+| 8 | 处置操作后**回读 timeline 确认落库** | E2E-3 | F6 待验 |
+| 9 | 前端组件测试 ≥7 条且 rc=0 | `pnpm test` | 部分（F1 已 11 条，需 F5 补到 ≥7 条覆盖面） |
+| 10 | E2E 5 条且 rc=0 | `pnpm run test:e2e` | F6 待验 |
+| 11 | 既有四条验证链路 0 失败 | 全跑 | F7 待验 |
+| 12 | `tsc -b` + `vite build` rc=0 | `pnpm run build` | ✅ F2 实测（pnpm run build rc=0） |
+| 13 | 门禁：Go 四项全 rc=0、真库 SKIP=0、无 `nolint` | 静态门禁 + 真库门禁 | 部分（静态门禁 ✅，真库门禁待 F7） |
+
+**「状态」列的读法**：只有 `✅` 才是**真进程实测通过**。
+「部分」= 该判据已被本次交付顺带验证了一部分，剩下的部分要等后续批次 ——
+**不算通过**。空白/「待验」= 尚未验证。
+按 AGENTS.md 约束（未做项必须如实标注，不得写成通过），这里不做任何美化。
 
 **第 4 条是本里程碑新增的判据**（此前四个里程碑都没有「部署形态可用」这一项）。
 它是开发计划验收标准「用户从 `docker compose up` 到在 UI 处置完一个 incident
 ≤ 30 分钟」的前半段；后半段是**人工计时**，须在交付时记录实测用时。
+
+---
+
+### F2 实测记录（2026-10-04）
+
+实现落在**新包 `internal/webui`**（4 个源文件 + 3 个测试文件），挂载点用
+`r.NotFound(...)` 而非 `r.Handle("/*")`。理由：chi 的 `NotFound` 只在**所有
+已注册路由都没命中**时触发，天然满足「`/api/*` 与 `/healthz` 先于静态兜底」，
+且不与既有 `r.Get("/api/v1/incidents/{id}")` 之类参数路由抢匹配。
+
+关键实现取舍（与 §4.3 的对应关系）：
+
+| 要点 | 实现 |
+|---|---|
+| 开关 | `IIP_WEB_ROOT` 空 → `webui.Handler()` 返回 `nil` → **完全不注册**。不设时服务行为与 M4 逐字节一致 |
+| 路由优先级 | `r.NotFound(h.ServeHTTP)`，注册在所有 API 之后 |
+| SPA 回退 | 未命中且非 `/api/` → 返回 `index.html` |
+| 路径逃逸 | `safeRel` 逐段判 `..`（**不**用整串 `strings.Contains`）+ 拒反斜杠 + `withinRoot` 用 `filepath.Rel` 二次校验 |
+| 缓存 | `assets/` 前缀 → `public, max-age=31536000, immutable`；其余 `no-cache` |
+| Content-Type | 显式扩展名表（**不用 `mime.TypeByExtension`**：它读宿主 `/etc/mime.types` 与注册表，distroless 里两者都没有 → 返回空串 → 浏览器拒绝执行脚本） |
+| 不 go:embed | 确认。dist 走 compose 挂载 |
+
+**实测证据（真 PG + 真进程 + 真实 HTTP，35 PASS / 0 FAIL）**：
+
+| 判据 | 实测 |
+|---|---|
+| `GET /` | 200 + `text/html` + `Cache-Control: no-cache`，body 是真实 index.html |
+| SPA 回退 | `/incidents`、`/incidents/12`、`/reviews`、`/alerts`、`/settings`、带 query 的 `/incidents/12?tab=evidence` 全部 200 且是 index.html |
+| `/assets/index-*.js` | 200 + `immutable` + `text/javascript`，实测 1 088 776 字节（非空） |
+| **`/api` 未被吞** | `/api/v1/incidents` 200 + `application/json` + 响应体可 `json.loads` |
+| `/healthz` | 200，未被静态兜底吞掉 |
+| 未注册 API | 404 + **JSON**（不是 index.html）——手册 §7.2 点名的反向验证 |
+| 目录穿越 | `/../Dockerfile`、`/../../etc/passwd`、`/assets/../../go.mod` 全部 **400**，未拿到文件内容 |
+| **不启用时行为不变** | 不带 `--web-root` 起：`/` 与 `/incidents/12` 均 404、`/api/v1/incidents` 仍 200 |
+| Go 门禁 | `go build` / `go vet` / `golangci-lint` 全 rc=0；`gofmt -s` 对本包 0 差异 |
+| 前端 | `pnpm run build` rc=0，产物 `assets/` + `index.html` |
+
+**三条测试写错而非产品缺陷的记录**（写下来是因为它们都是「看起来是产品坏了」的样子）：
+
+1. `os.Symlink` 在无管理员权限的 Windows 上**返回 nil 却建不出有效链接**
+   （缺 `SeCreateSymbolicLink`），导致「root 是符号链接」这条路径长期 SKIP。
+   已用 `os.Stat` 验链接有效性后 `t.Skip`，并**另写一条** `TestHandlerAcceptsNonCanonicalRoot`
+   覆盖「root 路径带冗余段与 `..` 但经 Clean 后合法」这一可验证的部分。
+   真实 symlink 形态**须在容器链路（Linux）补验** → 登记为 OPEN-M5-6。
+2. `httptest.NewRequest` 遇反斜杠（`\..\SECRET.txt`）直接 panic
+   （`invalid URI for request`）。已另写 `doRaw` 用 `&url.URL{Path: p}` 手工构造——
+   **恰恰是这种非法输入最需要测**，不能因为构造工具嫌它非法就跳过。
+3. 断言 `/v1.0..next/index.html` 期望 200，实得 301。**301 是正确行为**：
+   `http.ServeFile` 对以 `/index.html` 结尾的 URL 会规范化重定向到 `./`。
+   改成测 `/v1.0..next/data.json`。把标准库的既定行为记成产品 bug 是这类测试的典型错法。
+
+**抓到的一处真缺陷**：`serveIndex` 原用 `ServeContent` + 自建 reader，
+文件句柄从未关闭 → `t.TempDir()` 在测试末尾删不掉目录。
+已改为 `os.Open` + `defer f.Close()`，并删掉不再需要的 `reader.go`。
+**判据：测试末尾出现 TempDir cleanup 失败，先查有没有未关闭的句柄，别急着 Skip。**
+
+**顺带修掉的既有环境陷阱**（本轮又踩了一次，记进脚本注释）：
+`go build -o /d/_iip_setup/x.exe` 用 MSYS 路径 **go 不认**，产物根本不生成；
+而 `| head -30` 又会吃掉退出码，让失败也报 `rc=0`。
+→ 编译类命令**不接管道**，用 `; echo BUILD_RC=$?` 取真实退出码，`-o` 用 Windows 路径。
+
+### F2 期间发现的既有超限（**不是本轮造成，但本轮已停止加剧**）
+
+AGENTS.md 约束「单文件 ≤ 300 行」。交付自查时发现两个文件已超：
+
+| 文件 | M4 收尾 | 加完 F2 未拆 | 拆完 F2（当前） |
+|---|---|---|---|
+| `cmd/iip-server/main.go` | 312 | 326 | **318** |
+| `internal/config/config.go` | 341 | 363 | **352** |
+
+**该超限自 M2 起就存在**（M4 收尾时已 312/341）。本轮的处理是**只拆自己新增的部分**，
+不顺手重构既有装配代码 —— 那会是一次独立的回归面，与 F2 的目标（部署形态）
+无关，硬塞进来会让「F2 改了什么」变得不可审。
+
+已拆出：
+
+- `internal/webui/register.go`（50 行）—— 静态托管的注册逻辑
+- `internal/config/m5.go`（47 行）—— M5 的 flag 注册与字段读取
+
+**为什么 `Register` 要收进 webui 包而不是留在 main.go**：把「静态托管必须最后注册」
+这条知识放回调用方，唯一的约束就消失了。留在 main.go 的 `newRouter` 里，
+将来任何人在后面加一行注册都不会察觉顺序风险；收进包内后，
+调用点只剩一行且无法被无声改坏。`Router` 接口只约束 `NotFound(http.HandlerFunc)`
+一个方法 —— **签名必须逐字匹配 chi**（chi 收 `HandlerFunc` 而非 `http.Handler`），
+写错会报 `does not implement webui.Router`。
+
+登记为 OPEN-M5-7：剩余的 318/352 行需在后续里程碑（非 M5 收尾时）拆到 300 以内。
+
+### F2 期间新增的 OPEN 项
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| OPEN-M5-6 | 「root 是符号链接」这条路径在本机 **SKIP**（Windows 无 `SeCreateSymbolicLink` 权限），只由等价的 `TestHandlerAcceptsNonCanonicalRoot` 部分覆盖 | 须在 `verify-images.py`（Linux 容器）补一条真 symlink 断言。F7 处理 |
+| OPEN-M5-7 | `cmd/iip-server/main.go` 318 行 / `internal/config/config.go` 352 行，均超 AGENTS.md 的 300 行约束。**该超限自 M2 起存在**，M5 只拆了自己新增的部分，未顺手重构既有装配代码 | 不在 M5 收尾。剩余部分需独立里程碑处理；F7 门禁**不因此判红**（约束是「新增不加剧」，已在 §六 记录当前值） |
 
 ---
 

@@ -35,6 +35,7 @@ import (
 	appmw "github.com/yu/iip/internal/middleware"
 	"github.com/yu/iip/internal/repository"
 	"github.com/yu/iip/internal/store"
+	"github.com/yu/iip/internal/webui"
 )
 
 const (
@@ -288,6 +289,11 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	// 也让「这是谁的证据」不用看 body 就知道。
 	evidenceRepo := repository.NewEvidence(pool)
 	r.Get("/api/v1/incidents/{id}/evidence", api.EvidenceList(evidenceRepo, logger))
+
+	// M5 S3：前端静态托管（手册 §4.3）。注册细节在 internal/webui 内部，
+	// 这里只调一次 —— 顺序要求（必须最后）由该包自己保证，
+	// 不留在本文件里以免将来被误改。
+	webui.Register(r, cfg.WebRoot, logger)
 
 	return r
 }
