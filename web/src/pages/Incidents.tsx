@@ -35,7 +35,7 @@ import {
   type IncidentStatus,
 } from '../api/incidents'
 import { statusLabel, statusColor, severityColor } from '../api/status'
-import { palette } from '../theme'
+import { palette } from '../themeMode'
 
 const { Text } = Typography
 

@@ -20,7 +20,7 @@ import {
   type CorrelationConfig,
   type DimensionKey,
 } from '../api/correlationConfig'
-import { palette } from '../theme'
+import { palette } from '../themeMode'
 
 const { Title, Text, Paragraph } = Typography
 

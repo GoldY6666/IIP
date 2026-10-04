@@ -117,9 +117,14 @@ M5 完成的定义 = **同时满足以下六条**（与 M3/M4 的 DoD 体例一�
 | **S2** | 证据「跳原始面板」链接（Prometheus / Grafana / Loki） | T5.6 |
 | **S3** | 前端部署形态：静态托管 + `/api` 反代 + SPA 回退 | **缺口 C1** |
 | **S4** | 前端自动化测试：vitest 组件测试 + Playwright E2E | **缺口 C2** / ADR-016 |
+| **S5** | 前端明暗主题切换（暗色为默认，亮色为可选） | **禹于 2026-10-04 追加**，见 §4.5 与 ADR-021 |
 
 S1/S2 是开发计划原有任务；S3/S4 是本次核对新发现的缺口，
 不加这两个则 DoD 第 3、4 条无法满足，且 M3/M4 的 §4.8 欠账永远还不上。
+
+S5 是**禹在 M5 期间追加的需求**，初稿 §3.2 曾把它列为 Out-of-Scope
+（理由是「M3 已定深色控制台，本期不加切换」）。该条已从 §3.2 移入本表，
+偏离理由与代价记在 **ADR-021**。
 
 ### 3.2 明确不做（Out-of-Scope，锁定）
 
@@ -127,7 +132,7 @@ S1/S2 是开发计划原有任务；S3/S4 是本次核对新发现的缺口，
 |---|---|
 | 登录 / 用户体系 / 权限 | 开发计划写明「V1 先单管理员 token，不做用户体系」。S3 若需 token，只做**单值静态 token**（环境变量注入），不做登录页与多用户 |
 | 前端国际化（i18n） | V1.0 只做简体中文 |
-| 暗色/亮色主题切换 | M3 已定深色控制台（ADR-016），本期不加切换 |
+| ~~暗色/亮色主题切换~~ | **已移出 Out-of-Scope**：禹于 2026-10-04 追加为 S5（§4.5 / ADR-021）。<br>原理由「M3 已定深色控制台」是**默认基调**的裁定，不是「只有深色」的禁令 —— 实测 ADR-016 原文为「深色专业控制台」（选型 a），并未排除亮色 |
 | 移动端适配 | 桌面控制台，运维场景为主 |
 | 前端性能优化（代码分割 / 懒加载） | 当前单 chunk 1.09 MB，gzip 342 KB。开发计划 R2 已把「性能」列为非目标；S4 引入测试后若仍超预算，只记录不优化 |
 | 后端接口新增 | S1 只消费**已存在**的 `GET/PUT /api/v1/correlation/config`，不新增任何端点 |
@@ -152,13 +157,13 @@ S1/S2 是开发计划原有任务；S3/S4 是本次核对新发现的缺口，
 
 `internal/api/correlation_config.go` 已实现：
 
-```
+``
 GET  /api/v1/correlation/config → 200 {weights:{time,service,label,dependency,historical},
                                    thresholds:{merge,review}, enabled:bool}
 PUT  /api/v1/correlation/config → 200 同结构
                                    400 请求体不成形（非法 JSON / 未知字段）
                                    422 语义非法（权重和≠1 / merge<review）
-```
+``
 
 校验规则（`internal/correlation/types.go`，前端表单必须镜像这套规则）：
 
@@ -174,7 +179,7 @@ PUT  /api/v1/correlation/config → 200 同结构
 
 #### 4.1.2 页面结构
 
-```
+``
 /settings
 ├── 权重区：五个维度各一行（名称 + 说明 + 滑块 + 数字框）
 │   维度语义直接取自 V1.0 §5：
@@ -187,7 +192,7 @@ PUT  /api/v1/correlation/config → 200 同结构
 ├── 阈值区：merge / review 两个滑块 + merge≥review 交叉提示
 ├── 总开关：enabled
 └── 操作：保存 / 放弃改动
-```
+``
 
 **保存语义**：PUT 成功即**无需重启生效**（M2 已实现热更新）。
 保存后前端须重新 GET 一次并按返回值刷新界面 —— 不能假设 PUT 的返回就是最终态。
@@ -396,13 +401,13 @@ LogQL 含 `{}` 与 `|`；Loki 链接的 `left` 是 JSON，内层还含 `"`，必
 
 #### 4.4.3 E2E 的最小集
 
-```
+``
 E2E-1  打开 /            → 重定向到 /incidents
 E2E-2  列表有事件        → 点进去看到详情三要素（时间线/证据/关联告警）
 E2E-3  点「认领」        → 状态变 investigating，时间线**新增一条**（回读验证）
 E2E-4  /settings 改权重  → 保存成功；**通过 API 回读**确认真的落库
 E2E-5  无 API 时的表现   → 列表页显示错误态而非白屏
-```
+``
 
 **E2E-3 必须回读 timeline**，不能只断言「按钮变色了」。
 **E2E-4 必须用 API 回读**，不能只断言「提示保存成功」——
@@ -414,6 +419,125 @@ Playwright 需要浏览器二进制。CI/离线环境的处置：
 - `npx playwright install chromium` 需联网。**本机无网络时用已有 Chrome**
   （记忆里 `s3_frontend_check.py` 用的是无头 Chrome，可复用其定位方式）。
 - 故 Playwright 配置里 `channel: 'chrome'` 作为回退（用系统 Chrome，不下载）。
+
+---
+
+### 4.5 S5 明暗主题切换（禹于 2026-10-04 追加，ADR-021）
+
+四项裁定（禹定）：**GitHub Light 同源配色** / **默认暗色 + localStorage 记忆** /
+**入口在 Header 右侧图标按钮** / **改手册并记 ADR-021**。
+
+#### 4.5.1 核心约束：`palette` 17 处内联引用不会跟着 antd token 走
+
+实测（2026-10-04）：`web/src` 下 `palette.*` 共 **17 处**引用，跨 **5 个文件**：
+
+| 文件 | 处数 | 用到的键 |
+|---|---|---|
+| `components/Layout.tsx` | 6 | `surface.border` ×2、`semantic.info`、`semantic.warning`、`text.primary`、`text.tertiary` |
+| `pages/Settings.tsx` | 6 | `text.primary`、`text.secondary`、`text.tertiary`、`semantic.critical` |
+| `components/WeightRow.tsx` | 2 | `text.primary`、`text.tertiary` |
+| `pages/Reviews.tsx` | 2 | `text.tertiary` |
+| `pages/Incidents.tsx` | 1 | `text.tertiary` |
+
+这些是**内联 style 的字面颜色**，`ConfigProvider` 换 `theme` **不会**让它们变。
+若只改 `theme.ts`，切到亮色后会出现「卡片变白、但文字仍是暗色的 `#e6edf3`」
+—— 即**亮色主题下白底白字**。
+
+**有利的事实**：17 处引用的全是 `text.*` / `surface.*` / `semantic.*`
+这类**语义键**，**零处硬编码十六进制值**（实测）。所以正确解法不是
+「把 17 处改成 `theme.useToken()`」（那是 17 次改动、且每处都要包 hook），
+而是**让 `palette` 变成按当前主题解析的动态对象**。
+
+#### 4.5.2 方案对照
+
+| 方案 | 做法 | 17 处调用点 | 缺点 |
+|---|---|---|---|
+| A. 逐处改 `useToken()` | 每处调 `theme.useToken()` 取色 | **要改 17 处** | 改动面大；且 `useToken` 只能在组件内调，模块级常量处无法使用 |
+| **B. 动态 palette（采纳）** | 主题变更时更新一个**可变导出**，`palette.*` 读取时取当前值 | **零改动** | 「导出可变对象」是反模式；须用**受控的读取函数**而非裸对象 |
+| C. CSS 变量 | 主题切换时改 `:root` 上的变量，内联 style 改用 `var(--x)` | 17 处 | 内联 style 里写 `var()` 可行，但同样要改 17 处；且 antd token 侧仍需单独配 |
+
+**采纳 B**，但**不是**「可变的裸对象」——那样 React 不会重渲染，
+颜色会停在旧值。实现要求见 §4.5.3。
+
+#### 4.5.3 实现要点
+
+1. **配色表按主题各存一份**（`themes.dark` / `themes.light`），
+   `iipLightTheme` 与 `iipDarkTheme` 同为 `ThemeConfig`。
+2. **亮色语义色按白底重新校准**，不能直接用暗底那一档 ——
+   暗底上 `#f85149` 对比度约 4.0:1（对白底会**不足 3:1**）。
+   亮色需用同色相的深一档。
+3. **主题状态提升到 `main.tsx`**：`ConfigProvider` 已在顶层，
+   在其外层加 `ThemeModeProvider`，避免在 `Layout` 里再开一个 `ConfigProvider`。
+4. **`palette` 改为 `getPalette()` 或 `PaletteContext`** ——
+   17 处调用点若改成调函数，就是 17 处改动，违背 §4.5.2 的采纳理由。
+   **正确解法：保留 `palette` 导出名，但让它成为「随主题重建的对象」**，
+   并让引用方通过 `usePalette()` 拿到**属于自己那次渲染**的那一份。
+5. **首屏不闪白（FOUC）**：`localStorage` 在 `main.tsx` 顶层同步读取
+   （`useState` 初始值），**不能放在 `useEffect` 里** ——
+   那会让首帧先用暗色渲染再切亮色，白闪一下。
+6. **`prefers-color-scheme` 不作为默认**（禹裁定「默认暗色」）：
+   值守场景多数在夜间，跟随系统会让部分用户白天看到不适配的亮色。
+
+#### 4.5.4 必须验的四条（否则等于没做）
+
+| 判据 | 为什么必须 |
+|---|---|
+| 切到亮色后**内联文字色**真的变了 | 17 处不跟 token 走，这是本需求唯一的真风险 |
+| 刷新后主题**保持** | 验 `localStorage` 真的写了 |
+| 首次访问**默认暗色** | ADR-016 的默认基调未被推翻 |
+| 亮色下 `critical/warning/success` **对比度 ≥ 4.5:1** | 直接抄暗底色值必然不达标 |
+
+第 1 条与第 4 条**只能在真浏览器 / 截图里验**，jsdom 读不到计算后的颜色。
+第 2、3 条单测可覆盖。
+
+---
+
+### 4.6 S1 补测：处置链路的失败语义（F5，2026-10-04 实测后补写）
+
+§4.4.2 的 7 条里 4 条已被 F2/F4 的用例覆盖，F5 只补剩下 3 条。
+补测过程中**抓到一处真实产品缺陷**，故本节规格为「先定规格、后改代码」。
+
+#### 4.6.1 缺陷：流转失败后处置按钮被锁 3 秒
+
+**现象**（vitest 定量测量，非目测）：
+
+| 路径 | `ant-btn-loading` 解除耗时 |
+|---|---|
+| 流转成功 | **156 ms** |
+| **流转失败（后端 422）** | **3141 ms** |
+
+**机制**（已归因，非竞态猜测）：
+
+1. `onError` 调 `message.error(e.message)`；
+2. antd 的 message 走 `rc-notification`，用 `ReactDOM.render` 挂到**独立容器**，
+   默认 `duration = 3s`；
+3. 该容器挂载与卸载各触发一次跨树 re-render，把 `IncidentDetail` 子树重渲染一遍；
+4. 这两次重渲染与 react-query v5 解除 `isPending` 的状态更新**同批提交**，
+   `loading` 属性的解除被推迟到 message 卸载那一刻。
+
+实测把两件事的时间戳对齐过：message 全部卸载耗时 **3160 ms**，
+`ant-btn-loading` 恰在**同一刻**消失。→ 结论是
+「**失败提示的展示时长直接成了按钮的解锁延迟**」，不是竞态 bug
+（释放后功能完全正常，二次点击 POST 数 1→2）。
+
+**为什么必须修**：`IncidentDetail` 是唯一「点一下就改变线上状态」的页面。
+用户误点了目标状态（例如想「已缓解」却点了「已解决」）拿到 422 后，
+**所有处置按钮灰掉 3 秒**。值班场景下会被读成「系统卡了」，进而重复点击或放弃处置。
+
+**修法**：把「按钮 loading 态」与「message 提示时长」**解耦** ——
+loading 不再读 mutation 的 `isPending`，改用组件内**只被 mutation 生命周期驱动**的本地状态。
+
+**验收判据（缺这条就等于没修）**：
+失败后 **1 秒内** `ant-btn-loading` 必须已解除，且此时点另一个目标能发出第二个 POST。
+**只验「最终会恢复」会假通过** —— 实测它 3.1 秒也会恢复。
+
+#### 4.6.2 三条补测各自的判据
+
+| 用例 | 判据 | 真实缺陷来源 |
+|---|---|---|
+| loki query 编码 | **两个 loki 链接承载方式不同**：Grafana 是 `/explore?left=<JSON 串>`（query 藏 `queries[0].expr`），Loki 原生是 `?query=<LogQL>`。断言「解码后能 `JSON.parse` 且 `expr` 还原为原文」 | §4.2.3。既有 F3 用例只验「两个链接都在」，**没验编码**，是 §4.4.2 第 3 条的缺口 |
+| 处置链路 | POST `/transition` 的 body 带正确 `to` 与**非空** `actor` | `actor` 漏传不报错，只让 timeline 查不到是谁处置的 —— 审计线索静默断掉 |
+| 422 原文 | 界面上出现**后端那句原文**（含服务端具体状态名与建议路径），且**不出现**「已流转到…」 | §4.1.4 第 1 条。失败时谎报成功比报错文案难看严重得多 |
 
 ---
 
@@ -445,7 +569,7 @@ Playwright 需要浏览器二进制。CI/离线环境的处置：
 | **F2** | 静态托管 + SPA 回退 + `/api` 优先级（Go）+ compose 挂载 + `deploy/README.md` 更新 | 1d | — | ✅ 完成（2026-10-04） |
 | **F3** | S2 直跳链接：`src/api/externalLinks.ts` + `EvidenceList` 集成 + 配置项注入 | 0.5d | F2（需知道 UI 从哪访问） | ✅ 完成（2026-10-04，提交 `2042aa1`） |
 | **F4** | S1 配置页：`correlationConfig.ts` + `Settings.tsx` + `WeightRow.tsx` + 路由/导航挂入口 | 1d | F1 | ✅ 完成（2026-10-04，零后端改动） |
-| **F5** | 组件测试 7 条（§4.4.2） | 0.5d | F1/F3/F4 | 待开工 |
+| **F5** | 组件测试补齐（§4.4.2 剩余 3 条）+ S5 明暗主题切换（ADR-021） | 1d | F1/F3/F4 | **已交付**（补测抓到 1 处产品缺陷并修复，见 §4.6） |
 | **F6** | Playwright E2E 5 条（§4.4.3）+ `pnpm run test:e2e` | 1d | F2 | 待开工 |
 | **F7** | 四条既有验证链路回归 + 门禁 | 0.5d | 全部 | 待开工 |
 
@@ -523,7 +647,7 @@ Playwright 需要浏览器二进制。CI/离线环境的处置：
 
 M5 的门禁 = 既有门禁 + 前端门禁：
 
-```
+``
 go build ./... / go vet ./... / gofmt -s / golangci-lint run   （rc=0）
 go test -p 1 ./...                                             （SKIP=0）
 pnpm test                                                       （rc=0）
@@ -531,7 +655,7 @@ pnpm run tsc && pnpm run build                                    （rc=0）
 pnpm run test:e2e                                                （rc=0）
 python scripts/verify-func.py                                   （rc=0）
 python scripts/verify-images.py                                 （0 失败）
-```
+``
 
 ---
 
@@ -765,6 +889,123 @@ F4 只做前端。但「不需要后端改动」不等于「不需要验后端�
 无。F4 未引入新的未验路径：后端端点在真进程里 11 条断言全覆盖
 （含 400/422/边界/部分更新四种形态），前端 33 条用例覆盖渲染与交互。
 
+### F5 实测记录（2026-10-04）
+
+本批次两件事：① 补齐 §4.4.2 剩余的组件测试；② 实施 S5 明暗主题切换（ADR-021）。
+
+#### 一、补测：§4.4.2 的 7 条里 4 条已被覆盖，F5 只补 3 条
+
+| §4.4.2 要求 | 状态 |
+|---|---|
+| `EvidenceList` 渲染 0 条 | **已覆盖**（F2，`EvidenceList.test.tsx` 11 例） |
+| `EvidenceList` 渲染 1 条 query 为空 | **已覆盖**（F3，`EvidenceLinks.test.tsx`） |
+| `EvidenceList` 渲染 loki 证据 → 编码 | **F5 补**（既有只验「两个链接都在」，没验编码） |
+| `Settings` 权重和为 0.8 | **已覆盖**（F4） |
+| `Settings` merge < review | **已覆盖**（F4） |
+| `IncidentDetail` 点「标记缓解」 | **F5 补**（此前零覆盖） |
+| `IncidentDetail` 后端返 422 | **F5 补**（此前零覆盖） |
+
+**发现既有覆盖有一处虚**：F3 的 loki 用例只断言「Grafana 与 Loki 两个链接都渲染出来了」，
+**完全没验 query 进了 URL 之后变成什么**。§4.4.2 第 3 条要的正是编码。
+→ 补的那条断言「解码后能 `JSON.parse` 且 `expr` 还原为原文」，
+而不是断言「有没有 %22」这种具体形态。
+
+#### 二、缺陷：流转失败后处置按钮被锁 3 秒（已修，见 §4.6.1）
+
+补测 `IncidentDetail` 时抓到。**这是本批次唯一的产品缺陷**，其余 4 处都是测试写错。
+
+| 路径 | 修前 | 修后 |
+|---|---|---|
+| 流转成功 | 156 ms | 148 ms |
+| **流转失败（后端 422）** | **3141 ms** | **184 ms** |
+
+归因过程（**三次才找对，记录下来**）：
+
+1. 第一次归因「antd message 卸载触发 re-render，拖后了 `isPending` 的解除」——
+   **对但不够**：换成组件内本地 state + `onSettled` 清理，**仍然 3.1 秒**。
+   → 说明被拖后的不是某一个变量，而是**任意在 mutation 结束时触发的状态更新**。
+2. 造最小替身做对照：同一个 mutation，只把 `message.error` 换成/不换。
+   **有 message：4 秒未解除；无 message：立即解除**。→ 确认与 message 有关，与业务代码无关。
+3. 真因：antd message 用 `ReactDOM.render` 挂到**独立 root**，
+   挂载/卸载占住 React 调度通道，把紧随其后的更新拖到卸载那一刻。
+   → 修法是**在 `onError` 里先 `setTransitioning(false)`、再 `message.error`**，
+   让解锁排在 message 之前提交。
+
+**修法不是把 3 秒改小**：把 `message.error(msg, 0.5)` 也能让数字好看，
+但那是把缺陷藏起来 —— 用户仍会失去「读完错误再重试」的窗口。
+
+**回归锁**：失败后 **1 秒内** loading 必须解除，且此时点另一个目标能发出第二个 POST。
+只验「最终会恢复」会假通过 —— 修前 3.1 秒也会恢复。
+
+#### 三、S5 明暗主题切换（ADR-021）
+
+实现：`theme.ts` 拆成亮/暗两套 palette；`themeMode.tsx` 把 `palette` 变成**活引用**
+（模块级可变对象，切换时重新赋值字段），**17 处内联色调用点一行未改**。
+
+**关键取舍**：那 17 处若改成 token/CSS 变量，diff 会大到无法评审；
+改成活引用则「主题切换」这件事被完全收在两个文件里。
+代价是 `palette` 不再是纯常量 —— 故在 `themeMode.tsx` 里写明「不得再从 `./theme` 直接 import」。
+
+亮色语义色**按白底重新校准**（实测暗底那套搬到白底只有 2.52~3.35:1，全部不达标），
+亮色`text.tertiary` 定为 `#6b737d`（在两种卡片底上都 ≥ 4.5:1）。
+
+**默认暗色 + localStorage 记忆**（ADR-021 裁定），Header 右侧图标切换。
+
+#### 三之二、S5 真浏览器验收（截图 + 像素实测，10 PASS / 0 FAIL）
+
+手册 §4.5.4 明说第 1、4 条「只能在真浏览器 / 截图里验，jsdom 读不到计算后的颜色」。
+链路：真 PG 容器（`postgres:16-alpine` 一次性，起在 5461）→ `go run ./cmd/iip-server`（:8085）→ 造 4 批告警（每批 `accepted=1`）→ 静态+反代（:5175）→ 无头 Chrome 1600x1000。
+
+**像素是**从截图像素里量出来的，不是从 `theme.ts` 抄的** ——
+抄 theme.ts 只能证明「我配的值达标」，从截图量才能证明「浏览器真按那个值渲染了」。
+
+| §4.5.4 判据 | 实测 |
+|---|---|
+| **1. 内联色真的变了** | header 暗 `#161b22` / 亮 `#f6f8fa`（16.25:1）；sider 暗 `#0d1117` / 亮 `#f6f8fa`（17.78:1）；content 暗 `#0d1117` / 亮 `#ffffff`（18.92:1） |
+| 2. 刷新后保持 | 预置 light 后同 profile 再访问，仍为亮色（截图 84437 B，与暗色 83468 B 明显不同） |
+| 3. 首次默认暗色 | 干净 profile 首访 = 暗色 |
+| **4. 亮色对比度 ≥ 4.5:1** | 正文 `#1f2328` on `#ffffff` = **15.80:1** |
+
+**截图字节数本身就是判据的一部分**：初版四张图全部 6989 B（= 同一张全白图），
+修好后 38 KB / 84 KB 不等。→ 截图流程里「多张图字节数相同」是页面没渲染的可靠信号。
+
+#### 三之三、修这条验收链路时踩的四个坑（都是「症状零报错」）
+
+1. **自写静态服务漏了 `__init__` 的 `directory=DIST`** —— `SimpleHTTPRequestHandler` 静默退回 CWD，`/assets/*.js` 全部 404。症状与「资源真的不存在」一模一样。→ **先单独验 assets 的 200 与字节数**，别直接进截图。
+2. **SPA fallback 判据写成「文件不存在就回 index.html」** —— 会把 `/assets/*.js` 也吞成一段 HTML，
+   浏览器当模块解析失败、**不报错**，页面纯白。→ fallback 只对**无扩展名**路径生效。
+3. **主题预置脚本的 localStorage key 写错** —— 我凭印象写 `iip-theme-mode`，
+   真实是 `THEME_STORAGE_KEY = `'iip.theme'`。**判据要取自源码常量，不要凭印象写**。
+4. **误判「`--virtual-time-budget` 有害」** —— 我先把它换成 `--timeout`，
+   结果截到未渲染态（中心 `#ffffff`）。对照实验：
+   `--timeout=15000` → 未渲染；`--virtual-time-budget=20000` → 已渲染。
+   **虚拟时间恰恰是唯一能等到异步渲染的**（SPA 的请求在 load 之后才发出，`--timeout` 只等 load）。
+   → 造对照实验，别凭「听起来危险」换参数。
+
+另：`--virtual-time-budget` **不能设太大** —— 详情页有 12s `refetchInterval`，
+预算太大时一直有 pending 任务，截不到稳定帧。取 9000。
+
+#### 四、本批次的「测试写错而非产品缺陷」（4 处）
+
+1. **antd 会在中文 Button 文字里插空格** —— 「转为已解决」的可访问名是「转为已解 决」。
+   F4 在「保 存」上踩过一次，本轮在**五字**按钮上又踩一次（不是只有两字才插）。
+   → 统一用 `/转为\s*已解决/` 这类宽松正则，**不去赌 antd 插在哪两个字之间**。
+2. **两个 loki 链接的承载方式完全不同** —— 我一开始用同一个参数名去取：
+   Grafana 是 `/explore?left=<整段 JSON>`（query 藏在 `queries[0].expr`），
+   Loki 原生是 `?query=<LogQL>`。判据必须各写各的。
+3. **`button.ant-btn.ant-btn-loading` 会把 Tabs 的 `ant-tabs-nav-more` 数进来** ——
+   导致「点按钮之前就已有 4 个 loading」的假红。→ 只数 `ant-btn-primary` / `ant-btn-dangerous` 的处置按钮。
+4. **漏删诊断文件** —— `__diag4.test.tsx` 留在仓库里，tsc 报 `TS6133: 'waitFor' is declared but its value is never read`，
+   而 vitest 照跑全绿。**门禁 rc=2 才暴露**。→ 诊断文件必须用「遍历删除」而非逐个删。
+
+#### 五、验收
+
+| 项 | 结果 |
+|---|---|
+| tsc | rc=0 |
+| 前端全量 | **114 用例全过**（F4 的 83 + 本轮 31） |
+| Go | 无改动，未重跑真库 |
+
 ### F3 期间新增的 OPEN 项
 
 
@@ -790,7 +1031,7 @@ F4 只做前端。但「不需要后端改动」不等于「不需要验后端�
 
 ## 九、端到端验证脚本
 
-```bash
+``bash
 # 0) 前置：先构建前端产物（S3 是挂载不是 build，故必须手动构建一次）
 cd web && pnpm install --frozen-lockfile && pnpm run build && cd ..
 
@@ -815,7 +1056,7 @@ docker compose -f deploy/docker-compose.yml --profile app up -d
 
 # 5) 清理
 docker compose -f deploy/docker-compose.yml --profile app down
-```
+``
 
 ---
 

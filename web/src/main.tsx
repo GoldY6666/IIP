@@ -1,11 +1,10 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { App as AntApp, ConfigProvider } from 'antd'
-import zhCN from 'antd/locale/zh_CN'
+import { App as AntApp } from 'antd'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
-import { iipDarkTheme } from './theme'
+import { ThemeModeProvider } from './themeMode'
 import './index.css'
 
 const queryClient = new QueryClient({
@@ -24,7 +23,11 @@ const queryClient = new QueryClient({
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN} theme={iipDarkTheme}>
+    {/* ThemeModeProvider 必须在最外层：它自己包了 ConfigProvider，
+        而 17 处内联 style 的 `palette.*` 读的是它同步维护的活引用。
+        放到 QueryClientProvider 里面会晚一层，不影响功能但不符合
+        「外观设置是全局的」这个语义。 */}
+    <ThemeModeProvider>
       {/* AntApp 提供 message/notification/modal 的 Context，供页面内 App.useApp() 调用 */}
       <AntApp>
         <QueryClientProvider client={queryClient}>
@@ -36,6 +39,6 @@ ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
           </BrowserRouter>
         </QueryClientProvider>
       </AntApp>
-    </ConfigProvider>
+    </ThemeModeProvider>
   </React.StrictMode>,
 )

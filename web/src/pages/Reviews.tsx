@@ -12,7 +12,7 @@ import { Alert, App as AntApp, Button, Card, Popconfirm, Space, Table, Tag, Tool
 import type { ColumnsType } from 'antd/es/table'
 import { fetchReviews, decideReview, type ReviewEdge } from '../api/incidents'
 import { severityColor } from '../api/status'
-import { palette } from '../theme'
+import { palette } from '../themeMode'
 
 const { Title, Text } = Typography
 

@@ -96,6 +96,34 @@ describe('EvidenceList 外部链接', () => {
   })
 
   // 渲染一个点不开的按钮比没有按钮更糟 —— 用户会以为面板挂了
+  // 上一条只验了「两个链接都在」，**没验 query 进了 URL 之后变成什么**。
+  // LogQL 里的双引号、管道、反斜杠都是 URL 保留字符；不编码的话
+  // 链接在浏览器里会被截断或解析成另一个查询 —— 而症状是「点开是空白」，
+  // 用户会去查 Loki 挂了，而不是查链接拼错了。
+  it('loki 证据的 query 在 href 里被正确 URL 编码（LogQL 保留字符）', () => {
+    // 刻意挑一组「不编码就一定坏」的字符：空格 + 双引号 + 竖线 + 花括号 + 美元
+    const raw = '{job="iip-api"} |= "level=error"'
+    renderList([ev({ source: 'loki', type: 'log', query: raw })])
+
+    // **两个 loki 链接的承载方式完全不同**，不能共用一套取法：
+    //   Grafana：/explore?left=<整段 JSON 串>，query 藏在 queries[0].expr
+    //   Loki 原生：/loki/api/v1/query_range?query=<LogQL>
+    // 手工拼 Grafana 那段 JSON 时一个双引号就会破链接，所以断言
+    // 「解码后能 JSON.parse 且 expr 还原为原文」——这才是真正的不变量。
+    const grafanaHref = screen.getByRole('link', { name: /Grafana/ }).getAttribute('href') ?? ''
+    const leftRaw = new URL(grafanaHref).searchParams.get('left')
+    expect(leftRaw).not.toBeNull()
+    const parsed = JSON.parse(leftRaw as string) as { queries: { expr: string }[] }
+    expect(parsed.queries[0].expr).toBe(raw)
+    // 整段 JSON 作为**单个参数值**存在，说明外层已整体编码
+    expect(grafanaHref).not.toContain('"')
+
+    const lokiHref = screen.getByRole('link', { name: /Loki/ }).getAttribute('href') ?? ''
+    expect(new URL(lokiHref).searchParams.get('query')).toBe(raw)
+    expect(lokiHref).not.toContain('|')
+    expect(lokiHref).not.toContain('"')
+  })
+
   it('k8s 证据不渲染任何链接按钮', () => {
     renderList([ev({ source: 'k8s', type: 'deployment' })])
     expect(screen.queryByRole('link')).toBeNull()

@@ -5,15 +5,17 @@
 // 这样换页不会连带重跑列表查询，也不会让「布局」和「数据」互相污染。
 
 import { Link, Outlet, useLocation } from 'react-router-dom'
-import { Badge, Layout, Menu, Tag, Typography } from 'antd'
+import { Badge, Button, Layout, Menu, Tag, Tooltip, Typography } from 'antd'
 import {
   AlertOutlined,
   ApiOutlined,
   FileSearchOutlined,
+  MoonOutlined,
   SettingOutlined,
+  SunOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import { palette } from '../theme'
+import { palette, useThemeMode } from '../themeMode'
 import { useReviewQueueCount } from '../api/useReviewQueueCount'
 
 const { Header, Sider, Content } = Layout
@@ -38,6 +40,12 @@ export default function Layout_() {
   // 有待处理项时用户不必先进队列页才知道要干活。
   const { data: pending } = useReviewQueueCount()
 
+  // 主题模式：侧栏与切换按钮都要跟着它走（ADR-021）。
+  // **侧栏的 theme 不能写死 'dark'** —— 那样亮色下会出现
+  // 「整页浅色但左侧一条深色竖条」，是最扎眼的不一致。
+  const { mode, toggle } = useThemeMode()
+  const siderTheme = mode === 'dark' ? 'dark' : 'light'
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       <Header
@@ -57,15 +65,35 @@ export default function Layout_() {
           Incident Intelligence Platform
         </Text>
         <div style={{ flex: 1 }} />
+        <Tooltip title={mode === 'dark' ? '切换到亮色' : '切换到暗色'}>
+          {/* Button 用 type="text" 去掉自身底色以融进 Header；
+              图标显式给色是因为它不继承 Header 的文字色。 */}
+          <Button
+            type="text"
+            onClick={toggle}
+            aria-label={mode === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+            icon={
+              mode === 'dark' ? (
+                <SunOutlined style={{ color: palette.text.secondary, fontSize: 16 }} />
+              ) : (
+                <MoonOutlined style={{ color: palette.text.secondary, fontSize: 16 }} />
+              )
+            }
+          />
+        </Tooltip>
         <Tag color="default" style={{ marginInlineEnd: 0 }}>
           M5 Web 控制台
         </Tag>
       </Header>
 
       <Layout>
-        <Sider width={176} theme="dark" style={{ borderRight: `1px solid ${palette.surface.border}` }}>
+        <Sider
+          width={176}
+          theme={siderTheme}
+          style={{ borderRight: `1px solid ${palette.surface.border}` }}
+        >
           <Menu
-            theme="dark"
+            theme={siderTheme}
             mode="inline"
             selectedKeys={[selected]}
             items={NAV.map((n) =>

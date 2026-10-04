@@ -87,6 +87,19 @@ export default function IncidentDetail() {
     qc.invalidateQueries({ queryKey: ['incidents'] })
   }
 
+  // 流转按钮的 loading 态刻意**不读** doTransition.isPending。
+  //
+  // 原因（手册 §4.6.1，实测 156ms vs 3141ms）：失败路径下 isPending 的解除
+  // 会被 antd message 的卸载时机拖后 —— message 走 rc-notification 用
+  // ReactDOM.render 挂到独立容器，默认 duration 3s；它挂载/卸载各触发一次
+  // 跨树 re-render，与 react-query 解除 isPending 的更新同批提交，
+  // 于是「失败提示展示多久」直接等于「按钮被锁多久」。
+  //
+  // 症状是误点目标状态拿到 422 后，所有处置按钮灰 3 秒，值班场景会被
+  // 读成系统卡了。本地状态只在 mutation 的 onSettled 里改，不受 message
+  // 生命周期影响 —— 解耦，而不是把 3 秒改小（那只是把缺陷藏起来）。
+  const [transitioning, setTransitioning] = useState(false)
+
   const doTransition = useMutation({
     mutationFn: (to: IncidentStatus) => transitionIncident(incidentID, to, 'web-console', note || undefined),
     onSuccess: (res) => {
@@ -94,8 +107,26 @@ export default function IncidentDetail() {
       setNote('')
       afterMutate()
     },
-    onError: (e: Error) => message.error(e.message),
+    // 失败时**先**解锁、再弹提示。顺序不能反：message 的挂载/卸载会占住
+    // React 调度通道，把紧随其后的状态更新拖到它卸载那一刻（实测 3.1s）。
+    // 先 setState 让解锁进入队列，再让 message 走，会被 message 拖后；
+    // 反过来先弹 message，解锁就被推迟 —— 故解锁必须在前。
+    onError: (e: Error) => {
+      setTransitioning(false)
+      message.error(e.message)
+    },
+    onSettled: () => setTransitioning(false),
   })
+
+  // 发起流转的唯一入口：置本地 loading 后再 mutate。
+  //
+  // 刻意不放 onMutate —— 那样虽然也会在 mutation 启动时置位，但会把
+  // 「点击」与「mutation 真正开始」耦合；放在事件处理器里，语义是
+  // 「用户点了一下，我们正在等」，与后端何时返回无关。
+  const startTransition = (to: IncidentStatus) => {
+    setTransitioning(true)
+    doTransition.mutate(to)
+  }
 
   const doComment = useMutation({
     mutationFn: () => addIncidentComment(incidentID, 'web-console', note),
@@ -134,7 +165,7 @@ export default function IncidentDetail() {
   // 终态只能经 open 重开，这一步在真实值班里意味着「我判断关错了」。
   // 因此对终态加二次确认 —— 不是防误触，是让人想清楚。
   const confirmThen = (to: IncidentStatus) => {
-    const go = () => doTransition.mutate(to)
+    const go = () => startTransition(to)
     if (to === 'open') {
       modal.confirm({
         title: '重新打开这个事件？',
@@ -254,7 +285,7 @@ export default function IncidentDetail() {
               // 放在最后并用默认样式，避免误点。
               type={to === 'ignored' || to === 'open' ? 'default' : 'primary'}
               danger={to === 'ignored'}
-              loading={doTransition.isPending}
+              loading={transitioning}
               onClick={() => confirmThen(to)}
             >
               转为{statusLabel(to)}

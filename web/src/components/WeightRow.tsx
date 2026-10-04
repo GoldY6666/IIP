@@ -8,7 +8,7 @@
 // （容差就是 0.001，用 0.01 的步长会让「合法但不在步长上」的值打不进去）。
 
 import { InputNumber, Slider, Tooltip, Typography } from 'antd'
-import { palette } from '../theme'
+import { palette } from '../themeMode'
 
 const { Text } = Typography
 
