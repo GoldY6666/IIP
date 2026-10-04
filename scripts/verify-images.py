@@ -30,6 +30,7 @@ import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -400,13 +401,19 @@ def main() -> int:
     #     喂到 ≈0.53，使跨服务直接边由 0.7133 抬到 0.7667 → 断言假 FAIL。
     #     2026-10-02 实测：残留 12 条告警时得 0.7667，清空后精确回到 0.7133。
     #   * 4.5.7 / 4.5.8 这类「本轮新增 N 条」的计数断言同样会被历史行带偏。
-    # 只清本脚本会写的四张业务表；schema_migrations 与 correlation_rules 保留
+    # 只清本脚本会写的业务表；schema_migrations 与 correlation_rules 保留
     #（4.5.3 依赖其中的 default 种子行）。
     # CASCADE 不可省：incident_alerts 对 alerts / incidents 有外键。
+    #
+    # **tasks 与 evidence（M4 新表）必须一并清**：它们跨轮残留会造成两种假通过 ——
+    #   * 残留的 done 任务让「本轮任务已全部完成」在 worker 还没领过时就成立；
+    #   * 残留的 evidence 让「事件带 ≥N 条证据」在采集器根本没工作时也成立。
+    # 两者都是「数字对，机制错」，比直接 FAIL 更坏。
     _rc, _out = docker("exec", PG_C, "psql", "-U", "postgres", "-d", "iip",
                        "-t", "-A", "-c",
                        "TRUNCATE TABLE incident_alerts, alerts, incidents, "
-                       "correlation_feedback CASCADE;", timeout=60)
+                       "correlation_feedback, tasks, evidence, timeline CASCADE;",
+                       timeout=60)
     check("干净起点：已清空历次验收残留行", _rc == 0,
           "实际 rc=%d %s" % (_rc, _out[:200]))
     _a, _i, _ia = db_count("alerts"), db_count("incidents"), db_count("incident_alerts")
@@ -682,6 +689,281 @@ def main() -> int:
           ("poll_count=%s" % hb.group(1)) if hb else "90s 内未见心跳")
 
     check("worker 已连上 PostgreSQL", "已连接 PostgreSQL" in out)
+    w()
+
+    # ============================================ 4.7 M4：证据采集（容器内语义验收）
+    # 手册 §七 要求「容器链路断言数从 41 起步（新增项见 §八）」。
+    # 本段把 M4 的六条判据里**能在容器内判定的**五条搬过来，
+    # 判据 3（宕机零阻塞）需要停容器，属破坏性流程，不在本脚本内做。
+    #
+    # 为什么必须在容器里验而不能靠真库门禁：真库门禁用的是**本地裸跑的二进制**，
+    # 而容器链路验的是**镜像里的二进制 + compose 注入的环境变量**。
+    # M4 的采集器地址全部来自环境变量，一旦 compose 漏给（本次就漏了
+    # IIP_PROM_URL / IIP_LOKI_URL），裸跑测试全绿而容器里 evidence 恒空。
+    # 这类缺陷只有容器链路能抓到。
+    w("### [4.7] M4 证据采集链路")
+
+    # --- 4.7.0 先给数据源造数，否则采集器「查对了但查不到东西」 ---
+    #
+    # 为什么必须造：容器里的 Prometheus 只抓自己（prometheus.yml 的
+    # scrape_configs 仅 prometheus 自抓取），没有 http_requests_total；
+    # Loki 则一条日志都没有。采集器逻辑是对的，但数据源是空的，
+    # evidence 必然为 0 条 —— 这是**环境缺失**，不是产品缺陷。
+    # 宿主机链路（verify-func.py）用进程内假 HTTP 服务造这批数据，
+    # 容器链路不能用替身（那等于把要验的东西替换掉了），故灌进真 Loki。
+    #
+    # 只灌 Loki 不灌 Prometheus：Prometheus 没有 push API，要造
+    # http_requests_total 得给它加 exporter 容器，代价远大于收益。
+    # Prometheus 侧的正确性由 verify-func.py 的真实进程闭环覆盖，
+    # 此处只保证「Loki 采集器在容器内确实能采到东西」。
+    _LOKI_PORT = int(os.environ.get("IIP_LOKI_PORT", "3100"))
+    _now_ns = time.time_ns()
+    # 造 6 类不同错误模式 × 每类 3 条。TopN 默认 10，6 类全保留，
+    # 再加 1 条「错误量突增」= 7 条证据，超过手册判据 1 的 ≥5 条。
+    #
+    # 模式文本刻意各不相同：normalizeLogLine 会把数字抹掉，
+    # 若 6 条只差数字，会被聚合成 1 类，TopN 就只剩 2 条证据。
+    _PATTERNS = [
+        "error: connection refused by upstream",
+        "error: failed to acquire distributed lock",
+        "panic: runtime index out of range",
+        "fatal: unrecoverable checkpoint corruption",
+        "exception: payment gateway timeout",
+        "failed to commit transaction on replica",
+    ]
+    _streams = []
+    for _pi, _pat in enumerate(_PATTERNS):
+        _vals = []
+        for _k in range(3):
+            # 每条间隔 1ms，且都落在「现在」附近 —— Loki 拒收过旧样本。
+            _ts = _now_ns - (len(_PATTERNS) - _pi) * 10_000_000 + _k * 1_000_000
+            _vals.append([str(_ts), "%s (attempt=%d)" % (_pat, _k + 1)])
+        _streams.append({"stream": {"service": "container-check",
+                                    "source": "iip-verify"},
+                         "values": _vals})
+    rc_push, body_push = http_request(
+        "http://127.0.0.1:%d/loki/api/v1/push" % _LOKI_PORT,
+        "POST", json.dumps({"streams": _streams}).encode(), timeout=15)
+    check("M4 已向容器内真 Loki 灌入错误日志（造数前置）",
+          rc_push in (200, 204),
+          "rc=%s body=%s" % (rc_push, (body_push or "")[:160]))
+
+    # push 返回成功不等于立刻可查：Loki 的 tsdb store 需要落盘。
+    # 这里主动查一次，把「造数本身失败」与「采集器采不到」分开 ——
+    # 否则证据为 0 时无法判断是环境没准备好还是产品坏了。
+    _deadline = time.time() + 30
+    _seen = "0"
+    _q = urllib.parse.quote('{service="container-check"}')
+    while time.time() < _deadline:
+        rc_q, body_q = http_request(
+            "http://127.0.0.1:%d/loki/api/v1/query_range?query=%s&limit=100"
+            % (_LOKI_PORT, _q), "GET", None, timeout=10)
+        if rc_q == 200:
+            try:
+                _seen = str(sum(len(s.get("values", []))
+                                for s in json.loads(body_q).get("data", {})
+                                .get("result", [])))
+            except Exception:  # noqa: BLE001
+                _seen = "0"
+            if _seen != "0":
+                break
+        time.sleep(2)
+    # **不断言绝对条数**：Loki 数据在 named volume 里跨轮累加
+    #（compose down 不加 -v），第 2 轮起总数就是 36、54……
+    # 写死「期望 18」会让报告出现「实测 36（期望 18）」这种
+    # 看着像缺陷、实则正常的行。只判「本轮灌的确实可见」——
+    # 即至少 18 条（本轮灌入量），与历史残留无关。
+    _MIN_VISIBLE = len(_PATTERNS) * 3   # 本轮灌入量：6 类 x 3 条
+    check("M4 灌入的日志可被 query_range 查到（造数真的生效）",
+          _seen.isdigit() and int(_seen) >= _MIN_VISIBLE,
+          "容器内 Loki 可见日志条数=%s（本轮灌入 %d 条；"
+          "总量含历史残留，逐轮累加，故不比对绝对值）"
+          % (_seen, _MIN_VISIBLE))
+
+    # --- 4.7.1 M4 的表与索引确实在镜像的迁移里 ---
+    for tbl in ("tasks", "evidence"):
+        got = sql_val("SELECT count(*) FROM information_schema.tables "
+                      "WHERE table_schema='public' AND table_name='%s';" % tbl)
+        check("M4 关键表 %s 存在" % tbl, got == "1", "实际 %r" % got)
+
+    # 4.7.2 窗口游标列（0007）：少这一列则第二轮采集会从事故起点重采，
+    # 证据表出现两份完全相同的数据——而那不会报错，只会让证据表无声膨胀。
+    got = sql_val("SELECT count(*) FROM information_schema.columns "
+                  "WHERE table_schema='public' AND table_name='tasks' "
+                  "AND column_name='window_end';")
+    check("M4 窗口游标列 tasks.window_end 存在（0007）", got == "1",
+          "实际 %r" % got)
+
+    # 4.7.3 预算索引（0006）：证据列表按 created_at DESC, id DESC 排序，
+    # 0005 建的 (incident_id, type) 不含排序列，用不上。
+    got = sql_val("SELECT count(*) FROM pg_indexes WHERE schemaname='public' "
+                  "AND indexname='idx_evidence_incident_created';")
+    check("M4 证据预算索引 idx_evidence_incident_created 已建立（0006）",
+          got == "1", "实际 %r" % got)
+
+    # 4.7.4 采集器真的注册了 —— **本段最关键的一条**。
+    #
+    # 判据是「日志里没有『未配置地址，已跳过注册』」。反向断言（找 WARN）
+    # 会漏掉「文件在、内容却没用上」的情况，这里绑的是**明确的降级文案**。
+    #
+    # 这条断言是本次补 compose 时才有的：worker 原本只拿到 IIP_PG_URL，
+    # 于是 prometheus / loki 两个采集器都被跳过，worker 照常 healthy、
+    # 照常心跳，而 evidence 表恒空——所有 M1~M3 的断言照样全绿。
+    rc_l, out_l = docker("logs", "--tail", "200", "iip-worker", timeout=60)
+    skipped = [ln.strip() for ln in out_l.splitlines()
+               if "跳过注册" in ln]
+    check("M4 worker 未出现「采集器跳过注册」（Prom/Loki 已配地址）",
+          not skipped, "实际跳过: %s" % (skipped[:3] if skipped else "无"))
+
+    reg = [ln.strip() for ln in out_l.splitlines() if "已注册" in ln]
+    check("M4 worker 日志明确列出已注册采集器", bool(reg),
+          "实际: %s" % (reg[:3] if reg else "无"))
+
+    # 4.7.5 tasks 表的 CHECK 约束真实生效：非法 status 必须被拒。
+    # 只验「表存在」不够 —— 约束没建成功时表也在，脏数据照样能写进去。
+    rc_c, out_c = docker(
+        "exec", PG_C, "psql", "-U", "postgres", "-d", "iip", "-t", "-A", "-c",
+        "INSERT INTO tasks (kind, status) VALUES ('collect_evidence','bogus');",
+        timeout=60)
+    check("M4 tasks.status CHECK 约束生效（非法值被拒）",
+          rc_c != 0 and ("chk_tasks_status" in (out_c + "")
+                         or "violates check constraint" in (out_c + "")),
+          "rc=%d %s" % (rc_c, (out_c or "").strip()[:160]))
+
+    # 4.7.6 端到端：投一条告警 → 等 worker 采到 → evidence 表出现行。
+    #
+    # 用与 4.5 段不同的 alertname/instance：去重按**指纹**判定且无时间窗，
+    # 同指纹的 firing 行若仍在库会被 skip（RUN_TOKEN 只解决了「本轮 vs 上一轮」，
+    # 不解决「本段 vs 4.5 段」）。用独立标签最省事。
+    _inc_before = db_count("incidents")
+    _tk_before = db_count("tasks")
+    payload = json.dumps({
+        "version": "4",
+        "status": "firing",
+        "alerts": [{
+            "status": "firing",
+            "labels": {
+                "alertname": "M4ContainerProbeFail",
+                "service": "container-check",
+                "instance": "probe-%s" % RUN_TOKEN,
+                "severity": "critical",
+            },
+            "annotations": {"summary": "M4 容器链路探针"},
+            "startsAt": "2026-01-01T00:00:00Z",
+        }],
+    }).encode()
+    # http_request 内部在 data is not None 时自己加 Content-Type，
+    # 不接受 headers 参数（那是既有签名，改它会牵动全部调用点）。
+    rc_p, _ = http_request(
+        "http://127.0.0.1:%d/api/v1/alerts/webhook" % HTTP_PORT,
+        "POST", payload, timeout=10)
+    check("M4 投递告警 -> 200", rc_p == 200, "rc=%d" % rc_p)
+
+    # 任务入队：M4 的入队钩子在 server 侧（告警落库后触发），
+    # 所以断言 tasks 表出现 collect_evidence 行，而不是等 worker 领取。
+    _deadline = time.time() + 30
+    _tk = _tk_before
+    while time.time() < _deadline:
+        _tk = db_count("tasks")
+        if _tk > _tk_before:
+            break
+        time.sleep(2)
+    check("M4 告警落库后自动入队 collect_evidence 任务",
+          _tk > _tk_before,
+          "tasks %d -> %d" % (_tk_before, _tk))
+
+    # 采到证据：worker 默认轮询 2s，采集器超时 5s，最多重试 3 次。
+    # 给 120s —— 手册判据 1 是「2 分钟内 ≥5 条证据」，这里取同量级上限。
+    _deadline = time.time() + 120
+    _ev = 0
+    while time.time() < _deadline:
+        _ev = db_count("evidence")
+        if _ev > 0:
+            break
+        time.sleep(5)
+    # 手册 §八判据 1 是「≥5 条」，不是「≥1 条」。写 _ev > 0 是弱断言：
+    # 「TopN 被错误截断成 1」「只剩突增没有模式」都表现为「有证据」，
+    # 一律放过。这里按判据原文取 5。
+    check("M4 worker 自动采到证据并落库（容器内 2 分钟内 ≥5 条）",
+          _ev >= 5, "evidence=%d（期望 >=5）" % _ev)
+
+    # 交叉验证：必须有 loki 来源的证据。
+    # 只判总数 >0 时，「Loki 采集器在容器里完全没工作、恰好 Prometheus
+    # 采到了点东西」也会 PASS —— 断言必须绑到具体来源。
+    # 本段造数只灌了 Loki，故 loki 缺失即采集器问题。
+    _loci = sql_val("SELECT count(*) FROM evidence WHERE source='loki';")
+    check("M4 证据里有 loki 来源（Loki 采集器在容器内确实工作）",
+          _loci.isdigit() and int(_loci) > 0,
+          "loki 来源证据数=%s" % _loci)
+
+    # 6 类模式 + 1 条突增 = 7 条。TopN 默认 10，6 类不该被截断。
+    # 若只剩 2 条（1 模式 + 1 突增），说明 normalizeLogLine 把 6 条
+    # 错误信息聚合成 1 类 —— 那会让「Top N 错误模式」这一整条证据形同虚设。
+    _pats = sql_val("SELECT count(DISTINCT metadata->>'pattern') FROM evidence "
+                    "WHERE source='loki' AND metadata ? 'pattern';")
+    check("M4 Loki 错误模式未被错误聚合（6 类模式各自独立成条）",
+          _pats.isdigit() and int(_pats) >= 5,
+          "不同 pattern 数=%s（期望 >=5）" % _pats)
+
+    # 证据的 query 字段必须可复制复现（判据 2）—— 空串的话前端「复制」按钮
+    # 复制到的是空白，运维拿不回原始数据源，证据就失去意义。
+    if _ev > 0:
+        _empty_q = sql_val("SELECT count(*) FROM evidence "
+                           "WHERE query IS NULL OR btrim(query) = '';")
+        check("M4 证据的 query 字段非空（可复制复现）", _empty_q == "0",
+              "空 query 数=%s" % _empty_q)
+
+        # 时间戳必须是**证据自身的时间**，不是采集时刻。
+        # 用 NOW() 兜底的话所有证据的 timestamp 会挤在采集那一秒，
+        # 与「RED 指标在事故窗口内」完全对不上，且这种错误不报错。
+        _sane = sql_val("SELECT count(*) FROM evidence "
+                        "WHERE timestamp > NOW() + INTERVAL '1 hour';")
+        check("M4 证据 timestamp 无「未来时间」（未用采集时刻兜底）",
+              _sane == "0", "异常条数=%s" % _sane)
+
+        # confidence 本期**必须为空**（OPEN-M4-1）：填 1.0 等于宣称
+        # 「这条证据确凿」而没有依据。断言「全空」而不是「全为 1.0」，
+        # 是把「未评估」与「确凿」两件事分开。
+        _cf = sql_val("SELECT count(*) FROM evidence "
+                      "WHERE confidence IS NOT NULL;")
+        check("M4 evidence.confidence 保持为空（OPEN-M4-1）", _cf == "0",
+              "非空条数=%s" % _cf)
+
+        w("  证据按来源分布：")
+        rc_d, out_d = docker(
+            "exec", PG_C, "psql", "-U", "postgres", "-d", "iip", "-t", "-A", "-c",
+            "SELECT source||' = '||count(*) FROM evidence GROUP BY source "
+            "ORDER BY source;", timeout=60)
+        for ln in out_d.splitlines():
+            if ln.strip():
+                w("    " + ln.strip())
+
+    # 证据查询 API 能读出真计数（判据 8 的容器侧）：
+    # truncated 字段必须为 false 而 count/total 自洽 —— 容器里数据量小，
+    # 不该触发截断；一旦「count != total 且 truncated=false」就是 bug。
+    if _inc_before >= 0 and _ev > 0:
+        _inc_id = sql_val("SELECT max(id) FROM incidents;")
+        if _inc_id.isdigit():
+            rc_a, body_a = http_get(
+                "http://127.0.0.1:%d/api/v1/incidents/%s/evidence"
+                % (HTTP_PORT, _inc_id), timeout=10)
+            ok_api = rc_a == 200
+            if ok_api:
+                try:
+                    j = json.loads(body_a)
+                    ok_api = (isinstance(j, dict)
+                              and "evidence" in j
+                              and j.get("count") == len(j["evidence"])
+                              and isinstance(j.get("total"), int)
+                              and isinstance(j.get("truncated"), bool))
+                    w("  证据 API 返回：count=%s total=%s truncated=%s limit=%s"
+                      % (j.get("count"), j.get("total"),
+                         j.get("truncated"), j.get("limit")))
+                except Exception as e:  # noqa: BLE001
+                    ok_api = False
+                    w("  证据 API 响应解析失败: %r" % (e,))
+            check("M4 证据查询 API 可用且 count/total/truncated 自洽", ok_api,
+                  "http rc=%d" % rc_a)
     w()
 
     # ------------------------------------------------------ 5. 证据留存

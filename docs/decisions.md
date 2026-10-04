@@ -560,6 +560,7 @@
 | ADR-016 | M3 前端三项裁定：S3 一次性交付 / 深色专业控制台 / 前端自动化测试延到 M5 | 已裁定（禹 2026-10-02；代价：手册 §4.8 的前端单测在 M3 为 NOT DONE，已登记 OPEN） |
 | ADR-017 | K8s 采集器：默认关闭 + 开关打开必须真的注册 + 补 `IIP_K8S_NAMESPACE` | 已实施（M4 B6：24 个 mock server 单测；修正了「开关打开却不注册」的死配置；归属判定改为「先定主人再判归属」） |
 | ADR-018 | 迁移单步回滚用例改用绝对版本，`latestVersion` 从 embed 推导 | 已实施（M4 收尾：消除「回退 N 步」随迁移总数漂移的断言；M4 新增 3 个迁移曾让 0003/0004 的 down 完全没被测到） |
+| ADR-019 | compose 必须给 worker 注入 `IIP_PROM_URL` / `IIP_LOKI_URL`；容器链路的造数走 Loki push API | 已实施（M4 容器链路：原 compose 只给 `IIP_PG_URL`+`IIP_LOG_LEVEL`，两个采集器静默跳过注册，事件恒 0 条证据而 M1–M3 断言全绿） |
 
 ---
 

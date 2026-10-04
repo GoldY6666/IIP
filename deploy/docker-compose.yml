@@ -180,9 +180,28 @@ services:
     container_name: iip-worker
     profiles: ["app"]
     restart: unless-stopped
-    environment: *app-env
+    # M4：采集器地址**只给 worker**，且用 YAML 合并键在 *app-env 之上追加。
+    #
+    # 为什么不给 server：证据采集是 worker 的职责，server 一条告警都不采。
+    # 为什么不能靠默认值：Prom/Loki 采集器开关默认 true，但 buildRegistry 在
+    # 「开关开 + 未配地址」时会**跳过注册并打一条 Info**（手册 §4.6 的取舍）——
+    # 于是 worker 照常 healthy、照常心跳，而事件永远采不到证据。
+    # 症状是「服务全绿但 evidence 表恒空」，排查时完全看不出是配置缺失，
+    # 与 ADR-013 的拓扑静默降级同一类。地址写在这里，容器链路才真的验到 M4。
+    environment:
+      <<: *app-env
+      # 容器内连采集器走 compose 服务名，与 IIP_PG_URL 同一套命名。
+      IIP_PROM_URL: "http://prometheus:9090"
+      IIP_LOKI_URL: "http://loki:3100"
     depends_on:
       postgres:
+        condition: service_healthy
+      # 采集器地址指向这两个服务，故必须等它们就绪——
+      # 否则 worker 启动即注册采集器，而第一次采集必然连不上，
+      # 表现为「任务进重试」而非「采集器未注册」，两者排查方向完全不同。
+      prometheus:
+        condition: service_healthy
+      loki:
         condition: service_healthy
     # worker 无监听端口，无法用端口/HTTP 探活。
     # 它靠 polling 循环持续查库，进程活着即正常工作，
