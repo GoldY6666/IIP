@@ -284,10 +284,29 @@ else:
 # ---------------------------------------------------------------- 迁移校验
 log("")
 log("### [5] 迁移结果校验（直连测试库）")
+# **不断言 public 表的总数**（第二次踩这个坑）。
+# 第一次是 M3：期望 8，M4 加了 tasks 表后变 10，红的是测试不是产品。
+# 表会随里程碑增删（M4 加 tasks、0007 给 tasks 加 window_end 列），
+# 总数漂移是**正常演进**，把它写成断言等于给每次架构调整制造一个假红。
+# 真正要守的契约是「关键表都在」，下面逐张断言。
+#
+# 只报总数供参考，不参与判定。
 rc, out, err = psql(
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public';",
     db=DBNAME)
-record("public 表数量", "PASS" if rc == 0 and out == "8" else "FAIL", f"实际={out} (期望 8)")
+record("public 表数量（仅记录，不作判定）", "PASS" if rc == 0 else "FAIL",
+       f"实际={out} 张（随里程碑增删，漂移正常）")
+
+# 关键表逐张断言 —— 这才是硬契约。
+# M4 补 tasks 与 evidence：前者缺则 worker 无处领取任务，
+# 后者缺则证据无处落库（服务能起、接口能通，但 M4 等于没生效）。
+for tbl in ("schema_migrations", "alerts", "incidents", "incident_alerts",
+            "correlation_rules", "correlation_feedback", "timeline",
+            "evidence", "tasks", "review_suppressions"):
+    rc, out, err = psql(f"SELECT to_regclass('public.{tbl}') IS NOT NULL;",
+                         db=DBNAME)
+    record(f"关键表 {tbl} 存在", "PASS" if out == "t" else "FAIL",
+           f"实际={out!r}")
 
 # OPEN-8（M1 修正）：迁移版本号不再硬编码。
 # M0 时代本脚本把期望值写死为 "1|f"，M1 按计划新增 0002 后版本应为 2，
@@ -309,10 +328,6 @@ _any_dirty = any(r.split("|")[-1].strip() not in ("f", "false") for r in _rows i
 record(f"schema_migrations 最新版本={expected_version} 且全不 dirty",
        "PASS" if rc == 0 and _max_applied == expected_version and not _any_dirty else "FAIL",
        f"实际={out!r}")
-
-for tbl in ("alerts", "incidents", "correlation_feedback"):
-    rc, out, err = psql(f"SELECT to_regclass('public.{tbl}') IS NOT NULL;", db=DBNAME)
-    record(f"表 {tbl} 存在", "PASS" if out == "t" else "FAIL", f"实际={out!r}")
 
 # 约束生效验证
 # 教训：alerts 表有多个 NOT NULL 列（fingerprint/source/severity/status/starts_at/raw_payload），
