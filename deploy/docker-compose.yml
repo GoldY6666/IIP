@@ -159,6 +159,18 @@ services:
       #
       # 只加在 iip-server：worker 不起 HTTP 服务，给它这个变量是误导。
       IIP_WEB_ROOT: /usr/share/iip/web
+      # M5 S2：UI 侧面板地址（手册 §4.2.2）。**取 localhost 而非服务名** ——
+      # 这些地址是内联进 index.html 给**浏览器**点的，浏览器解析的是宿主机
+      # 地址，填 prometheus:9090 会让用户点的每个链接都打不开。
+      #
+      # 刻意不提供 IIP_UI_* 的服务名版本：若部署者确实需要改，
+      # 改这里的值即可（compose 是可改的），而给一个"容器内可用"的
+      # 默认值会诱使人以为它对浏览器也成立。
+      #
+      # 不写进 *app-env：worker 不起 HTTP 服务，不消费这些值。
+      IIP_UI_PROMETHEUS_URL: http://localhost:9090
+      IIP_UI_GRAFANA_URL: http://localhost:3000
+      IIP_UI_LOKI_URL: http://localhost:3100
     volumes:
       # 拓扑是环境相关文件——config/topology.yaml 自述为「示例，请按真实环境替换」，
       # 因此走挂载而非烧进镜像，与 prometheus / alertmanager / loki 的配置供给方式一致。

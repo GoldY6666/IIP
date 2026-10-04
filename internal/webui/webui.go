@@ -27,7 +27,7 @@ import (
 // 路由优先级由调用方保证：/api/* 与 /healthz 必须先于本 handler 注册。
 // 顺序颠倒会让 API 请求被 SPA 回退吞掉、返回 index.html 而非 JSON ——
 // 那种失败的表现是「前端报 JSON 解析错误」，与「后端挂了」难分辨。
-func Handler(root string) http.Handler {
+func Handler(root string, ui UIConfig) http.Handler {
 	if strings.TrimSpace(root) == "" {
 		return nil
 	}
@@ -40,10 +40,13 @@ func Handler(root string) http.Handler {
 		// panic：静态托管是附属能力，不该让它的配置错误拖垮整个服务。
 		return nil
 	}
-	return &staticHandler{root: abs}
+	return &staticHandler{root: abs, ui: ui.WithDefaults()}
 }
 
 // staticHandler 的零值不可用，必须经 Handler 构造。
 type staticHandler struct {
 	root string // 绝对路径，末尾无分隔符
+	// ui 是要注入 index.html 的运行时配置（各面板的浏览器可达地址）。
+	// 存而不取用：只在 serveIndex 读一次。
+	ui UIConfig
 }

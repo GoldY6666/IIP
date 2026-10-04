@@ -293,7 +293,12 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	// M5 S3：前端静态托管（手册 §4.3）。注册细节在 internal/webui 内部，
 	// 这里只调一次 —— 顺序要求（必须最后）由该包自己保证，
 	// 不留在本文件里以免将来被误改。
-	webui.Register(r, cfg.WebRoot, logger)
+	webui.Register(r, cfg.WebRoot, webui.UIConfig{
+		Prometheus:   cfg.UIPrometheusURL,
+		Grafana:      cfg.UIGrafanaURL,
+		Loki:         cfg.UILokiURL,
+		LokiTenantID: cfg.UILokiTenantID,
+	}, logger)
 
 	return r
 }

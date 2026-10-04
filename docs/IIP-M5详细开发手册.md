@@ -242,24 +242,81 @@ PUT  /api/v1/correlation/config → 200 同结构
 > 浏览器解析的是**宿主机**地址，不是容器网络地址。容器内服务的宿主映射端口
 > 已在 compose 里声明（9090/3000/3100），故 `localhost` 对默认部署成立。
 
-#### 4.2.3 三种链接形态
+##### 4.2.2.1 这些变量怎么到前端（本轮实现时补，原初稿遗漏）
+
+前端是**构建产物**，`IIP_UI_*` 是**后端运行时环境变量**，两者之间原本没有任何通道
+（实测 `web/src` 下 `import.meta.env` / `VITE_*` / `window.__*` **零命中**）。
+四个候选方案：
+
+| 方案 | 优点 | 缺点 | 结论 |
+|---|---|---|---|
+| A. vite `VITE_*` 构建时注入 | 零后端改动 | **改地址必须重新构建前端**；且构建机上的值会被烤进产物，与「运行时配置」矛盾 | 否 |
+| B. 新增 `GET /api/v1/ui-config` | 契约清晰 | **违反 §3.2「不新增后端端点」** | 否 |
+| C. 后端启动时生成 `config.js`，前端动态加载 | 改配置无需重建前端 | 多一次异步加载；`config.js` 404 时要有兜底 | 备选 |
+| **D. 后端在 `index.html` 里注入 `window.__IIP_UI__`** | 无新端点、无额外请求、**改配置无需重建前端** | 只在启用静态托管时生效 | **采纳** |
+
+**采纳 D**，理由与实现约束：
+
+- 注入点在 `internal/webui`，**只在 `IIP_WEB_ROOT` 非空时执行**；不启用静态托管时
+  无任何行为变化（与 S3 的开关语义一致）。
+- 注入内容是**四段地址**，不含任何密钥，可安全内联进 HTML。
+  刻意**不放**采集器的 token / 租户密钥 —— 那属于采集器配置，不属于「给人点的链接」。
+- 注入失败（无 `index.html`、占位符不存在）**不阻断请求**：降级为
+  前端 `DEFAULT_UI_ENDPOINTS`，即 localhost 默认值。理由是「地址没配对」不该让
+  **整个 UI 打不开** —— 那种故障的影响面远大于链接点不开。
+- 前端读取封装在 `web/src/api/uiConfig.ts`，**必须容忍 `window.__IIP_UI__` 不存在**
+  （dev 模式无后端注入、单元测试无 window 注入）。
+
+> **这是「先改手册再改代码」的又一例**：初稿 §4.2.2 只列了环境变量，
+> 没写它们怎么抵达前端。实现时才发现这条通道不存在。
+> 若不加这一节，代码就会「凭空依赖一个不存在的机制」。
+
+#### 4.2.3 链接形态（实现后为四种，初稿写三种）
+
+`buildExternalLinks` 返回**数组**而非单个：日志类证据值得同时给 Grafana（看图、下钻）
+与 Loki 原生（确认数据是否存在）—— 两个面板回答的是不同问题，只给一个的话
+运维得自己猜另一个在哪。
 
 | source | 目标 | URL |
 |---|---|---|
-| `prometheus` | Prometheus 表达式页 | `{PROM}/graph?g0.expr={urlencoded query}&g0.end={ts}` |
-| `loki` | Grafana Explore | `{GRAFANA}/explore?left={"datasource":..,"queries":[{"expr":{query},"range":{"from":..,"to":..}}]}` |
-| `k8s` / `git` / 其他 | **不渲染链接** | — |
+| `prometheus` | Prometheus 表达式页 | `{PROM}/graph?g0.expr={query}&g0.range_input=1&g0.start_input={from}&g0.end_input={to}` |
+| `loki` | Grafana Explore | `{GRAFANA}/explore?left={urlencoded JSON}` |
+| `loki` | Loki 原生 query_range | `{LOKI}/loki/api/v1/query_range?query={query}&start={from}&end={to}&direction=backward` |
+| `k8s` / 其他 | **不渲染链接** | — |
 
-**必须用 `encodeURIComponent` 整段编码 query**。PromQL 里含 `{`、`"`、`$`，
-Loki 的 LogQL 含 `{}` 与 `|`；不编码必然拼出坏链接。
-Loki 链接的 `left` 参数是 JSON，**必须整体 URL 编码**。
+**编码一律走 `URLSearchParams`，不手工拼。** PromQL 含 `{`、`"`、`$`，
+LogQL 含 `{}` 与 `|`；Loki 链接的 `left` 是 JSON，内层还含 `"`，必须整体编码。
+用 `URLSearchParams.set()` 的额外好处是它自己转义空格为 `+`（Prometheus 接受），
+而手工 `encodeURIComponent` 会留 `%20`（也接受，但两者混用容易写出双编码的 bug）。
+
+**时间范围的两级回退**（先 window 再 timestamp，缺 window 时 Loki 走 ±1h 窗口）：
+
+| 字段 | 何时用 | 回退到 |
+|---|---|---|
+| `metadata.window` | 有且**恰好两段**且两端都能解析 | `timestamp`（Loki 再扩 ±1h） |
+| `timestamp` | 上述任一条件不满足 | — |
+
+`metadata` 是 `Record<string,string>`，**不保证有 `window`**：实测三个采集器
+（prometheus / loki / k8s）都写，格式统一为 `RFC3339/RFC3339`（`formatWindow`），
+但 M4 之前的历史数据没有，将来新采集器也未必写。
+→ **解析失败必须退回 `timestamp` 而不是拼坏链接。** `window` 出现三段（格式变了）
+时按「不可用」处理，错解析比不解析更危险。
 
 #### 4.2.4 边界
 
 - `query` 为空 → **不渲染链接**（不可渲染一个打不开的按钮）。空 query 本身是
   契约违例（S3 测试要覆盖），但前端不能因此崩。
+- `query` 前后有空白（`"  {...}  "`）→ **先 trim 再判空**。SQL/采集器侧拼接很容易
+  带空白，而 `{ }` 这种空查询模板在 Prometheus 里是**语法错误**，
+  会跳到一个报错的页面 —— 那比不渲染更让人困惑。
 - Grafana 未部署 → 链接仍渲染，但 `title` 提示「需自行保证 Grafana 可达」，
   不做可达性探测（前端探测会引入新的失败模式）。
+- **Grafana 数据源 UID**：不同安装的 Loki 数据源 uid 不一致（常见是 `loki`，
+  也可能是别的）。传错时 Grafana **回退到默认数据源而不报错**，
+  表现为「打开了但查的是别的源」。故默认用 `Loki`，并在 `title` 里
+  显式提示「数据源 UID 与本环境可能不同」；多租户时用 `Loki-{tenantId}`。
+- 根地址末尾的斜杠必须先 trim：`http://h:3000/` + `/explore` → `//explore`，
+  Grafana 会 404（Prometheus 多数能容忍，故这类 bug 往往只在 Grafana 上暴露）。
 
 ### 4.3 S3 前端部署形态（§4.3）
 
@@ -591,6 +648,67 @@ AGENTS.md 约束「单文件 ≤ 300 行」。交付自查时发现两个文件�
 写错会报 `does not implement webui.Router`。
 
 登记为 OPEN-M5-7：剩余的 318/352 行需在后续里程碑（非 M5 收尾时）拆到 300 以内。
+
+### F3 实测记录（2026-10-04）
+
+实现落在 4 处：`internal/webui/uiconfig.go`（注入）、`internal/webui/serve.go`
+（挂进 index.html 响应）、`internal/config/m5.go`（4 个配置项 + flag 注册）、
+`web/src/api/uiConfig.ts`（前端读取）。**`web/src/api/externalLinks.ts`** 为
+§4.2.3 的 URL 拼装（原先不存在），`EvidenceList.tsx` 只加了按钮组与
+`stopPropagation`。配置通道的方案推导见 §4.2.2.1（**初稿遗漏，实现时补的**）。
+
+**抓到的一处真缺陷（单测验不出来的典型）**：
+
+请求 `/` 时 `safeRel("/")` 返回 `("", true)`，`filepath.Join(root, "")` 就是 root 本身
+→ 命中 handler 的**目录分支** → 走 `serveFile(index.html)` 而**不是** `serveIndex`，
+于是**注入被整条跳过**。症状极具欺骗性：**没有任何 WARN、没有报错、页面正常打开**，
+只是所有外链都指向默认值。已改为目录分支取 index.html 时统一走 `serveIndex`
+（注入只该在 index.html 上做）。锁它的测试
+`TestIndexAlwaysGetsUIConfigInjected` 刻意写成**反向**的——验「三条通往 index.html
+的路都要注入」而不只是验 `serveIndex` 自己会注入。
+
+**实测证据（真 PG + 真进程 + 真实 HTTP，49 PASS / 0 FAIL）**：
+
+| 判据 | 实测 |
+|---|---|
+| 注入内容 | `window.__IIP_UI__={prometheus:"http://prom.test:19090",grafana:"http://grafana.test:13000",loki:"http://loki.test:13100",lokiTenantId:"team-x"}` |
+| 响应字节 | 注入前 426 → 注入后 566（**先看字节数就知道机制通不通，再看内容对不对**） |
+| 占位符 | `<!--iip-ui-config-->` 被替换，与注入不并存 |
+| 重复请求 | 两次 `/` 响应**逐字节相同**（注入是每请求做的，挂载为 `:ro` 未改磁盘） |
+| SPA 回退 | `/incidents/12` 同样含注入（深链接刷新的实际路径） |
+| assets | 200 + 1 092 211 字节，**不含注入的配置值** |
+| 不启用时 | 不带 `--web-root` 起：`/` 404、连 `__IIP_UI__` 都不存在、`/api` 仍 200 |
+| 前端 | `pnpm tsc` rc=0；**50 用例全过**（`uiConfig` 8 + `externalLinks` 23 + `EvidenceList` 11 + `EvidenceLinks` 8） |
+| Go 门禁 | `gofmt -s` / `go build` / `go vet` / `golangci-lint` 全 rc=0 |
+| 真库全量 | `go test ./... -v -p 1`：**767 PASS / 0 FAIL / 1 SKIP**（`repository` 1349s） |
+
+唯一 SKIP 是 `TestHandlerAllowsSymlinkedRoot` —— 即 F2 已登记的 **OPEN-M5-6**
+（Windows 无 `SeCreateSymbolicLink` 权限），**已知且已记录，非本批次新增**。
+
+**三条「测试写错而非产品缺陷」的记录**（与 F2 同一类，但判据错误更有代表性）：
+
+1. 断言按 **JSON** 写 `"prometheus":"http://…"`，而注入的是**紧凑 JS 对象字面量**
+   `prometheus:"http://…"`（key 无引号）→ 4 条全 FAIL。**注入 JS 字面量而非 JSON
+   是正确形态**（省字节，且 `window.__IIP_UI__` 本就是 JS 全局）。
+   → 断言必须**按实际输出形式写**，不能按「看起来更规范」的形式写。
+2. 验「`assets/*.js` 不该被注入」时用 `b"__IIP_UI__" not in body` → **永远 FAIL**：
+   **前端 bundle 里本来就有这个字面量**（`uiConfig.ts` 的 `const pY="__IIP_UI__"`）。
+   → **判「X 没被处理」必须用只可能来自该处理的字符串**（此处用 `prom.test` / `team-x`），
+   用 X 的名字当判据会让断言恒假或恒真。
+3. 测试 fixture 的 index.html **不带占位符**，于是所有「注入是否发生」的断言恒为假。
+   症状是测试日志**反复刷 WARN** 却没人当回事。
+   → **fixture 必须与真实产物一致**；**测试里重复出现的 WARN 是「fixture 与产物不一致」的探针**，
+   别忽略。补上占位符后 WARN 归零，断言才具备鉴别力。
+
+**顺带确认的一件事**：`metadata.window` 在**三个采集器里都写了**（格式统一
+`RFC3339/RFC3339`），所以 Loki 链接的时间窗有真实依据。核这一点的过程值得记：
+第一次探查脚本只匹配 `Metadata: map[string]string{` 字面量，而 k8s 采集器走
+`md` 变量构造 → **漏判成「只有部分采集器写了」**，差点照着错误的结论改代码。
+→ **判据写窄了会得出方向相反的结论**，比不判更危险（见 §二纪律）。
+
+### F3 期间新增的 OPEN 项
+
+无。F3 未引入新的未验路径：运行时配置在「启用/不启用」两侧都有真进程断言。
 
 ### F2 期间新增的 OPEN 项
 

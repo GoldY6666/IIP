@@ -35,8 +35,8 @@ type Router interface {
 // 日志走 slog 而非返回 error：装配失败不该让服务起不来，
 // 但必须留痕 —— 「UI 没起来」在部署时是最容易被忽略的问题
 // （API 一切正常，只有打开页面才看到 404）。
-func Register(r Router, webRoot string, logger *slog.Logger) {
-	h := Handler(webRoot)
+func Register(r Router, webRoot string, ui UIConfig, logger *slog.Logger) {
+	h := Handler(webRoot, ui)
 	if h == nil {
 		if logger != nil {
 			logger.Info("未启用前端静态托管（IIP_WEB_ROOT 为空）")
@@ -45,6 +45,12 @@ func Register(r Router, webRoot string, logger *slog.Logger) {
 	}
 	r.NotFound(h.ServeHTTP)
 	if logger != nil {
-		logger.Info("已启用前端静态托管", slog.String("web_root", webRoot))
+		// 把注入的地址也打出来：「链接点不开」时这一行是唯一线索。
+		c := ui.WithDefaults()
+		logger.Info("已启用前端静态托管",
+			slog.String("web_root", webRoot),
+			slog.String("ui_prometheus", c.Prometheus),
+			slog.String("ui_grafana", c.Grafana),
+			slog.String("ui_loki", c.Loki))
 	}
 }

@@ -2,6 +2,8 @@ package webui
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,13 +74,22 @@ func serveFile(w http.ResponseWriter, r *http.Request, full, rel string) {
 }
 
 // serveIndex 服务 index.html（SPA 回退目标）。
-func serveIndex(w http.ResponseWriter, r *http.Request, root string) {
+//
+// **注入顺序很关键**：UI 运行时配置必须在**本次响应**里替换，不能只改磁盘文件。
+// 改磁盘的后果是：① 挂载是 :ro 的，写不进去（会报错或静默失败）；
+// ② 即便可写，容器重建后配置就丢了；③ 每个请求都写一次磁盘是性能灾难。
+// 每次请求时做一次字符串替换（几 KB 的 HTML）代价可忽略。
+//
+// 用 io.ReadAll + 注入 + Write 而非 ServeContent：注入后的内容长度与
+// 磁盘上的不同，复用 ModTime 做条件请求会让 ETag/Last-Modified 与实际内容脱节。
+// index.html 本就 no-cache，不需要条件请求。
+func serveIndex(w http.ResponseWriter, r *http.Request, root string, ui UIConfig) {
 	// index.html 永不缓存。理由见 immutableMaxAge 的注释。
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Type", contentType(indexFile))
 
 	full := filepath.Join(root, indexFile)
-	f, err := os.Open(full) // #nosec G304 -- full 由 root 拼出，root 已 Abs 化
+	raw, err := os.ReadFile(full) // #nosec G304 -- full 由 root 拼出，root 已 Abs 化
 	if err != nil {
 		// 产物不完整：只放了 assets 忘了 build 出 index.html。
 		// 此时明确报 500 而非回退到空页 —— 「UI 404」会被误判成产品坏了，
@@ -87,15 +98,17 @@ func serveIndex(w http.ResponseWriter, r *http.Request, root string) {
 			http.StatusInternalServerError)
 		return
 	}
-	defer func() { _ = f.Close() }()
 
-	info, err := f.Stat()
-	if err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
+	body, injected := InjectUIConfig(string(raw), ui)
+	if !injected {
+		// 没有占位符：记 WARN 而非报错。前端会退回 DEFAULT_UI_ENDPOINTS，
+		// 链接仍能拼出来（localhost 默认），只是不能用运行时配置。
+		// 静默失败会让「改了环境变量没生效」变成一条查不到线索的问题。
+		slog.Warn("index.html 缺少 UI 配置注入占位符，跳过运行时配置注入",
+			slog.String("marker", uiConfigScriptMarker))
 	}
-	// 传 f 而非 mustOpen：ServeContent 不接管所有权，Close 由上面的 defer 负责。
-	http.ServeContent(w, r, indexFile, info.ModTime(), f)
+	// r.Method == HEAD 时标准库会自动丢弃 body，这里照写不误。
+	_, _ = io.WriteString(w, body)
 }
 
 // setCache 按路径设置缓存头。

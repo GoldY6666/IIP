@@ -25,12 +25,17 @@ func chiRouter() *chi.Mux {
 //
 // 刻意包含 assets/ 与一个嵌套深链接路径：真实 vite 产物
 // 是 index.html + assets/*.js，缺任一份都会让某些断言假通过。
+//
+// index.html 里**带 UI 配置注入占位符**，与 web/index.html 和真实
+// dist 产物一致。写成不带会让「注入是否发生」的所有断言恒为假 ——
+// 那种 fixture 造出来的绿是没有意义的绿。
 func newTestRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	mkdirAll(t, filepath.Join(root, "assets"))
 	write(t, filepath.Join(root, indexFile),
-		`<!doctype html><html><head><title>IIP</title></head><body><div id="root"></div></body></html>`)
+		`<!doctype html><html><head><title>IIP</title>`+uiConfigScriptMarker+
+			`</head><body><div id="root"></div></body></html>`)
 	write(t, filepath.Join(root, "assets", "index-aaa111.js"), `console.log(1)`)
 	write(t, filepath.Join(root, "assets", "index-aaa111.css"), `:root{}`)
 	write(t, filepath.Join(root, "favicon.svg"), `<svg xmlns="http://www.w3.org/2000/svg"/>`)

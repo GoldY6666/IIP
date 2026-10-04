@@ -25,6 +25,23 @@ func m4Defaults() Config {
 	}
 }
 
+// m5Defaults 返回 M5 新增字段的默认取值集合。
+//
+// 沿 m4Defaults 的同一理由（集中列举，避免用例里逐个内联书写）。
+//
+// **M5 字段不能靠「默认值恰好是零值」蒙过去**：WebRoot 默认空确实等于零值，
+// 但四个 UI 地址有非空默认值（localhost 系列），漏写会立刻红 ——
+// 而失败信息只说「配置不匹配」，看不出是哪个字段对不上。
+func m5Defaults() Config {
+	return Config{
+		WebRoot:         DefaultWebRoot,
+		UIPrometheusURL: DefaultUIPrometheusURL,
+		UIGrafanaURL:    DefaultUIGrafanaURL,
+		UILokiURL:       DefaultUILokiURL,
+		UILokiTenantID:  DefaultUILokiTenantID,
+	}
+}
+
 // mergeM4 把 M4 的默认字段合并进 base 的副本。
 func mergeM4(base Config) Config {
 	d := m4Defaults()
@@ -37,6 +54,23 @@ func mergeM4(base Config) Config {
 	base.EvidenceMaxPerIncident = d.EvidenceMaxPerIncident
 	base.EvidenceWindow = d.EvidenceWindow
 	base.EvidenceTimeout = d.EvidenceTimeout
+	return base
+}
+
+// mergeM5 把 M5 字段的默认值合并进 base。
+//
+// 判据用 UIPrometheusURL == "" 而非 WebRoot == ""：WebRoot 的默认值
+// 本身就是空字符串，拿它当哨兵等于「永远合并」，
+// 将来想显式测「WebRoot 为空」的那个用例就永远测不到自己的意图。
+// UIPrometheusURL 默认非空且没有用例去覆盖它，因此可安全作哨兵 ——
+// 与 mergeM4 用 WorkerTaskBatch 同一思路。
+func mergeM5(base Config) Config {
+	d := m5Defaults()
+	base.WebRoot = d.WebRoot
+	base.UIPrometheusURL = d.UIPrometheusURL
+	base.UIGrafanaURL = d.UIGrafanaURL
+	base.UILokiURL = d.UILokiURL
+	base.UILokiTenantID = d.UILokiTenantID
 	return base
 }
 
@@ -206,6 +240,11 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			want := tc.want
 			if want.WorkerTaskBatch == 0 {
 				want = mergeM4(want)
+			}
+			// M5 同理：UI 四个地址有非空默认值（localhost 系列），
+			// 漏合并必然让「期望全默认」的用例变红。
+			if want.UIPrometheusURL == "" {
+				want = mergeM5(want)
 			}
 			if *got != want {
 				t.Fatalf("配置不匹配\n got=%+v\nwant=%+v", *got, want)

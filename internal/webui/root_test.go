@@ -30,7 +30,7 @@ func TestHandlerAcceptsNonCanonicalRoot(t *testing.T) {
 	// 部署者从脚本里拼路径时很容易产出这种形态。
 	weird := filepath.Join(base, "releases", "..", "releases", ".", "v1")
 
-	h := Handler(weird)
+	h := Handler(weird, UIConfig{})
 	if h == nil {
 		t.Fatal("Handler 对非规范 root 返回 nil，UI 会直接没有")
 	}

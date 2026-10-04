@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 )
@@ -54,6 +53,12 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	info, err := os.Stat(full)
 	switch {
 	case err == nil && !info.IsDir():
+		// 直接请求到 index.html（如 /index.html）时也要注入，
+		// 否则会出现「根路径有注入、深链接没有」的诡异不一致。
+		if filepath.Base(full) == indexFile {
+			serveIndex(w, r, h.root, h.ui)
+			return
+		}
 		serveFile(w, r, full, rel)
 		return
 	case err == nil && info.IsDir():
@@ -64,7 +69,12 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			index := filepath.Join(full, indexFile)
 			st, statErr := os.Stat(index)
 			if statErr == nil && !st.IsDir() {
-				serveFile(w, r, index, path.Join(rel, indexFile))
+				// **必须走 serveIndex 而非 serveFile**：注入只发生在
+				// serveIndex 里。走 serveFile 的话，请求根路径 /
+				// （它命中的是「目录 + 尾斜杠」分支）会拿到未注入的
+				// index.html —— 症状是「UI 能开，但链接全是默认值」，
+				// 且**没有任何报错**。
+				serveIndex(w, r, h.root, h.ui)
 				return
 			}
 		} else {
@@ -91,5 +101,5 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON404(w)
 		return
 	}
-	serveIndex(w, r, h.root)
+	serveIndex(w, r, h.root, h.ui)
 }

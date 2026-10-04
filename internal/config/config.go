@@ -98,6 +98,16 @@ type Config struct {
 	// **空字符串即关闭静态托管**，此时服务行为与 M4 完全一致。
 	WebRoot string // IIP_WEB_ROOT，默认空（不启用）
 
+	// --- M5 S2：UI 侧面板地址（手册 §4.2.2）---
+	//
+	// 这组是**浏览器可达**的地址，与 EvidencePromEnabled 用的 PromURL
+	// （采集器用的，可能是容器网络地址）**刻意分开**。
+	// 共用一个变量的后果是：容器里能采集、但用户点的链接全打不开。
+	UIPrometheusURL string // IIP_UI_PROMETHEUS_URL，默认 http://localhost:9090
+	UIGrafanaURL    string // IIP_UI_GRAFANA_URL，默认 http://localhost:3000
+	UILokiURL       string // IIP_UI_LOKI_URL，默认 http://localhost:3100
+	UILokiTenantID  string // IIP_UI_LOKI_TENANT_ID，默认空（单租户）
+
 	// 三个 evidence*Explicit 记录采集器开关是否被**显式**配置过。
 	//
 	// 不导出给业务用，只服务 validateM4：见该方法的说明。

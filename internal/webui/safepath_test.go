@@ -19,7 +19,7 @@ import (
 // 而它一旦漏过，测试会因为恰好返回了 404 而 PASS。
 func TestHandlerRejectsPathEscape(t *testing.T) {
 	root := newTestRoot(t)
-	h := Handler(root)
+	h := Handler(root, UIConfig{})
 	if h == nil {
 		t.Fatal("Handler 返回 nil，静态托管未启用")
 	}
@@ -84,7 +84,7 @@ func TestHandlerAllowsDotsInsideFilename(t *testing.T) {
 	mkdirAll(t, filepath.Join(root, "v1.0..next"))
 	write(t, filepath.Join(root, "v1.0..next", "index.html"), "nested-index")
 
-	h := Handler(root)
+	h := Handler(root, UIConfig{})
 	if h == nil {
 		t.Fatal("Handler 返回 nil")
 	}
@@ -138,7 +138,7 @@ func TestHandlerAllowsSymlinkedRoot(t *testing.T) {
 		t.Skipf("符号链接创建无效（Windows 无 SeCreateSymbolicLink 权限时静默失败）: %v", err)
 	}
 
-	h := Handler(link)
+	h := Handler(link, UIConfig{})
 	if h == nil {
 		t.Fatal("Handler 对符号链接 root 返回了 nil，部署会直接没有 UI")
 	}

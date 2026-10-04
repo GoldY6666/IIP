@@ -31,13 +31,15 @@ import {
   Typography,
   App as AntApp,
 } from 'antd'
-import { CopyOutlined } from '@ant-design/icons'
+import { CopyOutlined, ExportOutlined } from '@ant-design/icons'
 import {
   EVIDENCE_TYPE_LABEL,
   type Evidence,
   type EvidenceListResponse,
   type EvidenceType,
 } from '../api/evidence'
+import { buildExternalLinks } from '../api/externalLinks'
+import { uiEndpoints } from '../api/uiConfig'
 
 const { Text, Paragraph } = Typography
 
@@ -222,6 +224,11 @@ function EvidenceCard({
   const lagMs = Date.parse(evidence.collected_at) - Date.parse(evidence.timestamp)
   const backfilled = Number.isFinite(lagMs) && lagMs > 60_000
 
+  // 外部面板链接。空数组表示这条没有可渲染的链接（k8s 等来源，
+  // 或 query 为空）—— 此时**不渲染任何按钮**，而不是渲染一个灰掉的「打开」：
+  // 那会让人以为面板挂了，而真相是「这条证据本来就没有对应面板」。
+  const extLinks = buildExternalLinks(evidence, uiEndpoints())
+
   return (
     <Card
       size="small"
@@ -301,6 +308,27 @@ function EvidenceCard({
               }}
             />
           </Tooltip>
+          {extLinks.map((l) => (
+            <Tooltip key={l.href} title={l.title}>
+              <Button
+                size="small"
+                type="text"
+                href={l.href}
+                target="_blank"
+                // rel="noreferrer"：新标签打开时一并屏蔽 referrer，
+                // 面板侧不该知道用户是从 IIP 的哪个事件点进来的。
+                rel="noreferrer"
+                icon={<ExportOutlined />}
+                onClick={(ev) => {
+                  // 必须 stopPropagation：整张卡片的 onClick 是「展开明细」，
+                  // 不拦住的话点链接会同时展开卡片并打开新标签。
+                  ev.stopPropagation()
+                }}
+              >
+                {l.label}
+              </Button>
+            </Tooltip>
+          ))}
         </Space>
 
         {expanded && mdEntries.length > 0 && (

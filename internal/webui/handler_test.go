@@ -11,14 +11,14 @@ func TestHandlerNilWhenRootEmpty(t *testing.T) {
 	// 前者让「忘配 IIP_WEB_ROOT」在装配处显形（一次都不注册），
 	// 后者表现为「UI 全 404」，与「路径写错」无法区分。
 	for _, root := range []string{"", "   ", "\t"} {
-		if h := Handler(root); h != nil {
+		if h := Handler(root, UIConfig{}); h != nil {
 			t.Errorf("Handler(%q) 非 nil，期望 nil（未配置时不应启用静态托管）", root)
 		}
 	}
 }
 
 func TestHandlerServesIndexAtRoot(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 	rec := do(t, h, http.MethodGet, "/")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET / = %d，期望 200", rec.Code)
@@ -34,7 +34,7 @@ func TestHandlerServesIndexAtRoot(t *testing.T) {
 }
 
 func TestHandlerServesAssetsWithImmutable(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 	rec := do(t, h, http.MethodGet, "/assets/index-aaa111.js")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /assets/index-aaa111.js = %d，期望 200", rec.Code)
@@ -50,7 +50,7 @@ func TestHandlerServesAssetsWithImmutable(t *testing.T) {
 
 func TestHandlerContentTypeByExtension(t *testing.T) {
 	root := newTestRoot(t)
-	h := Handler(root)
+	h := Handler(root, UIConfig{})
 
 	cases := []struct {
 		file string
@@ -80,7 +80,7 @@ func TestHandlerContentTypeByExtension(t *testing.T) {
 // TestHandlerSPAFallback 验 SPA 回退：前端用 react-router，
 // /incidents/12 是路由不是文件，刷新必须能打开。
 func TestHandlerSPAFallback(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 
 	for _, p := range []string{
 		"/incidents",
@@ -108,7 +108,7 @@ func TestHandlerSPAFallback(t *testing.T) {
 // TestHandlerDoesNotSwallowAPI 是手册 §7.2 点名的反向验证：
 // 静态托管若把 /api 吞掉，调用方拿到 index.html 而不是 JSON。
 func TestHandlerDoesNotSwallowAPI(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 
 	// 走到本 handler 的 /api 请求，**必须**是 JSON 404 而不是 index.html。
 	// （正常情况下 /api/* 已被上层路由处理，走不到这里；
@@ -128,7 +128,7 @@ func TestHandlerDoesNotSwallowAPI(t *testing.T) {
 }
 
 func TestHandlerRejectsNonGET(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete,
 		http.MethodPatch, http.MethodOptions} {
 		rec := do(t, h, m, "/incidents/12")
@@ -142,7 +142,7 @@ func TestHandlerRejectsNonGET(t *testing.T) {
 }
 
 func TestHandlerHeadHasNoBody(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 	rec := do(t, h, http.MethodHead, "/assets/index-aaa111.js")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("HEAD = %d，期望 200", rec.Code)
@@ -152,8 +152,60 @@ func TestHandlerHeadHasNoBody(t *testing.T) {
 	}
 }
 
+// TestIndexAlwaysGetsUIConfigInjected 锁住一个真实缺陷：
+//
+// 根路径 `/` 走的是「目录 + 尾斜杠」分支，若那里取 index.html 时
+// 调 serveFile 而非 serveIndex，注入就被跳过 —— 症状是
+// 「UI 能打开，但所有链接都是默认值」且**没有任何报错**。
+//
+// 这条测试的价值在于它是**反向**的：它验「每一条通往 index.html 的路
+// 都要注入」，而不只是验 serveIndex 自己会注入。
+func TestIndexAlwaysGetsUIConfigInjected(t *testing.T) {
+	root := newTestRoot(t)
+	const want = "http://injected.prom:9090"
+	h := Handler(root, UIConfig{Prometheus: want})
+	if h == nil {
+		t.Fatal("Handler 返回 nil")
+	}
+
+	// 三条路径都必须带注入：根路径、深链接回退、显式 /index.html
+	for _, p := range []string{"/", "/incidents/12", "/index.html"} {
+		t.Run(p, func(t *testing.T) {
+			rec := do(t, h, http.MethodGet, p)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET %s = %d，期望 200", p, rec.Code)
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, uiConfigGlobalName) {
+				t.Errorf("GET %s 的响应未注入 UI 配置。body 前 200: %q",
+					p, truncate(body, 200))
+			}
+			if !strings.Contains(body, want) {
+				t.Errorf("GET %s 未带注入的地址 %q", p, want)
+			}
+			// 占位符必须被替换掉，不能与注入并存
+			if strings.Contains(body, uiConfigScriptMarker) {
+				t.Errorf("GET %s 的响应里占位符还在（注入没生效）", p)
+			}
+		})
+	}
+
+	// 反向：非 index.html 的产物**不该**被注入。
+	// 给 assets/*.js 注入配置纯属浪费字节，且会让「assets 是否被注入」
+	// 这条断言失去鉴别力（两个都注入时它恒为真）。
+	t.Run("assets 不被注入", func(t *testing.T) {
+		rec := do(t, h, http.MethodGet, "/assets/index-aaa111.js")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("= %d，期望 200", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), uiConfigGlobalName) {
+			t.Error("assets 文件被注入了 UI 配置（只该注入 HTML）")
+		}
+	})
+}
+
 func TestHandlerDirectoryRedirects(t *testing.T) {
-	h := Handler(newTestRoot(t))
+	h := Handler(newTestRoot(t), UIConfig{})
 	// 目录缺尾斜杠时 301：浏览器会自动补并再请求 index.html。
 	// 少了这个 301，GET /assets 会 404，表现为「产物里明明有 assets」。
 	rec := do(t, h, http.MethodGet, "/assets")
@@ -171,7 +223,7 @@ func TestHandlerIncompleteDist(t *testing.T) {
 	root := t.TempDir()
 	mkdirAll(t, root+"/assets")
 	write(t, root+"/assets/app.js", "x")
-	h := Handler(root)
+	h := Handler(root, UIConfig{})
 
 	rec := do(t, h, http.MethodGet, "/")
 	if rec.Code != http.StatusInternalServerError {

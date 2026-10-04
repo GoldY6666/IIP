@@ -26,7 +26,7 @@ func (f *fakeRouter) NotFound(h http.HandlerFunc) { f.handlers = append(f.handle
 func TestRegisterEmptyRootRegistersNothing(t *testing.T) {
 	for _, root := range []string{"", "  ", "\t\n"} {
 		f := &fakeRouter{}
-		Register(f, root, nil)
+		Register(f, root, UIConfig{}, nil)
 		if len(f.handlers) != 0 {
 			t.Errorf("Register(root=%q) 注册了 %d 个 handler，期望 0（未配置时不该介入）",
 				root, len(f.handlers))
@@ -36,7 +36,7 @@ func TestRegisterEmptyRootRegistersNothing(t *testing.T) {
 
 func TestRegisterNonEmptyRootRegistersOnce(t *testing.T) {
 	f := &fakeRouter{}
-	Register(f, newTestRoot(t), nil)
+	Register(f, newTestRoot(t), UIConfig{}, nil)
 	if len(f.handlers) != 1 {
 		t.Fatalf("注册了 %d 个 handler，期望恰好 1 个", len(f.handlers))
 	}
@@ -63,7 +63,7 @@ func TestRegisterKeepsAPIAheadOfStaticFallback(t *testing.T) {
 		_, _ = io.WriteString(w, `{"incidents":[],"count":0}`)
 	})
 	// 静态托管**最后**注册（与 main.go 的顺序一致）
-	Register(r, newTestRoot(t), nil)
+	Register(r, newTestRoot(t), UIConfig{}, nil)
 
 	t.Run("已注册 API 命中自己的 handler", func(t *testing.T) {
 		rec := httptest.NewRecorder()
@@ -114,7 +114,7 @@ func TestRegisterLogsOnlyOnce(t *testing.T) {
 	var sb strings.Builder
 	logger := slog.New(slog.NewTextHandler(&sb, nil))
 
-	Register(&fakeRouter{}, "", logger)
+	Register(&fakeRouter{}, "", UIConfig{}, logger)
 	if got := strings.Count(sb.String(), "\n"); got != 1 {
 		t.Errorf("空 root 应恰好 1 条日志，实际 %d 条: %q", got, sb.String())
 	}
@@ -123,7 +123,7 @@ func TestRegisterLogsOnlyOnce(t *testing.T) {
 	}
 
 	sb.Reset()
-	Register(&fakeRouter{}, newTestRoot(t), logger)
+	Register(&fakeRouter{}, newTestRoot(t), UIConfig{}, logger)
 	if got := strings.Count(sb.String(), "\n"); got != 1 {
 		t.Errorf("非空 root 应恰好 1 条日志，实际 %d 条: %q", got, sb.String())
 	}
