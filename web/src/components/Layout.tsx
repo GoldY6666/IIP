@@ -10,6 +10,7 @@ import {
   AlertOutlined,
   ApiOutlined,
   FileSearchOutlined,
+  SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { palette } from '../theme'
@@ -18,10 +19,14 @@ import { useReviewQueueCount } from '../api/useReviewQueueCount'
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
 
+// 导航项。**按「日常操作 → 例外处置 → 系统」排列**：
+// 事件/待确认/告警是每天点开的，配置是偶尔调一次的。
+// 把配置放最后而不是插在最前，是因为它不是高频入口。
 const NAV = [
   { key: '/incidents', icon: <AlertOutlined />, label: <Link to="/incidents">事件</Link> },
   { key: '/reviews', icon: <FileSearchOutlined />, label: <Link to="/reviews">待确认</Link> },
   { key: '/alerts', icon: <ApiOutlined />, label: <Link to="/alerts">告警</Link> },
+  { key: '/settings', icon: <SettingOutlined />, label: <Link to="/settings">配置</Link> },
 ]
 
 export default function Layout_() {
@@ -53,7 +58,7 @@ export default function Layout_() {
         </Text>
         <div style={{ flex: 1 }} />
         <Tag color="default" style={{ marginInlineEnd: 0 }}>
-          M4 证据收集
+          M5 Web 控制台
         </Tag>
       </Header>
 

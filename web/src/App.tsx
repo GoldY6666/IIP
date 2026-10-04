@@ -6,7 +6,8 @@
 //   /incidents        事件列表（列表 API）
 //   /incidents/:id    事件详情（详情 API，含双 Tab 与处置）
 //   /reviews          待确认队列（REVIEW API）
-//   /alerts告警列表（M1 已有页面，保留不动）
+//   /alerts           告警列表（M1 已有页面，保留不动）
+//   /settings         关联配置（M5 S1，可写端点）
 //
 // 入库前 App.tsx 是 7 行的 `return <Alerts />`（没有路由、没有壳），
 // 三个页面 import 都在但从无入口。
@@ -17,6 +18,7 @@ import Incidents from './pages/Incidents'
 import IncidentDetail from './pages/IncidentDetail'
 import Reviews from './pages/Reviews'
 import Alerts from './pages/Alerts'
+import Settings from './pages/Settings'
 
 export default function App() {
   return (
@@ -29,6 +31,7 @@ export default function App() {
         {/* M1 的告警页原样保留：它是 S3 之前唯一的页面，
             删掉会让 M1 的验收方式（发送示例告警看列表增长）失效。 */}
         <Route path="/alerts" element={<Alerts />} />
+        <Route path="/settings" element={<Settings />} />
       </Route>
     </Routes>
   )
