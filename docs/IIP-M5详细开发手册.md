@@ -1,9 +1,15 @@
 # IIP M5 详细开发手册（Web UI 收口与部署形态）
 
-> 状态：**待禹确认**。确认后本文档成为 M5 的唯一开发依据；
-> 实现与本文不符即视为缺陷，任何偏离须**先改本文再改代码**。
+> 状态：**已确认生效**（禹 2026-10-04 确认范围与 OPEN 项处置）。
+> 本文档是 M5 的唯一开发依据；实现与本文不符即视为缺陷，
+> 任何偏离须**先改本文再改代码**。
 >
 > 体例沿 M3/M4（十一章固定结构），对齐表数据全部为 2026-10-04 实测。
+>
+> **OPEN-M5-1 / 2 / 3 的处置**（禹确认「按手册暂定推进」）：
+> ① S3 **不做鉴权**，`deploy/README.md` 须显著标注「V1.0 仅供内网 / 演示环境」；
+> ② `IIP_UI_*` 默认值在 F3 用真 compose 验证点击可达；
+> ③ S4 若延期则登记新 OPEN 项，**不得**把 §4.8 写成通过。
 
 ---
 
@@ -304,7 +310,7 @@ Loki 链接的 `left` 参数是 JSON，**必须整体 URL 编码**。
 ② 前端迭代与 Go 镜像解耦，可独立发版；
 ③ 与 `config/` 的供给方式一致（都走挂载）。
 
-代价：**首次部署必须先跑一次 `npm ci && npm run build`**。
+代价：**首次部署必须先跑一次 `pnpm install --frozen-lockfile && pnpm run build`**。
 须写进 `deploy/README.md` 与 M5 交付说明 —— 否则用户 `compose up` 后看到 404，
 会以为产品坏了。
 
@@ -370,15 +376,50 @@ Playwright 需要浏览器二进制。CI/离线环境的处置：
 > 开发计划写的是 10 天，但其中 5 个任务已在 M3 完成（§二）。
 > 剩下 4 项按实际工作量重估。**若耗时超 2 周，启用 §6 的降级预案。**
 
-| 批次 | 内容 | 预估 | 依赖 |
-|---|---|---|---|
-| **F1** | 前端测试设施底座：装 vitest + Testing Library + jsdom，配置 `npm test`，把现有 5 个页面/组件的**类型**跑通 | 0.5d | — |
-| **F2** | 静态托管 + SPA 回退 + `/api` 优先级（Go）+ compose 挂载 + `deploy/README.md` 更新 | 1d | — |
-| **F3** | S2 直跳链接：`src/api/externalLinks.ts` + `EvidenceList` 集成 + 配置项注入 | 0.5d | F2（需知道 UI 从哪访问） |
-| **F4** | S1 配置页：`correlationConfig.ts` + `Settings.tsx` + `WeightRow.tsx` + 路由/导航挂入口 | 1d | F1 |
-| **F5** | 组件测试 7 条（§4.4.2） | 0.5d | F1/F3/F4 |
-| **F6** | Playwright E2E 5 条（§4.4.3）+ `npm run test:e2e` | 1d | F2 |
-| **F7** | 四条既有验证链路回归 + 门禁 | 0.5d | 全部 |
+> **包管理器口径（2026-10-04 实测修正）**：本仓库前端用 **pnpm 9.15.9**
+> （`web/pnpm-lock.yaml` 存在、`package.json` 的 `packageManager` 锁定、
+> CI 用 `pnpm install --frozen-lockfile`）。本文初稿写的 `pnpm test` / `npm run`
+> **是错的**，一律改为 `pnpm test` / `pnpm run`。用 npm 会在无
+> `package-lock.json` 的情况下另建一棵依赖树，与 CI 装的不是同一套。
+
+| 批次 | 内容 | 预估 | 依赖 | 状态 |
+|---|---|---|---|---|
+| **F1** | 前端测试设施底座：装 vitest + Testing Library + jsdom，配置 `pnpm test` | 0.5d | — | ✅ 完成（2026-10-04） |
+| **F2** | 静态托管 + SPA 回退 + `/api` 优先级（Go）+ compose 挂载 + `deploy/README.md` 更新 | 1d | — | 待开工 |
+| **F3** | S2 直跳链接：`src/api/externalLinks.ts` + `EvidenceList` 集成 + 配置项注入 | 0.5d | F2（需知道 UI 从哪访问） | 待开工 |
+| **F4** | S1 配置页：`correlationConfig.ts` + `Settings.tsx` + `WeightRow.tsx` + 路由/导航挂入口 | 1d | F1 | 待开工 |
+| **F5** | 组件测试 7 条（§4.4.2） | 0.5d | F1/F3/F4 | 待开工 |
+| **F6** | Playwright E2E 5 条（§4.4.3）+ `pnpm run test:e2e` | 1d | F2 | 待开工 |
+| **F7** | 四条既有验证链路回归 + 门禁 | 0.5d | 全部 | 待开工 |
+
+### F1 实测记录（2026-10-04）
+
+超出原「只跑通类型」的要求，先落了**一条有实证价值的组件测试**（`EvidenceList.test.tsx`，
+11 条用例，全过，7.9 s）。理由：底座若只验证「能跑」，等于验证了 vitest 自己；
+真正要验证的是**本仓库组件在 jsdom 下能测**，而这一点只有真写一条用例才知道。
+
+| 项 | 实测值 |
+|---|---|
+| 新增依赖 | `vitest@2.1.9`、`jsdom@25.0.1`、`@testing-library/react@16.1.0`、`@testing-library/jest-dom@6.6.3`、`@testing-library/user-event@14.5.2`、`@vitest/coverage-v8@2.1.9` |
+| scripts | `test` / `test:watch` / `test:coverage` |
+| 配置文件 | `web/vitest.config.ts`（**独立于 `vite.config.ts`**，理由见文件头注释） |
+| setup 桩 | `matchMedia`、`ResizeObserver`（jsdom 缺，antd 依赖）；**刻意不桩** `scrollWidth` |
+| 门禁验证 | `pnpm test` rc=0（11/11）、`pnpm tsc` rc=0、`pnpm build` rc=0 且产物与 F1 前**逐字节一致**（3080 模块、同 hash） |
+| 覆盖率 | 仅 `EvidenceList.tsx` 44.21%，其余 0 —— 符合 F1 定位（不追覆盖率数字） |
+
+**F1 顺带修掉的两处仓库卫生问题**（不属原任务，但属 F1 引入后的直接后果）：
+
+1. `web/tsconfig.node.tsbuildinfo` **曾被误入库**。`web/.gitignore` 里
+   早就有 `*.tsbuildinfo` 规则（还带注释说明），但 **.gitignore 对已入库文件无效** ——
+   这是「规则写了却没生效」的典型。已用 `git rm --cached` 移出（**保留本地文件**），
+   关闭 M3 报告 §10.3 登记的 OPEN 项。
+2. `test:coverage` 脚本**初版存在但跑不了**：vitest 2.x 的 `--coverage` 需要
+   `@vitest/coverage-v8`，未装时报 `MISSING DEPENDENCY`。已装并实测 rc=0。
+   → 判据：**新增 script 必须真跑一次**，不能只看 `package.json` 写对了。
+
+**`.gitignore` 分层纪律**：`*.tsbuildinfo` 规则**只在 `web/.gitignore`**，
+不往根 `.gitignore` 加 —— 根文件只放全仓通用规则（`node_modules/`、
+`coverage.out`），前端特有产物（`coverage/`、`*.tsbuildinfo`）归前端文件。
 
 ### 降级预案（超期 2 周时启用）
 
@@ -403,8 +444,8 @@ Playwright 需要浏览器二进制。CI/离线环境的处置：
 | 层 | 工具 | 数量目标 | 跑法 |
 |---|---|---|---|
 | Go 单测与真库 | `go test` | 不新增（M5 不改 Go 逻辑） | `-p 1` 串行 |
-| 前端组件 | vitest | **≥7 条**（§4.4.2 全覆盖） | `npm test` |
-| 前端 E2E | Playwright | **5 条**（§4.4.3） | `npm run test:e2e` |
+| 前端组件 | vitest | **≥7 条**（§4.4.2 全覆盖） | `pnpm test` |
+| 前端 E2E | Playwright | **5 条**（§4.4.3） | `pnpm run test:e2e` |
 | 既有四链路 | 见 §0 | 不变 | 见 README |
 
 ### 7.2 反向验证（防「假绿」）
@@ -428,9 +469,9 @@ M5 的门禁 = 既有门禁 + 前端门禁：
 ```
 go build ./... / go vet ./... / gofmt -s / golangci-lint run   （rc=0）
 go test -p 1 ./...                                             （SKIP=0）
-npm test                                                        （rc=0）
-npm run tsc && npm run build                                    （rc=0）
-npm run test:e2e                                                （rc=0）
+pnpm test                                                       （rc=0）
+pnpm run tsc && pnpm run build                                    （rc=0）
+pnpm run test:e2e                                                （rc=0）
 python scripts/verify-func.py                                   （rc=0）
 python scripts/verify-images.py                                 （0 失败）
 ```
@@ -449,10 +490,10 @@ python scripts/verify-images.py                                 （0 失败）
 | 6 | 深链接 `/incidents/{id}` 直接刷新可打开（SPA 回退） | E2E 直访 |
 | 7 | 目录穿越（`../../etc/passwd`）被拒 | 单测（Go 侧） |
 | 8 | 处置操作后**回读 timeline 确认落库** | E2E-3 |
-| 9 | 前端组件测试 ≥7 条且 rc=0 | `npm test` |
-| 10 | E2E 5 条且 rc=0 | `npm run test:e2e` |
+| 9 | 前端组件测试 ≥7 条且 rc=0 | `pnpm test` |
+| 10 | E2E 5 条且 rc=0 | `pnpm run test:e2e` |
 | 11 | 既有四条验证链路 0 失败 | 全跑 |
-| 12 | `tsc -b` + `vite build` rc=0 | `npm run build` |
+| 12 | `tsc -b` + `vite build` rc=0 | `pnpm run build` |
 | 13 | 门禁：Go 四项全 rc=0、真库 SKIP=0、无 `nolint` | 静态门禁 + 真库门禁 |
 
 **第 4 条是本里程碑新增的判据**（此前四个里程碑都没有「部署形态可用」这一项）。
@@ -461,11 +502,20 @@ python scripts/verify-images.py                                 （0 失败）
 
 ---
 
+### F1 期间新增的 OPEN 项
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| OPEN-M5-4 | `vitest`/`jsdom`/Testing Library 为**新增 devDependency**，需在 CI 加 `pnpm test` job 才算进门禁；仓库无 remote，该 job 同样只能本地等价复现 | F7 处理。未加之前 §4.8 仍记 NOT DONE |
+| OPEN-M5-5 | 组件覆盖率仅 `EvidenceList.tsx` 44%，其余 5 个页面/组件为 0 | **不追数字**。F5 补测试时自然上升；把覆盖率设成门禁阈值是错的（会诱导为凑数字写测试） |
+
+---
+
 ## 九、端到端验证脚本
 
 ```bash
 # 0) 前置：先构建前端产物（S3 是挂载不是 build，故必须手动构建一次）
-cd web && npm ci && npm run build && cd ..
+cd web && pnpm install --frozen-lockfile && pnpm run build && cd ..
 
 # 1) 静态与真库门禁（必须 -p 1，见 M4 教训）
 python D:\_iip_setup\m4_final_gate.py
@@ -475,10 +525,10 @@ python scripts/verify-images.py
 
 # 3) 前端门禁
 cd web
-npm test                # 组件测试，期望 rc=0 且 7 条全过
-npm run tsc             # 类型检查
-npm run build           # 产物构建
-npm run test:e2e        # E2E，期望 5 条全过
+pnpm test               # 组件测试，期望 rc=0 且 7 条全过
+pnpm run tsc             # 类型检查
+pnpm run build           # 产物构建
+pnpm run test:e2e        # E2E，期望 5 条全过
 cd ..
 
 # 4) 手工体验（要记录用时，对应判据 4 的「≤30 分钟」）
