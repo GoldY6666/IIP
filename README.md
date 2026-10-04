@@ -515,13 +515,15 @@ SYN **静默丢包**，`TimeoutError` 也属 `OSError`——「没人监听」�
 | 迁移 `0005` up→down→up 三连 | **达成** | `migrations` 包 4/4 全绿（164s） |
 | build / vet / gofmt / lint | **达成** | 全部 rc=0 |
 | 全量真库测试 | **达成** | **425 PASS / 0 FAIL / 0 SKIP**，串行 22.5 分钟 |
+| **容器链路断言 0 失败** | **达成** | 59 条断言全通过（连跑 3 轮一致）；M4 新增 18 条：表/索引/CHECK 约束/采集器注册/`evidence=7`/6 类错误模式未聚合 |
+| 宿主全栈冒烟链路 | **达成** | 45 PASS / 0 FAIL；从零建库 → 自动迁移 → 探活 → 优雅退出 → 清理全闭环 |
+| 业务闭环链路 | **达成** | 75 PASS / 0 FAIL；含抑制闭环、跨事件指针、宕机零阻塞与恢复补采 |
 | 前端证据 Tab 接真实数据 | **达成** | `tsc -b` + `vite build` rc=0 |
 
 ### 未达成 / 降级（如实标注，不得记为通过）
 
 | 项 | 状态 | 原因 |
 |----|------|------|
-| **容器链路断言 0 失败** | **达成** | 59 条断言全通过；M4 新增 18 条（表/索引/CHECK/采集器注册/evidence=7/6 类模式独立） |
 | K8s 采集器接真实集群 | **未验证** | 偏差 B1（ADR-017）：仓库零 K8s 依赖，只有 mock server 单测。**默认关闭** |
 | `evidence.confidence` | **全部为空** | OPEN-M4-1：无采集器评估它。留空而非填 1.0 —— 填 1.0 等于宣称「确凿」而没有依据 |
 | `trace` 类型证据 | **无采集器** | OPEN-M4-2 |
@@ -547,6 +549,17 @@ SYN **静默丢包**，`TimeoutError` 也属 `OSError`——「没人监听」�
    而 `tasks` 3→3、`done=3` 第一轮就满足了 —— worker 从未重试过任何东西；
    #3 第二次投的告警与前面同指纹被去重 `skipped`。两处都改成真正能判别的断言。
 
-> 复现方式：M4 真库门禁 `python D:\_iip_setup\m4_final_gate.py`（约 25 分钟，含全量 `./...`）；
-> 业务闭环 `python scripts\verify-func.py`（约 3 分钟，M4 段含宕机与补采两场景）；
-> 前端构建 `python D:\_iip_setup\build_web.py`（`tsc -b` + `vite build`）。
+> **复现方式**（四条链路互不重叠，缺一条就有一类缺陷漏网）：
+>
+> | 链路 | 命令 | 耗时 | 独占覆盖 |
+> |------|------|------|----------|
+> | 全量真库 | `python D:\_iip_setup\m4_final_gate.py` | 22.5 分钟 | 425 用例，**必须串行 `-p 1`** |
+> | A 业务闭环 | `python scripts\verify-func.py` | 2 分 16 秒 | 抑制闭环 / 宕机零阻塞 / 恢复补采 |
+> | B 宿主全栈 | `python D:\_iip_setup\rt_b.py` | 2 分 57 秒 | 从零建库 → 迁移 → 探活 → 优雅退出 |
+> | C 容器链路 | `python scripts\verify-images.py` | 2 分钟 | **镜像内容物 / compose 注入 / 静默降级** |
+> | D 静态门禁 | `go build/vet/gofmt` + `golangci-lint run` | 61 秒 | 规范类缺陷 |
+> | E 前端构建 | `python D:\_iip_setup\build_web.py` | 12 秒 | `tsc -b` + `vite build` |
+>
+> 链路 B 依赖宿主 PG 在 5433，**必须走 wrapper**（脚本不起 PG，
+> 不传 `IIP_PSQL` 会扑空并伪装成产品失败）。
+> 链路 C 需 Docker daemon，compose down **不加 `-v`**（named volume 跨轮保留）。
