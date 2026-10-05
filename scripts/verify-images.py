@@ -1124,10 +1124,16 @@ def main() -> int:
         # 单独点出那条 symlink 测试：零 SKIP 只说明「没跳过」，
         # 不等于「它跑过了且成立」—— SKIP 数为 0 时它也可能压根不在
         # -run 范围内或被 build tag 排掉。故显式断言 PASS。
+        #
+        # detail 写成**中性措辞**：check() 会把 detail 无条件拼到
+        # PASS 行上（见其定义），若这里写「未找到该用例的 PASS 行」，
+        # 归档报告会印出 `[PASS] ... -- 未在输出中找到该用例的 PASS 行`
+        # 这种自相矛盾的行，读的人会以为判据没验。
+        # 失败时的具体缺失由下面这行 w() 单独给出。
+        _m = re.search(r"^--- PASS: TestHandlerAllowsSymlinkedRoot\b", _out, re.M)
         check("TestHandlerAllowsSymlinkedRoot 在 Linux 下真 PASS（非 SKIP）",
-              bool(re.search(r"^--- PASS: TestHandlerAllowsSymlinkedRoot\b",
-                             _out, re.M)),
-              "未在输出中找到该用例的 PASS 行")
+              bool(_m),
+              "已匹配 PASS 行" if _m else "未在输出中找到该用例的 PASS 行")
 
         _np = len(re.findall(r"^--- PASS:", _out, re.M))
         w("  webui 用例：PASS %d 条，SKIP %d 条" % (_np, len(_skips)))

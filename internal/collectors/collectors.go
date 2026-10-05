@@ -25,6 +25,15 @@ const (
 	SourcePrometheus = "prometheus"
 	SourceLoki       = "loki"
 	SourceK8s        = "k8s"
+
+	// SourceTrace 是分布式追踪来源（Jaeger / Tempo 等）。
+	//
+	// 这里刻意**不写具体后端名**（不叫 SourceJaeger）：
+	// 来源落库后会出现在页面上给用户看，而「这条证据来自哪个系统」与
+	// 「我们用哪种协议去问它」是两件事 —— 换后端不该让历史证据的来源串变样。
+	// M6 §5 的降级裁定：本采集器只保证接口与降级逻辑正确，
+	// **不声称能连通任一真实后端**（详见 trace.go 的包注释）。
+	SourceTrace = "trace"
 )
 
 // defaultCollectorTimeout 是默认查询超时（手册 §4.5：三类采集器均为 5s）。
