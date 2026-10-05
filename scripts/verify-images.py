@@ -22,6 +22,12 @@
   IIP_KEEP         设为 1 则验证后不清理容器（便于人工排查）
   IIP_LOG_DIR      报告输出目录      默认 = 仓库根
   IIP_GOPROXY      构建期 Go 模块代理 默认 https://goproxy.cn,direct
+  IIP_GOMODCACHE   宿主 Go modcache  默认 %USERPROFILE%\\go\\pkg\\mod
+                   4.8 段靠它 + GOPROXY=off 在容器内零网络跑 go test；
+                   找不到时该段判FAIL（不静默跳过）
+  IIP_CHROME_BIN   宿主 Chrome 绝对路径。**不设则跳过无头浏览器截图**
+                   （4.8.2 段，OPEN-M5-8）。设了才对compose 起着的
+                   8080 端口截图，并断言截图颜色种类 >= 4（非空白页）
 """
 import json
 import os
@@ -213,6 +219,100 @@ def compose_ps() -> list[dict]:
         except json.JSONDecodeError:
             pass
     return rows
+
+
+# ------------------------------------------------------------------- png
+def png_color_count(path: str, cap: int = 4096) -> int:
+    """返回 PNG 里出现的**不同颜色数**（上限 cap，避免大图耗时过久）。
+
+    为什么要自己解 PNG：判据「截图不是空白页」不能用「文件非空」判断 ——
+    一张纯白或纯黑的失败截图同样非空。宿主 Python 没装 Pillow/numpy
+    （实测 zlib/struct 可用，PIL 与 numpy 都缺），而为了看一眼截图去
+    装依赖不划算，故直接按 PNG 规范解。
+
+    只支持 8bit 的 RGB / RGBA / 灰度 / 带 alpha 的灰度 —— 这覆盖
+    Chrome headless 截图的全部实际形态。遇到调色板（PLTE）等类型
+    直接抛异常，让调用方按「无法验像素」处理，而不是悄悄返回 0
+    （返回 0 会被误读成「纯色空白页」，那是假的 FAIL）。
+    """
+    import struct
+    import zlib
+
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("不是 PNG 文件（魔数不对）")
+
+    # 逐块扫描：IHDR 拿宽高/位深/颜色类型，IDAT 拼接后整体 inflate。
+    pos = 8
+    w = h = depth = ctype = None
+    idat = bytearray()
+    while pos + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        ctag = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        if ctag == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", body[:10])
+        elif ctag == b"IDAT":
+            idat += body
+        elif ctag == b"IEND":
+            break
+        pos += 12 + length
+
+    if w is None or not idat:
+        raise ValueError("PNG 缺 IHDR 或 IDAT")
+    if depth != 8:
+        raise ValueError("只支持 8bit 位深，实测 %s" % depth)
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(ctype)
+    if channels is None:
+        raise ValueError("不支持的颜色类型 %s" % ctype)
+    if ctype == 3:
+        raise ValueError("调色板 PNG 未支持（无法当作空白页判据）")
+
+    raw = zlib.decompress(bytes(idat))
+
+    # 每行开头有 1 字节 filter type。逐行按 PNG 规范反滤波。
+    stride = w * channels
+    seen = set()
+    prev = bytearray(stride)
+    off = 0
+    for _y in range(h):
+        if off >= len(raw):
+            break
+        ftype = raw[off]
+        off += 1
+        line = bytearray(raw[off:off + stride])
+        off += stride
+        if len(line) < stride:
+            break
+        if ftype == 1:            # Sub
+            for i in range(channels, stride):
+                line[i] = (line[i] + line[i - channels]) & 0xFF
+        elif ftype == 2:          # Up
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif ftype == 3:          # Average
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif ftype == 4:          # Paeth
+            for i in range(stride):
+                a = line[i - channels] if i >= channels else 0
+                b = prev[i]
+                c = prev[i - channels] if i >= channels else 0
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 0xFF
+        elif ftype != 0:
+            raise ValueError("未知的 filter type %d" % ftype)
+        # 抽样：每 4 像素取一个，够判「是否空白」且快。
+        for x in range(0, stride, channels * 4):
+            seen.add(bytes(line[x:x + channels]))
+            if len(seen) >= cap:
+                return cap
+        prev = line
+    return len(seen)
 
 
 def main() -> int:
@@ -964,6 +1064,116 @@ def main() -> int:
                     w("  证据 API 响应解析失败: %r" % (e,))
             check("M4 证据查询 API 可用且 count/total/truncated 自洽", ok_api,
                   "http rc=%d" % rc_a)
+    w()
+
+    # ------------------------------------------- 4.8 M5：静态托管（Linux 语义验收）
+    # 本段跑在**容器链路**里，验的是「Windows 上验不到的那部分」。
+    #
+    # 背景（M5 手册 OPEN-M5-6）：internal/webui 有一条
+    # TestHandlerAllowsSymlinkedRoot，验的是「root 本身是符号链接时
+    # Handler 不得把它判成目录穿越」—— 而这恰恰是部署常见形态
+    # （dist 链接到 release 目录）。它在 Windows 上是 **SKIP**：
+    # os.Symlink 需要 SeCreateSymbolicLink 权限，无管理员时建不出来。
+    #
+    # 为什么在这里跑而不是让用户手动执行：
+    #   * 判据 13 要求「真库门禁 SKIP=0」，这条 SKIP 是唯一的例外项；
+    #     不在 Linux 上真跑一遍，门禁项永远是「部分」。
+    #   * 用 golang:1.23-alpine 跑的是**那条被SKIP 的测试本身**，
+    #     比「手工造 symlink 再发 HTTP」更直接 —— 后者验的是症状，
+    #     前者验的是那条断言真的成立。
+    #
+    # 断言口径：**零 SKIP + 那条 symlink 测试 PASS**。
+    # 刻意不写死「PASS 数 = N」—— 加一条用例就得改断言，
+    # 而 N 变化时到底该期望多少无从判断（见 4.4 的同类教训）。
+    w("### [4.8] M5 静态托管：Linux 下的 symlink 语义（OPEN-M5-6）")
+
+    _modcache = os.environ.get("IIP_GOMODCACHE",
+                               os.path.join(os.path.expanduser("~"), "go", "pkg", "mod"))
+    if not os.path.isdir(_modcache):
+        # 找不到就**跳过并如实标注**，不能默默pass ——
+        # 「没跑」与「跑过且通过」在报告里必须能区分开。
+        check("M5 webui 测试在 Linux 容器内跑（symlink 语义）", False,
+              "找不到 Go modcache（IIP_GOMODCACHE=%s），无法零网络跑 go test。"
+              "设该变量指向宿主 modcache 后重跑" % _modcache)
+    else:
+        w("  modcache = %s" % _modcache)
+        _rc, _out = docker(
+            "run", "--rm",
+            "-v", PROJ.replace("\\", "/") + ":/src",
+            "-v", _modcache.replace("\\", "/") + ":/go/pkg/mod:ro",
+            "-w", "/src",
+            "-e", "GOPROXY=off",   # 零网络：容器内直连 proxy.golang.org 不通
+            "-e", "GOFLAGS=-mod=mod",
+            "-e", "GOCACHE=/tmp/gocache",
+            "golang:1.23-alpine",
+            "go", "test", "./internal/webui/", "-v", "-count=1",
+            timeout=900)
+
+        if _rc != 0:
+            w("  ---- go test 输出（末 40 行）----")
+            for _line in _out.splitlines()[-40:]:
+                w("    " + _line)
+        check("M5 webui 测试在 Linux 容器内 rc=0", _rc == 0,
+              "" if _rc == 0 else "rc=%s，输出见上" % _rc)
+
+        # 零SKIP：这条是判据 13 的直接依据。
+        _skips = re.findall(r"^\s*--- SKIP: (\S+)", _out, re.M)
+        check("M5 webui 测试在 Linux 下零 SKIP（判据 13）", not _skips,
+              "" if not _skips else "SKIP: %s" % ", ".join(_skips))
+
+        # 单独点出那条 symlink 测试：零 SKIP 只说明「没跳过」，
+        # 不等于「它跑过了且成立」—— SKIP 数为 0 时它也可能压根不在
+        # -run 范围内或被 build tag 排掉。故显式断言 PASS。
+        check("TestHandlerAllowsSymlinkedRoot 在 Linux 下真 PASS（非 SKIP）",
+              bool(re.search(r"^--- PASS: TestHandlerAllowsSymlinkedRoot\b",
+                             _out, re.M)),
+              "未在输出中找到该用例的 PASS 行")
+
+        _np = len(re.findall(r"^--- PASS:", _out, re.M))
+        w("  webui 用例：PASS %d 条，SKIP %d 条" % (_np, len(_skips)))
+
+    # 4.8.2 无头浏览器截图（OPEN-M5-8）
+    #
+    # **默认不跑**，需显式给 IIP_CHROME_BIN 指向宿主 Chrome。
+    # 为什么不做成默认：容器内无头浏览器需要额外镜像，而本机镜像源
+    # 不可达（2026-10-04 实测：registry-1.docker.io 经代理 502，
+    # 四个加速源分别 403/401/超时）—— 默认跑会稳定红，而红的原因
+    # 与产品质量无关。做成可选段后，镜像源恢复或 CI 环境可用时
+    # 一条命令即可补上，不必重写。
+    _chrome = os.environ.get("IIP_CHROME_BIN", "").strip()
+    if not _chrome:
+        w("  [跳过] 无头浏览器截图（OPEN-M5-8）：未设 IIP_CHROME_BIN。"
+          "该段需宿主 Chrome；OPEN 保持未闭环。")
+    elif not os.path.isfile(_chrome):
+        check("无头浏览器截图（OPEN-M5-8）", False,
+              "IIP_CHROME_BIN=%s 不存在" % _chrome)
+    else:
+        # 截图落盘到报告目录（同级），便于人工核对像素。
+        _shot = os.path.join(os.path.dirname(REPORT), "_verify_ui.png")
+        _rc2, _out2 = run([_chrome, "--headless=new", "--disable-gpu",
+                           "--hide-scrollbars", "--window-size=1440,900",
+                           "--screenshot=" + _shot,
+                           "http://127.0.0.1:%d/" % HTTP_PORT],
+                          timeout=180)
+        _exists = os.path.isfile(_shot)
+        _size = os.path.getsize(_shot) if _exists else 0
+        # 像素断言：**不**用「文件非空」那种恒真判据。
+        # 一张纯白/纯黑的失败截图也非空。改为解码 PNG 后统计颜色种类，
+        # 真实页面（深色控制台 + 文字 + 表格线）必然远多于 1 种颜色；
+        # 而「渲染失败成白页」只有 1 种。这里刻意用极低阈值 (>=4)，
+        # 因为要抓的是「有没有渲染出来」，不是「好不好看」。
+        _colors = 0
+        if _exists and _size > 0:
+            try:
+                _colors = png_color_count(_shot)
+            except Exception as e:  # noqa: BLE001
+                w("  PNG 解码失败（截图存在但无法验像素）: %r" % (e,))
+        check("无头浏览器截图已生成", _exists and _size > 0,
+              "" if _exists else "未生成截图，chrome rc=%s %s" % (_rc2, _out2[:150]))
+        check("截图非空白页（颜色种类 >= 4，判据 4）", _colors >= 4,
+              "颜色种类=%d，文件 %d 字节。纯白/纯黑失败页只有 1 种颜色"
+              % (_colors, _size))
+        w("  截图：%s（%d 字节，%d 种颜色）" % (_shot, _size, _colors))
     w()
 
     # ------------------------------------------------------ 5. 证据留存

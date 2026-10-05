@@ -42,16 +42,40 @@ body,
 
 /* 事件列表的整行可点。antd 只给了行内元素的 hover，
    整行可点时若不补这个，用户悬停在空白单元格上得不到任何反馈，
-   会以为只有文字能点。 */
+   会以为只有文字能点。
+   
+   底色由 antd 的 Table.rowHoverBg token 提供（见 theme.ts），
+   这里只补 token 覆盖不到的两件事：左侧强调条与键盘焦点环。 */
 .clickable-row {
-  cursor: pointer;
   transition: background-color 0.15s ease;
 }
+/* 强调条画在**首个单元格的 inset box-shadow**上，而不是 tr 上 ——
+   antd 把行背景色设在 td 上，tr 上的 background 会被每个 td 盖住，
+   写在 tr 上的高亮不会显示（这是「改了没效果」的经典坑）。
+   强调色取 --iip-row-accent：该变量由 clickableRow.ts 从当前调色板
+   注入，这里**不写死颜色**，切主题时两套配色各自正确。 */
+.ant-table-tbody > tr.clickable-row > td:first-child {
+  box-shadow: inset 2px 0 0 0 transparent;
+  transition: box-shadow 0.15s ease;
+}
+.ant-table-tbody > tr.clickable-row:hover > td:first-child {
+  box-shadow: inset 2px 0 0 0 var(--iip-row-accent, currentColor);
+}
+/* :focus-visible 而非 :focus —— 鼠标点过一行不该留下一圈焦点框，
+   键盘 Tab 过来才该有。这两者混用会让鼠标用户看到「假焦点」。 */
+.ant-table-tbody > tr.clickable-row:focus-visible {
+  outline: 2px solid var(--iip-row-accent, currentColor);
+  outline-offset: -2px;
+}
 
-/* 表格里的代码块（事件 ID / 指纹）在暗底上不该是默认浅色底。 */
+/* 表格里的代码块（事件 ID / 指纹）。
+   颜色走 CSS 变量、由 Layout 根节点按当前主题注入（见 themeVars.ts）——
+   之前这里写死暗色值，切到亮色后事件 ID 变成一个个比卡片还深的黑块。
+   不写死还有个副作用：这两行 hex 是全文件仅剩的颜色常量，
+   与文件头「颜色只许在 theme.ts / themeVars 定」的纪律相违。 */
 .ant-table .ant-typography code {
-  background: #1c2128;
-  color: #79c0ff;
+  background: var(--iip-code-bg, #1c2128);
+  color: var(--iip-code-fg, #79c0ff);
   padding-inline: 5px;
   border-radius: 4px;
 }

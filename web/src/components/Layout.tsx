@@ -17,6 +17,7 @@ import {
 } from '@ant-design/icons'
 import { palette, useThemeMode } from '../themeMode'
 import { useReviewQueueCount } from '../api/useReviewQueueCount'
+import { themeVars } from './themeVars'
 
 const { Header, Sider, Content } = Layout
 const { Text } = Typography
@@ -47,7 +48,7 @@ export default function Layout_() {
   const siderTheme = mode === 'dark' ? 'dark' : 'light'
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ minHeight: '100vh', ...themeVars(mode, palette) }}>
       <Header
         style={{
           display: 'flex',

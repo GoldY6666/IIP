@@ -12,6 +12,8 @@ import { Alert, App as AntApp, Button, Card, Popconfirm, Space, Table, Tag, Tool
 import type { ColumnsType } from 'antd/es/table'
 import { fetchReviews, decideReview, type ReviewEdge } from '../api/incidents'
 import { severityColor } from '../api/status'
+import TimeCell from '../components/TimeCell'
+import { LIST_MIN_HEIGHT } from '../components/listLayout'
 import { palette } from '../themeMode'
 
 const { Title, Text } = Typography
@@ -72,8 +74,10 @@ export default function Reviews() {
     {
       title: '关联时间',
       key: 'correlated_at',
-      width: 170,
-      render: (_, r) => new Date(r.alert.correlated_at).toLocaleString(),
+      width: 118,
+      // 相对时间（"6 分钟前"）：这一列回答的是「这批边是什么时候产生的」，
+      // 值班的人要判断的是「刚产生的还是陈旧堆积的」。绝对时刻靠悬停给。
+      render: (_, r) => <TimeCell value={r.alert.correlated_at} />,
     },
     {
       title: '操作',
@@ -154,21 +158,27 @@ export default function Reviews() {
       )}
 
       <Card styles={{ body: { padding: 0 } }}>
-        <Table<ReviewEdge>
-          rowKey={(r) => `${r.incident_id}:${r.alert.alert_id}`}
-          loading={isLoading}
-          columns={columns}
-          dataSource={data?.reviews ?? []}
-          pagination={false}
-          size="small"
-          locale={{
-            emptyText: (
-              <span style={{ color: palette.text.tertiary }}>
-                {isLoading ? '加载中…' : '队列已清空 —— 没有需要人工判断的关联'}
-              </span>
-            ),
-          }}
-        />
+        {/* minHeight 的理由同Incidents.tsx：只有几行数据时
+            表格会缩成几行高，下半屏全空，看起来像没加载完。 */}
+        <div style={{ minHeight: LIST_MIN_HEIGHT }}>
+          <Table<ReviewEdge>
+            rowKey={(r) => `${r.incident_id}:${r.alert.alert_id}`}
+            loading={isLoading}
+            columns={columns}
+            dataSource={data?.reviews ?? []}
+            pagination={false}
+            size="small"
+            locale={{
+              emptyText: (
+                <div style={{ padding: '120px 0' }}>
+                  <span style={{ color: palette.text.tertiary }}>
+                    {isLoading ? '加载中…' : '队列已清空 —— 没有需要人工判断的关联'}
+                  </span>
+                </div>
+              ),
+            }}
+          />
+        </div>
         {data?.has_more && (
           <div style={{ padding: '8px 16px', fontSize: 12, color: palette.text.tertiary }}>
             仅显示前 {data.reviews.length} 条，可能还有更多

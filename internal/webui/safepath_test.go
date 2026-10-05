@@ -71,8 +71,7 @@ func TestHandlerRejectsPathEscape(t *testing.T) {
 	}
 }
 
-// TestHandlerDoesNotEscapeViaSymlink 验符号链接逃逸。
-//
+// TestHandlerAllowsDotsInsideFilename 验「符号链接逃逸」这条**反面**：
 // 合法文件名里带 .. 的（"foo..bar"）必须能正常取到 ——
 // 这是「用 strings.Contains(p, "..") 判穿越」的写法会误伤的情形，
 // 也是本包刻意逐段判而非整串匹配的理由。

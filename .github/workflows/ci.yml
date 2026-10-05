@@ -114,8 +114,109 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Type check
+      - name: Type check (src)
         run: pnpm tsc --noEmit
+
+      - name: Type check (e2e)
+        # **必须单独跑**：tsconfig.json 的 include 只有 "src"，
+        # e2e/ 与 playwright.config.ts 压根不被它检查 ——
+        # 不单独 tsc 的话，E2E 里的类型错误要到 Playwright 运行时才炸，
+        # 而那时错误会被「服务起不来」这类基础设施问题盖住。
+        run: pnpm exec tsc -p tsconfig.e2e.json --noEmit
 
       - name: Build
         run: pnpm build
+
+      - name: Unit tests
+        # OPEN-M5-4 的处置：vitest/jsdom/Testing Library 是新增 devDependency，
+        # 之前 CI 里没有任何一步跑 `pnpm test`，等于新写的 114 条用例无人执行。
+        run: pnpm run test:unit
+
+  e2e:
+    name: e2e (playwright)
+    runs-on: ubuntu-latest
+    # E2E 要起 PG + 编译 Go 二进制 + 跑浏览器，比前端 job 重
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5434:5432
+        # 健康检查必须做：没有它，stack.mjs 起来时 PG 还没 ready，
+        # 表现为「connection refused」，而真因是服务没起完。
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    defaults:
+      run:
+        working-directory: web
+
+    env:
+      # stack.mjs 据这组变量定位 PG —— 本机是 D:\pgsql16\bin，CI 上是容器挂载点。
+      E2E_PG_BIN: /usr/lib/postgresql/16/bin
+      E2E_PG_DATA: /tmp/iip_e2e_pgdata
+      E2E_PG_USER: postgres
+      E2E_PG_PASSWORD: postgres
+      E2E_GO_BIN: /usr/local/go/bin/go
+      E2E_SERVER_BIN: /tmp/iip-e2e-server
+      # CI 上没有系统 Chrome，必须用 Playwright 自带的 chromium。
+      # 本机反之（无网络，装不了浏览器）—— 所以 config 里做成可覆盖。
+      PLAYWRIGHT_CHANNEL: ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browser
+        # --with-deps 同时装系统库；缺库时 Chromium 起不来，
+        # 报错是「Host system is missing dependencies」，很难联想到要装什么。
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build (E2E 打的是 dist 产物)
+        run: pnpm build
+
+      - name: E2E
+        # E2E 要打真后端（判据 8/10 的核心是「回读确认落库」，
+        # mock 掉接口这 5 条就只剩「前端渲染对不对」）。
+        # stack.mjs 负责：建库 → 起 iip-server → 等 /healthz → 跑完回收 PG。
+        run: pnpm run test:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            web/playwright-report/
+            web/test-results/
+          if-no-files-found: warn
+          retention-days: 7

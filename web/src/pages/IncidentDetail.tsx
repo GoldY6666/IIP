@@ -38,6 +38,7 @@ import {
 } from '../api/incidents'
 import { fetchEvidence, type EvidenceType } from '../api/evidence'
 import { EvidenceList } from '../components/EvidenceList'
+import TimeCell from '../components/TimeCell'
 import { allowedTargets, statusLabel, statusColor, severityColor } from '../api/status'
 
 const { Title, Text } = Typography
@@ -258,11 +259,15 @@ export default function IncidentDetail() {
             </Descriptions.Item>
             <Descriptions.Item label="服务">{inc.service}</Descriptions.Item>
             <Descriptions.Item label="开始时间">
-              {new Date(inc.started_at).toLocaleString()}
+              {/* 这里用**绝对时间**而不是相对时间，与列表页相反：
+                  概况区只有一行、扫读压力小，而排查时正要精确时刻
+                  （拿去对齐别的系统的日志）。相对时间在详情页是
+                  冗余信息 —— 用户已经点进来了，说明他关心的是细节。 */}
+              <TimeCell value={inc.started_at} alwaysAbsolute />
             </Descriptions.Item>
             <Descriptions.Item label="恢复时间">
               {inc.resolved_at ? (
-                new Date(inc.resolved_at).toLocaleString()
+                <TimeCell value={inc.resolved_at} alwaysAbsolute />
               ) : (
                 // 「恢复时间」为空与「忽略」是两回事：ignored 刻意不写该列
                 // （进入 ignored 不是一次真实恢复，写进去会污染 MTTR）。
@@ -404,7 +409,12 @@ function TimelineList({ items, loading }: { items: TimelineEntry[]; loading: boo
             <Space size={8}>
               <Tag style={{ marginInlineEnd: 0 }}>{eventLabel(e.event_type)}</Tag>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {new Date(e.timestamp).toLocaleString()}
+                {/* 时间线用绝对时间 + 悬停给相对：时间线是**按时刻
+                    排列**的叙事，扫读时要比较的是「先后与间隔」，
+                    绝对时刻才能看出跨度（"22:10 → 22:24" 一眼可知），
+                    而「6 分钟前 / 20 分钟前」在长链上要靠减法。
+                    相对时间仍可悬停获得，用于快速判断「都是刚才的」。 */}
+                <TimeCell value={e.timestamp} alwaysAbsolute />
               </Text>
               {/* actor 为空表示系统自动写入（落库为 NULL），
                   显示「系统」而不是空白 —— 空白会被读成「数据缺失」。 */}
@@ -426,17 +436,33 @@ function TimelineList({ items, loading }: { items: TimelineEntry[]; loading: boo
   )
 }
 
-// 时间线的 event_type 取值来自 0004 迁移的 CHECK 约束。
-// 只列 M3 实际会写入的七类；evidence_found 属 M4，M3 不写。
+// 时间线的 event_type 取值来自 0004 迁移的 CHECK 约束（**12 个值**），
+// 与后端 internal/incident/event.go 写出的集合一致。
+//
+// **必须映射全部 12 个**：未映射的会走 `?? t` 把英文原值直接显示在中文界面上。
+// 这个缺陷在 M5 F6 写 E2E 时才暴露 —— E2E-3 点「转为 调查中」后，
+// 落库的是 investigation_started，而当时页面显示的就是这串英文。
+//
+// `created` 不在 CHECK 约束里（0001 时代的设计，M3 起已无人写入），
+// 保留映射只为兼容可能的历史数据。
 function eventLabel(t: string): string {
   const map: Record<string, string> = {
-    created: '事件创建',
-    alert_linked: '告警关联',
+    // 既有 5 个（0001）
     alert_fired: '告警触发',
     alert_resolved: '告警恢复',
     status_change: '状态变更',
     evidence_found: '发现证据',
     user_comment: '人工备注',
+    // M3 新增 7 个（0004）
+    alert_linked: '告警关联',
+    acknowledged: '确认认领',
+    investigation_started: '开始调查',
+    mitigated: '标记缓解',
+    resolved: '标记解决',
+    ignored: '判为误报',
+    reopened: '重新打开',
+    // 0001 遗留，无人写入
+    created: '事件创建',
   }
   return map[t] ?? t
 }

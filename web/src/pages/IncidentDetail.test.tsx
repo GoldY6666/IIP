@@ -220,9 +220,16 @@ describe('IncidentDetail 后端 422', () => {
   // **本批次修掉的缺陷的回归锁**（手册 §4.6.1）。
   //
   // 修前实测：失败后 ant-btn-loading 3141ms 才解除（= antd message 的默认
-  // duration）；修后应在 1s 内解除。判据是**带阈值的耗时**，不是
+  // duration）；修后应在 message 时长之前解除。判据是**带阈值的耗时**，不是
   // 「最终会恢复」—— 修前也会恢复，只是慢 3 秒，只验恢复会假通过。
-  it('422 后 1 秒内解锁且能立即再操作（loading 不被 message 时长拖住）', async () => {
+  //
+  // **阈值为什么是 2000ms 而不是 1000ms**：判据真正要区分的是
+  // 「随 message 解除（≈3s）」与「请求结束即解除（远小于 3s）」，
+  // 1000ms 并不比 2000ms 更有区分度—— 它同样远低于 3s。
+  // 而 1000ms 在**全量用例并行**时会被挤破（实测1080ms，单跑 3次全绿）：
+  // 本条测的是墙钟耗时，机器一忙就红，且红的不是产品。
+  // 2000ms 仍稳稳低于 3s，回归照样抓得住。
+  it('422 后 message 时长前解锁且能立即再操作（loading 不被 message 时长拖住）', async () => {
     const fetchMock = failFetch('流转被拒：状态已被他人改为 resolved')
     vi.stubGlobal('fetch', fetchMock)
     const { container } = renderPage()
@@ -242,11 +249,12 @@ describe('IncidentDetail 后端 422', () => {
     await userEvent.click(transBtn('已缓解'))
     await waitFor(() => expect(screen.getByText(/流转被拒/)).toBeInTheDocument())
 
-    // 等 loading 解除，并记下耗时。**上限 1000ms 是本条的判据本体**：
+    // 等 loading 解除，并记下耗时。**上限 2000ms 是本条的判据本体**：
     // 超过它说明 loading 又被 message 生命周期拖住了（回归）。
-    await waitFor(() => expect(loadingCount()).toBe(0), { timeout: 1000 })
+    // 阈值依据见上方注释：判据要区分的是「≈3s」与「远小于 3s」。
+    await waitFor(() => expect(loadingCount()).toBe(0), { timeout: 2000 })
     const unlockedMs = Date.now() - t0
-    expect(unlockedMs).toBeLessThan(1000)
+    expect(unlockedMs).toBeLessThan(2000)
 
     // 解除之后必须真能再操作：解锁 ≠ 可用。
     const again = await screen.findByRole('button', { name: /转为\s*已解决/ })

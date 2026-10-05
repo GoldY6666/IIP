@@ -109,7 +109,12 @@ export default function Settings() {
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline)
 
   return (
-    <div style={{ padding: 24, maxWidth: 860 }}>
+    // **margin: '0 auto' 是必须的，不是装饰**（实测截图暴露）：
+    // 只写 maxWidth 而不居中，内容会永远靠左贴住，在 1600px 宽屏上
+    // 右侧空掉近一半 —— 看起来像布局塌了，而不是「刻意限宽」。
+    // maxWidth 保持 860：配置项是「标签 + 滑块 + 数字框」三段，
+    // 再宽会让滑块长得没有手感（点一下滑走一大截）。
+    <div style={{ padding: 24, maxWidth: 860, margin: '0 auto' }}>
       <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           关联配置

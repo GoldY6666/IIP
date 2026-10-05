@@ -7,6 +7,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { App, Button, Card, Space, Table, Tag, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import { fetchAlerts, sendSampleAlert, type IIPAlert } from '../api/alerts'
+import TimeCell from '../components/TimeCell'
+import { LIST_MIN_HEIGHT } from '../components/listLayout'
+import { palette } from '../themeMode'
 
 const { Title, Text } = Typography
 
@@ -54,15 +57,22 @@ const columns: ColumnsType<IIPAlert> = [
     title: '开始时间',
     dataIndex: 'starts_at',
     key: 'starts_at',
-    render: (v: string) => new Date(v).toLocaleString(),
+    width: 118,
+    // 相对时间：告警列表一屏几十行，值班扫的是「哪些是刚来的」。
+    // 绝对时刻靠悬停（TimeCell 内挂 Tooltip）。
+    render: (v: string) => <TimeCell value={v} />,
   },
   {
     title: '结束时间',
     key: 'ends_at',
+    width: 118,
     render: (_, r) =>
       r.ends_at ? (
-        new Date(r.ends_at).toLocaleString()
+        <TimeCell value={r.ends_at} />
       ) : (
+        // 「持续中」是**状态**而非时间，不能参与相对时间计算 ——
+        // 对 null 调相对时间会得到「—」，那会把「还在烧」说成
+        // 「没有结束时间」，两者含义完全不同。
         <Text type="secondary">持续中</Text>
       ),
   },
@@ -112,15 +122,28 @@ export default function Alerts() {
       )}
 
       <Card>
-        <Table<IIPAlert>
-          rowKey="id"
-          loading={isLoading}
-          columns={columns}
-          dataSource={data?.alerts ?? []}
-          pagination={false}
-          size="middle"
-          locale={{ emptyText: '暂无告警' }}
-        />
+        {/* minHeight 的理由同 Incidents.tsx：少量数据时表格会缩成
+            几行高，下半屏全空，看起来像没加载完。 */}
+        <div style={{ minHeight: LIST_MIN_HEIGHT }}>
+          <Table<IIPAlert>
+            rowKey="id"
+            loading={isLoading}
+            columns={columns}
+            dataSource={data?.alerts ?? []}
+            pagination={false}
+            size="middle"
+            locale={{
+              emptyText: (
+                <div style={{ padding: '120px 0', textAlign: 'center' }}>
+                  {/* 用 palette 而不是字面量：空态文案颜色在两套主题下
+                      不同（暗色 tertiary 3.77:1、亮色 4.51:1），
+                      写死 '#8b949e' 会在亮色主题下偏亮。 */}
+                  <span style={{ color: palette.text.tertiary }}>暂无告警</span>
+                </div>
+              ),
+            }}
+          />
+        </div>
       </Card>
     </div>
   )
