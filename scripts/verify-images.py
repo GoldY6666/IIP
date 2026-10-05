@@ -717,8 +717,13 @@ def main() -> int:
     loaded = re.search(r'"msg":"服务拓扑已加载".*?"services":(\d+)', out)
     check("server 日志出现「服务拓扑已加载」且 services>=4",
           loaded is not None and int(loaded.group(1)) >= 4,
+          # 中性措辞：detail 会被无条件拼到 PASS 行上（check() 不区分成败），
+          # 写成「未见…」会在归档报告里留下 `[PASS] … -- 未见该 INFO`。
           ("services=%s" % loaded.group(1)) if loaded
-          else "未见该 INFO → 容器内 config/topology.yaml 未被挂载或为空")
+          else "无「服务拓扑已加载」行；失败时看下方 w() 输出的 server 日志")
+    if not loaded:
+        w("  server 日志里没有「服务拓扑已加载」，若判据红请查"
+          "容器内 config/topology.yaml 是否被挂载/是否为空")
     check("server 日志不含「服务拓扑为空」", "服务拓扑为空" not in out,
           "该 WARN 与上一条 INFO 不应同时出现")
     check("server 日志不含「加载服务拓扑失败」", "加载服务拓扑失败" not in out,
@@ -786,7 +791,12 @@ def main() -> int:
                 break
     hb = re.search(r"worker alive, poll_count=(\d+)", out)
     check("worker 输出心跳日志", got_beat,
-          ("poll_count=%s" % hb.group(1)) if hb else "90s 内未见心跳")
+          # 中性措辞（同上：detail 无条件拼到 PASS 行）。
+          ("poll_count=%s" % hb.group(1)) if hb
+          else "90s 窗口内未匹配到心跳行；失败时看下方 worker 日志")
+    if not got_beat:
+        w("  worker 在 90s 内未输出心跳，若判据红请查上面的 worker 日志"
+          "（区分「进程死了」与「活着但不打印」）")
 
     check("worker 已连上 PostgreSQL", "已连接 PostgreSQL" in out)
     w()
@@ -931,14 +941,165 @@ def main() -> int:
     # 不绑这个区分，compose 的注入错误就会静默通过全链路。
     _trace_off = [ln.strip() for ln in out_l.splitlines()
                   if "trace 采集器已禁用" in ln]
+    # detail 一律**中性措辞**：check() 会把它无条件拼到 PASS 行上
+    # （见其定义），写成「未见到…」这种失败时才该出现的句子，
+    # 归档报告会印出 `[PASS] … -- 未见到禁用日志` 这种自相矛盾的行，
+    # 下一个读的人会以为判据没验。失败时的具体缺失由 w() 另起一行给出。
     check("M6 trace 采集器在 compose 下为「已禁用」（无后端属预期）",
           bool(_trace_off),
-          "未见到禁用日志：若见到「跳过注册」则说明开关与地址不匹配")
+          "已匹配禁用日志 %d 条；若为「跳过注册」则说明开关与地址不匹配"
+          % len(_trace_off))
     _trace_reg = [ln.strip() for ln in out_l.splitlines()
                   if "trace 采集器已注册" in ln]
     check("M6 trace 采集器未在无后端时被注册（不得出现死配置）",
           not _trace_reg,
-          "实际注册日志: %s" % (_trace_reg[:2] if _trace_reg else "无"))
+          "已确认无注册日志" if not _trace_reg
+          else "实际注册日志: %s" % (_trace_reg[:2]))
+    if _trace_reg:
+        w("  !! compose 下不该有 trace 注册日志，实际有：%s" % _trace_reg[:2])
+
+
+    # 4.7.4c M6：**开关打开时真二进制会注册**（验「启用路径」而非只验禁用路径）。
+    #
+    # 上面两条只证明「默认关闭时不注册」—— 那是**半个判据**：
+    # 一个「读了开关但注册分支没接线」的实现，同样能让那两条全绿。
+    # 而 cmd/iip-worker 的 TestBuildRegistry 是**手工构造 cfg** 再调
+    # buildRegistry()，它证明不了**真实二进制真的认
+    # IIP_EVIDENCE_TRACE_ENABLED 这个环境变量名** ——
+    # 而「认得并注册」正是「让 trace 不成为死代码」的全部意义。
+    #
+    # 探针形态：用已构建的 worker 镜像跑一次，开关打开 + trace 地址故意打不通，
+    # 断言它照样打印「trace 采集器已注册」。
+    # 采不到数据是**预期**（本仓库不附带后端，M6 §五降级裁定）；
+    # 但「压根没注册」是缺陷。这两件事必须分开，否则会为了让它变绿
+    # 而去造一个假后端 —— 那是「把判据改成恒真」。
+    #
+    # **探针必须能连上真PG**：main.go 里 store.Connect（第 59 行）在
+    # buildRegistry（第 66 行）**之前**，连不上库进程就退出了，
+    # 注册日志根本不会打出来。
+    # （初版这里写反了顺序、且用 127.0.0.1，实测报错停在
+    #  「连接数据库失败 ... dial tcp 127.0.0.1:5432」——
+    #  那种红是探针没配环境，不是产品缺陷。故接compose 网络用真库。）
+    #
+    # 用**镜像名** iip-worker:<TAG>，不是容器名 —— docker run 只认镜像。
+    # 先查镜像在不在：不存在时如实判 FAIL，而不是让 docker run 报错后
+    # 继续往下跑（那会把后面的断言结果搅乱，且分不清是环境问题还是产品问题）。
+    _wimg = "iip-worker:%s" % TAG
+    _rc_img, _out_img = docker("image", "inspect", _wimg, timeout=60)
+    if _rc_img != 0:
+        check("M6 trace 采集器在开关打开时真注册（环境变量名被真二进制读到）",
+              False,
+              "worker 镜像 %s 不存在，无法验启用路径。先构建："
+              "docker build --target worker -t %s ." % (_wimg, _wimg))
+    else:
+        # 取 PG 容器所在网络 + **从 compose 读真实的 IIP_PG_URL**。
+        # 两者都不硬编码：
+        #   网络 —— compose down 后会被删，下次跑必须重新取；
+        #   连接串 —— 密码在 compose 里（POSTGRES_PASSWORD 与它必须一致，
+        #     改了一处漏另一处时，探针会以「password authentication failed」
+        #     报错，而那会被误读成产品缺陷。实测踩过：先抄成 `postgres:postgres`
+        #     才想起来 compose 里是 `dev`。
+        _net = ""
+        _rc_net, _out_net = docker(
+            "inspect", "-f",
+            "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+            PG_C, timeout=60)
+        if _rc_net == 0 and _out_net.strip():
+            _net = _out_net.strip().splitlines()[0].strip()
+
+        _pgurl = ""
+        _rc_cfg, _out_cfg = compose("config", timeout=120)
+        if _rc_cfg == 0:
+            _m = re.search(r"IIP_PG_URL:\s*[\"']?([^\"'\s]+)", _out_cfg)
+            if _m:
+                _pgurl = _m.group(1)
+
+        if not _net or not _pgurl:
+            check("M6 trace 采集器在开关打开时真注册（环境变量名被真二进制读到）",
+                  False,
+                  "取不到 compose 网络(%r)或 IIP_PG_URL(%r)，探针连不上库则"
+                  "注册日志不会打印，本断言无法成立"
+                  % (_net or '空', '取到' if _pgurl else '空'))
+        else:
+            # **输出必须落文件，不能 capture_output**：
+            # 探针注册完不会自己退出（它去轮询任务、连那个打不通的 trace 地址），
+            # 而 capture_output 会把输出缓冲在管道里 —— 一旦超时被杀，
+            # 缓冲内容全丢，断言只看到「超时」而看不到「为什么」。
+            # （实测 rc=-1 TimeoutExpired、输出 0 字符。）
+            #
+            # 用**具名容器 + 不用 --rm**：超时后进程被杀，但容器还在，
+            # 可以用 docker logs 把完整启动日志捞出来 —— 这是「失败时也要
+            # 拿得到诊断信息」的唯一可靠办法（脚本里没有 subprocess 可直接 Popen，
+            # 而新增 import 只为一个探针不值得；见 connect() 在第 97 行）。
+            _pname = "iip-traceprobe-%s" % RUN_TOKEN
+            docker("rm", "-f", _pname, timeout=120)   # 清同名残留
+            _rc3, _out3 = docker(
+                "run", "-d", "--name", _pname, "--network", _net,
+                "-e", "IIP_EVIDENCE_TRACE_ENABLED=true",
+                # 故意打不通：验的是「接线通了」，不是「后端可达」。
+                # 采不到数据是预期（本仓库不附带后端，M6 §五降级裁定）。
+                "-e", "IIP_TRACE_URL=http://127.0.0.1:1/api/traces",
+                "-e", "IIP_EVIDENCE_PROM_ENABLED=false",
+                "-e", "IIP_EVIDENCE_LOKI_ENABLED=false",
+                "-e", "IIP_PG_URL=%s" % _pgurl,
+                _wimg,
+                timeout=120)
+            if _rc3 != 0:
+                check("M6 trace 采集器在开关打开时真注册（环境变量名被真二进制读到）",
+                      False, "探针容器起不来 rc=%s %s" % (_rc3, (_out3 or "")[:200]))
+            else:
+                # 注册日志在启动后毫秒级打出；轮询到出现或超时（45 秒）。
+                _trace_on = []
+                _deadline_p = time.time() + 45
+                while time.time() < _deadline_p:
+                    time.sleep(2)
+                    _rc_l, _out_l3 = docker("logs", _pname, timeout=60)
+                    _out_l3 = _out_l3 or ""
+                    _trace_on = [ln.strip() for ln in _out_l3.splitlines()
+                                 if "trace 采集器已注册" in ln]
+                    if _trace_on:
+                        break
+
+                # 收摊：不留僵尸容器（与「每探一次多留一个 Created 僵尸」同源纪律）
+                docker("rm", "-f", _pname, timeout=120)
+
+                # **判据必须绑到「注册表的真实状态」，不能绑到某句日志。**
+                #
+                # 初版判据是「日志里出现 trace 采集器已注册」——
+                # 变异测试证明那是**假绿**：把 MustRegister 摘掉后，
+                # 紧随其后的 logger.Info("trace 采集器已注册…") 照旧执行，
+                # 断言判 PASS，而此时 worker 实际打出的是
+                # 「没有任何采集器注册」、sources 里也没有 trace。
+                # 即：那句话的**代码邻居**才是被摘的那行。
+                #
+                # 正确判据取两条件同时成立：
+                #   ① sources 数组里真有 trace（由 reg.Sources() 渲染，
+                #      只有真注册才会有）；
+                #   ② 不出现「没有任何采集器注册」这条 WARN
+                #      （仅 reg.Len()==0 时才打，见 main.go）。
+                _src_ok = [ln.strip() for ln in _out_l3.splitlines()
+                           if '"证据采集器已注册"' in ln and '"trace"' in ln]
+                _empty_warn = [ln.strip() for ln in _out_l3.splitlines()
+                               if "没有任何采集器注册" in ln]
+                _reg_ok = bool(_src_ok) and not _empty_warn
+
+                check("M6 trace 采集器在开关打开时真注册（环境变量名被真二进制读到）",
+                      _reg_ok,
+                      # 中性措辞（同上）；失败细节由下面 w() 的探针日志承担。
+                      "sources 含 trace 且无空注册表告警（sources 命中 %d 条）"
+                      % len(_src_ok)
+                      if _reg_ok
+                      else "sources 含 trace 命中 %d 条、空注册表告警 %d 条。"
+                           "探针启动日志前几行: %s"
+                           % (len(_src_ok), len(_empty_warn),
+                              " | ".join(_out_l3.splitlines()[:8])[:340]))
+                w("  探针容器启动日志（前 10 行）：")
+                for _l in _out_l3.splitlines()[:10]:
+                    w("    " + _l[:190])
+
+
+
+
 
     # 4.7.5 tasks 表的 CHECK 约束真实生效：非法 status 必须被拒。
     # 只验「表存在」不够 —— 约束没建成功时表也在，脏数据照样能写进去。
@@ -1111,11 +1272,15 @@ def main() -> int:
     _modcache = os.environ.get("IIP_GOMODCACHE",
                                os.path.join(os.path.expanduser("~"), "go", "pkg", "mod"))
     if not os.path.isdir(_modcache):
-        # 找不到就**跳过并如实标注**，不能默默pass ——
+        # 找不到就**判FAIL 并如实标注**，不能默默pass ——
         # 「没跑」与「跑过且通过」在报告里必须能区分开。
         check("M5 webui 测试在 Linux 容器内跑（symlink 语义）", False,
-              "找不到 Go modcache（IIP_GOMODCACHE=%s），无法零网络跑 go test。"
-              "设该变量指向宿主 modcache 后重跑" % _modcache)
+              # 中性措辞（同上：detail 无条件拼到行上）。
+              "环境缺失：IIP_GOMODCACHE=%s 不是有效目录，本段未执行"
+              % _modcache)
+        w("  环境缺失：Go modcache 路径 %s 无效，本段无法零网络跑 go test。"
+          "设该变量指向宿主 modcache 后重跑。" % _modcache)
+
     else:
         w("  modcache = %s" % _modcache)
         _rc, _out = docker(
