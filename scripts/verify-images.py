@@ -919,6 +919,27 @@ def main() -> int:
     check("M4 worker 日志明确列出已注册采集器", bool(reg),
           "实际: %s" % (reg[:3] if reg else "无"))
 
+    # 4.7.4b M6：trace 采集器在 compose 里**故意不配**，因此必须是
+    # 「已禁用」而不是「未配置地址已跳过注册」。
+    #
+    # 为什么要单独断言这条：这两个文案在页面上看起来都像「没装trace」，
+    # 但它们指向的排查方向完全不同 ——
+    #   - 「已禁用」= 没开关，属预期（M6 §5 降级裁定，本仓库不提供后端）；
+    #   - 「跳过注册」= 开关开了但没给地址，属漏配。
+    # 反过来，若哪天有人给 compose 加了 IIP_TRACE_URL 却忘了开关，
+    # 这里会看到「跳过注册」而容器链路本该发现的缺陷没被发现。
+    # 不绑这个区分，compose 的注入错误就会静默通过全链路。
+    _trace_off = [ln.strip() for ln in out_l.splitlines()
+                  if "trace 采集器已禁用" in ln]
+    check("M6 trace 采集器在 compose 下为「已禁用」（无后端属预期）",
+          bool(_trace_off),
+          "未见到禁用日志：若见到「跳过注册」则说明开关与地址不匹配")
+    _trace_reg = [ln.strip() for ln in out_l.splitlines()
+                  if "trace 采集器已注册" in ln]
+    check("M6 trace 采集器未在无后端时被注册（不得出现死配置）",
+          not _trace_reg,
+          "实际注册日志: %s" % (_trace_reg[:2] if _trace_reg else "无"))
+
     # 4.7.5 tasks 表的 CHECK 约束真实生效：非法 status 必须被拒。
     # 只验「表存在」不够 —— 约束没建成功时表也在，脏数据照样能写进去。
     rc_c, out_c = docker(

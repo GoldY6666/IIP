@@ -139,7 +139,7 @@ func (c *TraceCollector) Collect(ctx context.Context, in evidence.Input) ([]evid
 			// 毫秒级保留一位小数：Jaeger 的 duration 是微秒，
 			// 直接存会让页面显示 812300（单位不明）。
 			ev.Metadata["duration_ms"] = fmt.Sprintf("%.1f", float64(root.Duration)/1000)
-			if svc := root.serviceName(tr); svc != "" {
+			if svc := root.serviceName(&tr); svc != "" {
 				ev.Metadata["root_service"] = svc
 			}
 		}
@@ -274,8 +274,8 @@ type traceProcess struct {
 func (t traceData) earliestStart() (time.Time, bool) {
 	best := int64(math.MaxInt64)
 	found := false
-	for _, s := range t.Spans {
-		us, ok := parseUnixMicros(s.StartTime)
+	for i := range t.Spans {
+		us, ok := parseUnixMicros(t.Spans[i].StartTime)
 		if !ok {
 			continue
 		}
@@ -329,7 +329,7 @@ func (t traceData) rootSpan() *traceSpan {
 // 新的（以及大部分导出器）把进程定义提到 trace 的 processes 池里，
 // span 只留 processID 引用。只认一个来源会在换后端后
 // **静默丢掉服务名** —— 而服务名是页面上分组的依据。
-func (s traceSpan) serviceName(t traceData) string {
+func (s *traceSpan) serviceName(t *traceData) string {
 	if s.Process != nil && strings.TrimSpace(s.Process.ServiceName) != "" {
 		return strings.TrimSpace(s.Process.ServiceName)
 	}
@@ -349,8 +349,8 @@ func (s traceSpan) serviceName(t traceData) string {
 // 「有多少 span 出错」变成一个随数据形态漂移的数字，无法复核。
 func (t traceData) errorSpanCount() int {
 	n := 0
-	for _, s := range t.Spans {
-		for _, tag := range s.Tags {
+	for i := range t.Spans {
+		for _, tag := range t.Spans[i].Tags {
 			switch tag.Key {
 			case "error":
 				if tag.boolValue() {
@@ -409,8 +409,9 @@ func (t traceTag) intValue() (int64, bool) {
 func (t traceData) summary(root *traceSpan, spans int) string {
 	parts := make([]string, 0, 4)
 	if root != nil {
-		parts = append(parts, "根="+firstNonEmpty(root.OperationName, "<未命名 span>"))
-		parts = append(parts, fmt.Sprintf("耗时 %.1fms", float64(root.Duration)/1000))
+		parts = append(parts,
+			"根="+firstNonEmpty(root.OperationName, "<未命名 span>"),
+			fmt.Sprintf("耗时 %.1fms", float64(root.Duration)/1000))
 	}
 	parts = append(parts, fmt.Sprintf("%d span", spans))
 	if n := t.errorSpanCount(); n > 0 {

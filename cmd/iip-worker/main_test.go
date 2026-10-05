@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,5 +268,72 @@ func TestBuildRegistry_PromLokiSkippedWithoutURL(t *testing.T) {
 	if reg.Len() != 0 {
 		t.Errorf("注册表大小 = %d，期望 0（全部采集器都该被跳过）: %v",
 			reg.Len(), reg.Sources())
+	}
+}
+
+// TestBuildRegistry_DefaultHasNoTrace 钉住 M6 §5 的降级裁定：
+// **默认部署不注册 trace 采集器**。
+//
+// 为什么默认关（本机没有任何真实链路后端，见M6 §5）：
+// 注册一个永远采不到东西的采集器，比不注册更危险 ——
+// 运维会以为「证据页没有链路」是自己的数据问题。
+//
+// 这条与下面两条是一组：**只写「开启时注册」的话，
+// 有人把默认值误改成 true 也会全绿**，而那会让默认部署去打一个不存在的后端。
+func TestBuildRegistry_DefaultHasNoTrace(t *testing.T) {
+	c := registryCfg(t)
+	if c.EvidenceTraceEnabled {
+		t.Fatal("前提失效：trace 默认应为关闭（M6 §5 降级裁定）")
+	}
+	reg := buildRegistry(c, testLogger())
+	if hasSource(reg, collectors.SourceTrace) {
+		t.Errorf("默认配置下不应注册 trace 采集器，实际注册表=%v", reg.Sources())
+	}
+}
+
+// TestBuildRegistry_TraceRegistersWhenEnabled 验证开关打开且给了地址时
+// trace 采集器**真的进注册表**。
+//
+// 与 K8s 那条同理，这条断言对应的失败模式是「只打日志不注册」：
+// 表现为开关已开、地址已填、日志说已启用，但 trace 证据恒为 0 条且无报错。
+// 注册了还不够 —— 取出来必须能自报来源（证明不是塞了个空壳）。
+func TestBuildRegistry_TraceRegistersWhenEnabled(t *testing.T) {
+	c := registryCfg(t)
+	c.EvidenceTraceEnabled = true
+	c.TraceURL = "http://jaeger.internal:16686"
+	// 该组合在配置侧应合法（config 包另有断言），这里只验装配。
+	if err := c.Validate(); err != nil {
+		t.Fatalf("前提失效：开关+地址的组合应通过配置校验: %v", err)
+	}
+
+	reg := buildRegistry(c, testLogger())
+	if !hasSource(reg, collectors.SourceTrace) {
+		t.Fatalf("开关已开且给了地址，trace 采集器必须注册；实际注册表=%v",
+			reg.Sources())
+	}
+	col, ok := reg.Get(collectors.SourceTrace)
+	if !ok {
+		t.Fatal("按来源取 trace 采集器失败")
+	}
+	if col.Source() != collectors.SourceTrace {
+		t.Errorf("采集器自报来源 = %q，期望 %q", col.Source(), collectors.SourceTrace)
+	}
+}
+
+// TestBuildRegistry_TraceEnabledWithoutURLRejected 钉住「开了必填地址」。
+//
+// 关键在于**它必须在配置层就被拦下，而不是在装配层静默跳过** ——
+// 静默跳过正是死配置的成因（开关已开、采到的证据恒为 0、日志却显示已启用）。
+func TestBuildRegistry_TraceEnabledWithoutURLRejected(t *testing.T) {
+	c := registryCfg(t)
+	c.EvidenceTraceEnabled = true
+	c.TraceURL = ""
+	err := c.Validate()
+	if err == nil {
+		t.Fatal("开了 trace 开关却没给地址，配置校验必须拒绝")
+	}
+	// 错误信息要指向具体变量，否则用户不知道该改哪个。
+	if !strings.Contains(err.Error(), "TRACE_URL") {
+		t.Errorf("错误信息应点名 TRACE_URL，实际: %v", err)
 	}
 }

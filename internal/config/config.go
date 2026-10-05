@@ -71,6 +71,13 @@ type Config struct {
 	// 写一个接不上任何真实集群的采集器比不写更危险 —— 它看起来在工作，
 	// 但永远采不到东西。要接真实集群是部署侧的事（用户自带 kubeconfig）。
 	EvidenceK8sEnabled bool // IIP_EVIDENCE_K8S_ENABLED
+	// EvidenceTraceEnabled 控制 trace 采集器是否注册，**默认 false**。
+	//
+	// 与 K8s 同为「默认关」，但理由不同：K8s 是本仓库零依赖；
+	// trace 是**协议通用**（采集器只依赖 Jaeger 兼容的 /api/traces 形状），
+	// 而本机没有任何真实链路后端可验。默认关是为了不声称已接入
+	// （M6 §5 降级裁定）。接入同样是部署侧的事。
+	EvidenceTraceEnabled bool // IIP_EVIDENCE_TRACE_ENABLED
 	// EvidenceMaxPerIncident 是单事件证据上限，超限截断并标记。
 	EvidenceMaxPerIncident int // IIP_EVIDENCE_MAX_PER_INCIDENT，默认 50
 	// EvidenceWindow 是采集时间窗口。
@@ -89,6 +96,8 @@ type Config struct {
 	// 而 403 与「命名空间不存在」的 404 在排查时几乎无法区分。
 	// 要求用户明确给出，反而能第一时间暴露「权限没给对命名空间」。
 	K8sNamespace string // IIP_K8S_NAMESPACE
+	// TraceURL 是链路追踪后端根地址（仅在 EvidenceTraceEnabled 时必填）。
+	TraceURL string // IIP_TRACE_URL
 	// EvidenceTimeout 是单个采集器的超时上限（手册 §4.5：三类均为 5s）。
 	EvidenceTimeout time.Duration // IIP_EVIDENCE_TIMEOUT，默认 5s
 
@@ -111,9 +120,10 @@ type Config struct {
 	// 三个 evidence*Explicit 记录采集器开关是否被**显式**配置过。
 	//
 	// 不导出给业务用，只服务 validateM4：见该方法的说明。
-	evidencePromExplicit bool
-	evidenceLokiExplicit bool
-	evidenceK8sExplicit  bool
+	evidencePromExplicit  bool
+	evidenceLokiExplicit  bool
+	evidenceK8sExplicit   bool
+	evidenceTraceExplicit bool
 }
 
 // 内置默认值集中定义，便于单测断言。
@@ -141,6 +151,7 @@ const (
 	DefaultEvidencePromEnabled    = true
 	DefaultEvidenceLokiEnabled    = true
 	DefaultEvidenceK8sEnabled     = false // 偏差 B1：默认关闭
+	DefaultEvidenceTraceEnabled   = false // M6 §5：无真实后端可验，默认关闭
 	DefaultEvidenceMaxPerIncident = 50
 	DefaultEvidenceWindow         = time.Hour
 	DefaultEvidenceTimeout        = 5 * time.Second
@@ -170,6 +181,7 @@ func Load(args []string) (*Config, error) {
 	fs.Bool("evidence-prom-enabled", DefaultEvidencePromEnabled, "启用 Prometheus 采集器")
 	fs.Bool("evidence-loki-enabled", DefaultEvidenceLokiEnabled, "启用 Loki 采集器")
 	fs.Bool("evidence-k8s-enabled", DefaultEvidenceK8sEnabled, "启用 K8s 采集器（默认关闭）")
+	fs.Bool("evidence-trace-enabled", DefaultEvidenceTraceEnabled, "启用 trace 采集器（默认关闭）")
 	fs.Int("evidence-max-per-incident", DefaultEvidenceMaxPerIncident, "单事件证据上限，超限截断并标记")
 	fs.Duration("evidence-window", DefaultEvidenceWindow, "证据采集时间窗口")
 	fs.Duration("evidence-timeout", DefaultEvidenceTimeout, "单个采集器超时上限")
@@ -177,6 +189,7 @@ func Load(args []string) (*Config, error) {
 	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
 	fs.String("k8s-url", "", "K8s API Server 根地址（启用该采集器时必填）")
 	fs.String("k8s-namespace", "", "K8s 采集器要查询的命名空间（启用该采集器时必填）")
+	fs.String("trace-url", "", "链路追踪后端根地址（启用该采集器时必填）")
 	// M5：前端静态托管（手册 §4.3）。注册在 m5.go，默认空 = 关闭。
 	registerM5Flags(fs)
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
@@ -231,13 +244,15 @@ func Load(args []string) (*Config, error) {
 		EvidencePromEnabled:    k.Bool("evidence-prom-enabled"),
 		EvidenceLokiEnabled:    k.Bool("evidence-loki-enabled"),
 		EvidenceK8sEnabled:     k.Bool("evidence-k8s-enabled"),
+		EvidenceTraceEnabled:   k.Bool("evidence-trace-enabled"),
 		EvidenceMaxPerIncident: k.Int("evidence-max-per-incident"),
 		EvidenceWindow:         k.Duration("evidence-window"),
 		EvidenceTimeout:        k.Duration("evidence-timeout"),
 
-		PromURL: k.String("prom-url"),
-		LokiURL: k.String("loki-url"),
-		K8sURL:  k.String("k8s-url"),
+		PromURL:  k.String("prom-url"),
+		LokiURL:  k.String("loki-url"),
+		K8sURL:   k.String("k8s-url"),
+		TraceURL: k.String("trace-url"),
 		// koanf 的 key 映射靠结构体 tag，k8s-namespace → K8sNamespace。
 		K8sNamespace: k.String("k8s-namespace"),
 	}
@@ -257,6 +272,8 @@ func Load(args []string) (*Config, error) {
 		envExists("IIP_EVIDENCE_LOKI_ENABLED")
 	cfg.evidenceK8sExplicit = flagChanged(fs, "evidence-k8s-enabled") ||
 		envExists("IIP_EVIDENCE_K8S_ENABLED")
+	cfg.evidenceTraceExplicit = flagChanged(fs, "evidence-trace-enabled") ||
+		envExists("IIP_EVIDENCE_TRACE_ENABLED")
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -356,6 +373,17 @@ func (c *Config) validateM4() error {
 			return fmt.Errorf("已启用 K8s 采集器但未提供 %sK8S_NAMESPACE"+
 				"（K8s 权限按命名空间授权，留空会导致稳定 403，且与「命名空间不存在」"+
 				"的 404 难以区分）", envPrefix)
+		}
+	}
+
+	if c.EvidenceTraceEnabled {
+		// 与 K8s 同规则：默认 false，打开即有意，缺地址必是漏配。
+		// 不搞「缺了就跳过注册」——那会让开关变成死配置：
+		// 日志说已启用、采到的 trace 证据恒为 0 条，而全程无报错。
+		if strings.TrimSpace(c.TraceURL) == "" {
+			return fmt.Errorf("已启用 trace 采集器但未提供 %sTRACE_URL"+
+				"（trace 采集器默认关闭，本仓库不提供链路后端；"+
+				"地址需指向兼容 Jaeger Query API 的后端）", envPrefix)
 		}
 	}
 	return nil

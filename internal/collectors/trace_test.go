@@ -345,7 +345,7 @@ func TestTraceServiceNameResolution(t *testing.T) {
 		var tr traceData
 		parseFixture(t, `{"traceID":"t","spans":[{"spanID":"a","processID":"p1",
 			"process":{"serviceName":"inline"}}],"processes":{"p1":{"serviceName":"pool"}}}`, &tr)
-		if got := tr.Spans[0].serviceName(tr); got != "inline" {
+		if got := tr.Spans[0].serviceName(&tr); got != "inline" {
 			t.Errorf("serviceName = %q，期望 inline", got)
 		}
 	})
@@ -353,14 +353,14 @@ func TestTraceServiceNameResolution(t *testing.T) {
 		var tr traceData
 		parseFixture(t, `{"traceID":"t","spans":[{"spanID":"a","processID":"p1"}],
 			"processes":{"p1":{"serviceName":"pool"}}}`, &tr)
-		if got := tr.Spans[0].serviceName(tr); got != "pool" {
+		if got := tr.Spans[0].serviceName(&tr); got != "pool" {
 			t.Errorf("serviceName = %q，期望 pool", got)
 		}
 	})
 	t.Run("两者都没有时返回空而不是猜一个", func(t *testing.T) {
 		var tr traceData
 		parseFixture(t, `{"traceID":"t","spans":[{"spanID":"a","processID":"missing"}]}`, &tr)
-		if got := tr.Spans[0].serviceName(tr); got != "" {
+		if got := tr.Spans[0].serviceName(&tr); got != "" {
 			t.Errorf("serviceName = %q，期望空", got)
 		}
 	})

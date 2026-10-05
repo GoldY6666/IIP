@@ -221,6 +221,18 @@ services:
       # 容器内连采集器走 compose 服务名，与 IIP_PG_URL 同一套命名。
       IIP_PROM_URL: "http://prometheus:9090"
       IIP_LOKI_URL: "http://loki:3100"
+      # M6：trace 采集器**故意不给地址，也不给开关**。
+      #
+      # 原因：compose 里没有任何链路后端（无 Jaeger / Tempo 服务），
+      # 给了地址就会注册一个永远连不上的采集器 —— 那正是 M6 §5 要避免的
+      #「看起来在工作、实际永远采不到东西」。
+      #
+      # 保持默认关闭的收益是：evidence 表里 trace 恒为 0 条，
+      # 且**日志明确写了「trace 采集器已禁用」**，
+      # 排查时能立刻看出是「没配后端」而不是「采集器坏了」。
+      # 接入方式：部署侧自行加一个后端服务，再给 worker 补两行——
+      #   IIP_EVIDENCE_TRACE_ENABLED: "true"
+      #   IIP_TRACE_URL: "http://<后端服务名>:16686"
     depends_on:
       postgres:
         condition: service_healthy

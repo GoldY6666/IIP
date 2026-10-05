@@ -140,13 +140,37 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 			slog.String("namespace", cfg.K8sNamespace))
 	}
 
+	// trace 采集器：**默认关闭**（M6 §5 降级裁定）。
+	//
+	// 与 K8s 同为「默认关」，但**理由不同，别照抄注释**：
+	// K8s 是本仓库零依赖（没有 kubeconfig、没有 RBAC 清单）；
+	// trace 是协议通用（只依赖 Jaeger 兼容的 /api/traces 形状），
+	// 本机只是**没有任何真实后端可验**。所以默认关是为了不声称已接入，
+	// 而不是「接不上」。
+	//
+	// 同样**必须真的注册**：开了开关却只打日志，会得到一个
+	// 「日志说已启用、trace 证据恒为 0 条、全程无报错」的死配置。
+	if !cfg.EvidenceTraceEnabled {
+		logger.Info("trace 采集器已禁用（无真实链路后端可验，见 M6 手册 §5）",
+			slog.String("env", "IIP_EVIDENCE_TRACE_ENABLED"))
+	} else {
+		// config.Validate 已放行，TraceURL 必非空。
+		reg.MustRegister(collectors.NewTraceCollector(
+			cfg.TraceURL,
+			collectors.WithTimeout(cfg.EvidenceTimeout),
+			collectors.WithTopN(cfg.EvidenceMaxPerIncident)))
+		logger.Info("trace 采集器已注册（后端由部署侧提供，本仓库不附带）",
+			slog.String("url", cfg.TraceURL))
+	}
+
 	// 正向日志：只有「至少注册了一个」才打。
 	// 「一个都没注册」要单独说，否则「采不到证据」与「采到了零条」在日志上无法区分。
 	if reg.Len() == 0 {
 		logger.Warn("没有任何采集器注册，采集任务将只能推进游标而采不到证据",
 			slog.Bool("prom_enabled", cfg.EvidencePromEnabled),
 			slog.Bool("loki_enabled", cfg.EvidenceLokiEnabled),
-			slog.Bool("k8s_enabled", cfg.EvidenceK8sEnabled))
+			slog.Bool("k8s_enabled", cfg.EvidenceK8sEnabled),
+			slog.Bool("trace_enabled", cfg.EvidenceTraceEnabled))
 	} else {
 		logger.Info("证据采集器已注册", slog.Any("sources", reg.Sources()))
 	}
