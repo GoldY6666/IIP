@@ -404,7 +404,7 @@ LogQL 含 `{}` 与 `|`；Loki 链接的 `left` 是 JSON，内层还含 `"`，必
 ``
 E2E-1  打开 /            → 重定向到 /incidents
 E2E-2  列表有事件        → 点进去看到详情三要素（时间线/证据/关联告警）
-E2E-3  点「认领」        → 状态变 investigating，时间线**新增一条**（回读验证）
+E2E-3  状态推进          → 状态变 investigating，时间线**新增一条**（回读验证）
 E2E-4  /settings 改权重  → 保存成功；**通过 API 回读**确认真的落库
 E2E-5  无 API 时的表现   → 列表页显示错误态而非白屏
 ``
@@ -412,6 +412,22 @@ E2E-5  无 API 时的表现   → 列表页显示错误态而非白屏
 **E2E-3 必须回读 timeline**，不能只断言「按钮变色了」。
 **E2E-4 必须用 API 回读**，不能只断言「提示保存成功」——
 这两条都是记忆里「同源自证」陷阱的变体：前端说成功，不等于数据落库。
+
+**E2E-3 的按钮文案以实现为准（2026-10-04 修正）**：初稿写的是「点『认领』」，
+但 `web/src` 里**没有「认领」这个词** —— 处置按钮不是硬编码的，
+而是按 `api/status.ts` 的 `allowedTargets` 逐个生成中文标签：
+
+| 当前状态 | 出现的按钮 |
+|---|---|
+| `open` | 转为 已确认 / 转为 调查中 / 转为 已缓解 / 转为 已解决 / 转为 已忽略 |
+| `investigating` | 转为 已缓解 / 转为 已解决 / 转为 已忽略 |
+
+E2E-3 走 `open → investigating`，即点「转为 调查中」。
+
+**antd 会在中文 Button 文字里插空格**（F4 在「保 存」上踩过一次，
+F5 在「转为已解 决」上又踩了一次 —— **五字按钮也插，不只两字才插**），
+实际可访问名可能是「转为 调 查 中」。
+→ 定位器一律用宽松正则 `/转为\s*调\s*查\s*中/`，不赌它插在哪几个字之间。
 
 #### 4.4.4 环境依赖
 
@@ -570,7 +586,7 @@ loading 不再读 mutation 的 `isPending`，改用组件内**只被 mutation �
 | **F3** | S2 直跳链接：`src/api/externalLinks.ts` + `EvidenceList` 集成 + 配置项注入 | 0.5d | F2（需知道 UI 从哪访问） | ✅ 完成（2026-10-04，提交 `2042aa1`） |
 | **F4** | S1 配置页：`correlationConfig.ts` + `Settings.tsx` + `WeightRow.tsx` + 路由/导航挂入口 | 1d | F1 | ✅ 完成（2026-10-04，零后端改动） |
 | **F5** | 组件测试补齐（§4.4.2 剩余 3 条）+ S5 明暗主题切换（ADR-021） | 1d | F1/F3/F4 | **已交付**（补测抓到 1 处产品缺陷并修复，见 §4.6） |
-| **F6** | Playwright E2E 5 条（§4.4.3）+ `pnpm run test:e2e` | 1d | F2 | 待开工 |
+| **F6** | Playwright E2E 5 条（§4.4.3）+ `pnpm run test:e2e` | 1d | F2 | **已交付**（连跑 3 轮 5/5）；F8 由 5 条增至 **9 条**（新增 `e2e-06` 4 条，补判据 1/2/2b/3），连跑 3 轮 4/4 |
 | **F7** | 四条既有验证链路回归 + 门禁 | 0.5d | 全部 | 待开工 |
 
 ### F1 实测记录（2026-10-04）
@@ -626,7 +642,7 @@ loading 不再读 mutation 的 `isPending`，改用组件内**只被 mutation �
 |---|---|---|---|
 | Go 单测与真库 | `go test` | 不新增（M5 不改 Go 逻辑） | `-p 1` 串行 |
 | 前端组件 | vitest | **≥7 条**（§4.4.2 全覆盖） | `pnpm test` |
-| 前端 E2E | Playwright | **5 条**（§4.4.3） | `pnpm run test:e2e` |
+| 前端 E2E | Playwright + 系统 Chrome | **9 条**（§4.4.3 的 5 条 + F8 的 `e2e-06` 4 条） | `pnpm run test:e2e` |
 | 既有四链路 | 见 §0 | 不变 | 见 README |
 
 ### 7.2 反向验证（防「假绿」）
@@ -663,19 +679,19 @@ python scripts/verify-images.py                                 （0 失败）
 
 | # | 判据 | 手段 | 状态 |
 |---|------|------|------|
-| 1 | 配置页能读出当前权重/阈值，改动保存后**免重启生效** | `Settings` 页面 + **API 回读确认** | F4 待验 |
-| 2 | 非法输入在提交前被拦，且错误信息指明字段 | 组件测试 7 条中的 3 条 + 手工 | F4/F5 待验 |
-| 3 | 每条 metric/log 证据有可点击的原始面板链接，query 被正确编码 | 组件测试 + 手工点击一次真实链接 | F3 待验 |
-| 4 | `compose --profile app up -d` 后浏览器打开一个地址即可用 UI | 容器链路加断言 + 无头浏览器截图 | F2 部分（宿主全栈已验，容器链路待 F7） |
+| 1 | 配置页能读出当前权重/阈值，改动保存后**免重启生效** | `Settings` 页面 + **API 回读确认** | ✅ **F8 实测**（行为层：关引擎→0 事件、开→并成1 个，见下） |
+| 2 | 非法输入在提交前被拦，且错误信息指明字段 | 组件测试 7 条中的 3 条 + 手工 | ✅ **F8 实测**（前端拦截 + 后端 422 文案点名，双侧） |
+| 3 | 每条 metric/log 证据有可点击的原始面板链接，query 被正确编码 | 组件测试 + 手工点击一次真实链接 | ✅ **F8 实测**（真浏览器导航，判据是「URL 合法」非「面板在」） |
+| 4 | `compose --profile app up -d` 后浏览器打开一个地址即可用 UI | 容器链路加断言 + 无头浏览器截图 | 部分：容器链路 59 断言全绿，**但无头浏览器截图未在容器内做**（见 OPEN-M5-8） |
 | 5 | 静态托管**不吞 `/api`** | 组件 + E2E 各一条，断言返回 JSON| ✅ F2 实测（真进程 HTTP） |
 | 6 | 深链接 `/incidents/{id}` 直接刷新可打开（SPA 回退） | E2E 直访| ✅ F2 实测（真进程 HTTP） |
 | 7 | 目录穿越（`../../etc/passwd`）被拒 | 单测（Go 侧）| ✅ F2 实测（12 组穿越 + 真进程） |
-| 8 | 处置操作后**回读 timeline 确认落库** | E2E-3 | F6 待验 |
-| 9 | 前端组件测试 ≥7 条且 rc=0 | `pnpm test` | 部分（F1 已 11 条，需 F5 补到 ≥7 条覆盖面） |
-| 10 | E2E 5 条且 rc=0 | `pnpm run test:e2e` | F6 待验 |
-| 11 | 既有四条验证链路 0 失败 | 全跑 | F7 待验 |
+| 8 | 处置操作后**回读 timeline 确认落库** | E2E-3 | ✅ F6 实测（真进程 + API 回读） |
+| 9 | 前端组件测试 ≥7 条且 rc=0 | `pnpm test` | ✅ **159 用例**全过（13 个测试文件，2026-10-05 实测 `vitest run` rc=0）。⚠️ 此处曾写「164 用例」，与实测不符，已更正 |
+| 10 | E2E 5 条且 rc=0 | `pnpm run test:e2e` | ✅ F6 实测（连跑 3 轮 5/5）；**F8 增至 9 条**（新增 `e2e-06-cfg-evidence.spec.ts` 4 条，判据 1/2/2b/3），连跑 3 轮 4/4 全绿 |
+| 11 | 既有四条验证链路 0 失败 | 全跑 | ✅ 本轮全跑（203 条断言 0 失败） |
 | 12 | `tsc -b` + `vite build` rc=0 | `pnpm run build` | ✅ F2 实测（pnpm run build rc=0） |
-| 13 | 门禁：Go 四项全 rc=0、真库 SKIP=0、无 `nolint` | 静态门禁 + 真库门禁 | 部分（静态门禁 ✅，真库门禁待 F7） |
+| 13 | 门禁：Go 四项全 rc=0、真库 SKIP=0、无 `nolint` | 静态门禁 + 真库门禁 | 部分：静态 5/5 ✅（F7 重跑 build/vet/lint/gofmt 全 rc=0）、真库 **767 PASS/0 FAIL/1 SKIP**（F7 重跑，与上轮逐位相同）。**唯一 SKIP 仍是 `TestHandlerAllowsSymlinkedRoot`**（Windows 无 `SeCreateSymbolicLink` 权限，宿主上必然 SKIP）。F7 已在 `verify-images.py` 4.8 段补Linux 容器内的闭环断言，**但本机 Docker daemon 写操作卡死**（只读秒回、`run`/`rm`/`pull` 全超时），该段未跑成 → **SKIP=1 仍未消除，不算通过** |
 
 **「状态」列的读法**：只有 `✅` 才是**真进程实测通过**。
 「部分」= 该判据已被本次交付顺带验证了一部分，剩下的部分要等后续批次 ——
@@ -1015,8 +1031,417 @@ F4 只做前端。但「不需要后端改动」不等于「不需要验后端�
 
 | 编号 | 内容 | 处置 |
 |---|---|---|
-| OPEN-M5-6 | 「root 是符号链接」这条路径在本机 **SKIP**（Windows 无 `SeCreateSymbolicLink` 权限），只由等价的 `TestHandlerAcceptsNonCanonicalRoot` 部分覆盖 | 须在 `verify-images.py`（Linux 容器）补一条真 symlink 断言。F7 处理 |
+| OPEN-M5-6 | 「root 是符号链接」这条路径在本机 **SKIP**（Windows 无 `SeCreateSymbolicLink` 权限），只由等价的 `TestHandlerAcceptsNonCanonicalRoot` 部分覆盖 | **F7 已补断言**：`verify-images.py` 4.8 段用 `golang:1.23-alpine` 在 Linux 容器内跑 `go test ./internal/webui/`，断言「零 SKIP + `TestHandlerAllowsSymlinkedRoot` 真 PASS」。跑的是**那条被SKIP 的测试本身**，不是手工造 symlink 再发HTTP。**但本机 Docker daemon 写操作卡死（2026-10-04），该段尚未跑成** → 见 F7 实测记录 |
 | OPEN-M5-7 | `cmd/iip-server/main.go` 318 行 / `internal/config/config.go` 352 行，均超 AGENTS.md 的 300 行约束。**该超限自 M2 起存在**，M5 只拆了自己新增的部分，未顺手重构既有装配代码 | 不在 M5 收尾。剩余部分需独立里程碑处理；F7 门禁**不因此判红**（约束是「新增不加剧」，已在 §六 记录当前值） |
+
+---
+
+### F6 实测记录（2026-10-04）
+
+Playwright E2E 5 条。**打真后端**（真 PG + 真 `iip-server` 带 `--web-root`），
+不用 `page.route` 造响应 —— 判据 8 与 E2E-4 的核心是「回读确认落库」，
+拦掉接口这两条就只剩「前端渲染对不对」，与 F5 修的「按钮锁 3 秒」是同一类自欺。
+
+#### 一、两个真缺陷（都是写 E2E 时才暴露，组件测试测不到）
+
+**缺陷 1：时间线漏英文（6/12 个 event_type 无映射）**
+
+`0004` 迁移的 CHECK 允许 12 个 `event_type`，后端 `internal/incident/event.go`
+也真的写其中 7 个专用值，而 `IncidentDetail.tsx` 的 `eventLabel` 只映射 6 个，
+未映射的走 `?? t` **把英文原样显示在中文界面上**：
+
+| 漏掉的 | 页面原本显示 |
+|---|---|
+| `acknowledged` | `acknowledged` |
+| `investigation_started` | `investigation_started` |
+| `mitigated` / `resolved` / `ignored` / `reopened` | 同左 |
+
+`investigation_started` 正是 E2E-3 点「转为 调查中」后落库的类型 ——
+**中文界面直接冒出一串英文**。已补全 12 个映射。
+
+原注释「只列 M3 实际会写入的七类」本身也是错的：M3 自己新增的 7 个里只映射了 1 个。
+
+**缺陷 2：列表错误态没有恢复入口**
+
+`Incidents.tsx` 的 `isError` 分支提前 `return`，只渲染一句错误文案；
+而带 `refetch` 的「刷新」按钮在**正常分支**里，错误态下根本不渲染。
+后果不是「不好看」，是**不可恢复**：值班的人看到红色报错后只能手动刷浏览器，
+顺带丢掉所有筛选条件。
+
+已修：错误态内补「重试」按钮（调 `refetch`）+ 一句说明。
+判据 5 要求「显示错误态而非白屏」，而**没有恢复入口的错误态只是换个姿势的白屏**。
+
+#### 二、四条「测试写错而非产品缺陷」
+
+1. **antd Table 的隐藏测量行** —— `locator('tr').filter(...)` 命中 2 个
+   （可见行 + rc-table 的测宽行），`toHaveCount(1)` 恒红。
+   → 用 `getByRole('cell', { name, exact: true })` 反推行：cell 是语义元素、
+   隐藏行不参与 role 查询。
+2. **`hasText` 是子串匹配** —— B 组事件 service 是 `e2e-svc-<run>-claim`，
+   它**包含** A 组的 service 字符串，于是两行都命中。
+   **第一轮我误判成「测量行」，改完仍红**；连库查才发现真有两条事件。
+   → 判「某行属于某 service」必须用 `exact: true` 锚定 cell。
+   **判据：定位器命中数不对时，先查数据再改定位器。** 猜定位器会连错两轮。
+3. **strict mode violation** —— `row.getByRole('cell', {name: SERVICE})`
+   非精确匹配命中 2 个（**「标题」列的 Tooltip 文本里也含 service 名**，
+   形如 `E2EFiring (e2e-svc-xxx)`），Playwright 拒绝点击。
+   → 点已定位好的那个 cell 变量，别重新查一次。
+4. **`require.resolve` 在 ESM 里不存在** —— `package.json` 有 `"type": "module"`，
+   报 `ReferenceError: require is not defined`。
+   → `globalSetup: './e2e/global-setup.ts'` 用相对字符串。
+
+#### 三、一处防「假绿」的设计（值得单独记）
+
+初版让 `globalSetup` 通过 `process.env.E2E_INCIDENT_ID` 传事件 id，
+spec 里 `test.skip(!INCIDENT_ID)` 兜底。**那是假绿的温床**：传参一失败，
+5 条用例变 4 条，控制台照样一片绿 —— 判据 10 要求的「5 条」悄悄变成 4 条。
+
+改成 `helpers.ts` 的 `findSeededIncident()`：**spec 自己问后端要那条事件**，
+按 `service` 前缀查，查不到就 `expect(...).toBeGreaterThan(0)` 当场红。
+
+> **判据 10 的「5 条」必须是可数的。** 任何 `test.skip` 兜底都会让它悄悄变少。
+
+同理 E2E-2 与 E2E-3 **各自造一条事件**（`-claim` 后缀区分）。共用一条会让
+E2E-2 的「状态标签是新建」断言**依赖执行顺序** —— `workers:1` 下靠文件名字母序
+恰好成立，但那是巧合不是判据：改个文件名或 `--grep` 单跑就会红，
+且报错指向「页面状态不对」，真因是顺序。
+
+#### 四、实测证据（真 PG + 真 iip-server + 系统 Chrome，5 passed）
+
+| 判据 | 实测 |
+|---|---|
+| E2E-1 | `/` → `waitForURL('**/incidents')` 成功，落地页有表格 |
+| E2E-2 | 列表 1 行 A 组事件（`exact` 锚定）、状态「新建」、进详情三 Tab 齐、关联告警 4 条、时间线有「告警触发」、证据空态说清「采集器未注册/数据源不可达」 |
+| **E2E-3（判据 8）** | 流转前 timeline 1 条 → 后 **2 条**（恰好 +1）；新增那条 `event_type=investigation_started` 且 `actor` 非空；页面 Tab 计数同步 |
+| **E2E-4（判据 1）** | 前置断「起始是默认值」→ PUT → **API 回读拿到新权重** → 阈值未被重置 → **还原并回读到默认值** |
+| E2E-5 | 拦 `**/api/v1/incidents*` → 显示「加载事件列表失败」+ 侧栏/Header 仍在 + **「重试」可点** + 无未捕获异常；解除拦截刷新后表格恢复 |
+| 静态门禁 | `tsc(src)` rc=0、`tsc(-p tsconfig.e2e.json)` rc=0、`pnpm run test:unit` **114 用例**、`pnpm run build` rc=0 |
+| **可复现性** | **连跑 3 轮，每轮 5/5**（第三轮起 dist 已含新代码，已验 `investigation_started` 键、「开始调查」、「重试」三个串都在 bundle 里） |
+
+**E2E 必须先 `pnpm run build`**：E2E 打的是 `dist`，而本轮改了两个组件 ——
+不重建的话 E2E 验的是旧代码，**会绿得毫无意义**。故跑 E2E 的脚本里把
+build 放在第 0 步，并**断言 dist 里能搜到新代码的字符串**。
+
+#### 五、基础设施的两个「症状零报错」点
+
+1. **`iiP-server` 的 flag 名与 env 名不是直觉那样** —— 最初写 `IIP_DATABASE_URL`，
+   仓库里根本没有这个变量（真名 `IIP_PG_URL` → `--pg-url`）。
+   → **flag 名一律从 `iip-server --help` 取**（kong 的 help 走 **stderr** 且 rc=1，
+   只读 stdout 会得到空字符串，看起来像「没有 flag」）。
+2. **`tsconfig.json` 的 `include` 只有 `"src"`** —— `e2e/` 目录**压根不被 tsc 检查**，
+   类型错误要到 Playwright 运行时才炸，而那时错误会被「服务起不来」盖住。
+   → 单独加 `tsconfig.e2e.json` 并在门禁里跑 `tsc -p tsconfig.e2e.json`。
+
+#### 六、CI（OPEN-M5-4 的处置）
+
+`frontend` job 补了 `pnpm run test:unit`（此前 CI **没有任何一步**跑
+vitest，114 条用例无人执行）与 `tsc -p tsconfig.e2e.json`；
+新增 `e2e` job（postgres:16 service 容器 + Playwright 自带 chromium）。
+
+**必须说清的限制**：
+- `e2e/stack.mjs` 已改造成**跨平台**（路径与可执行名由平台推导，
+  全部可用 `E2E_*` 环境变量覆盖），否则「CI 里加了个永远红的 job」
+  比不加更糟 —— 它会让人以为 E2E 被覆盖了。
+- `playwright.config.ts` 的 `channel` 做成**可覆盖**：本机无网络 → 用系统
+  Chrome（§4.4.4）；CI runner 没有系统 Chrome → 设 `PLAYWRIGHT_CHANNEL=''`
+  用自带的。写死任一侧，另一侧必红。
+- **仓库无 git remote，CI 从未在 GitHub 上跑过。** 本 job 只做了
+  「写法上正确 + 本地等价复现」，**不能表述为「CI 已覆盖 E2E」**。
+
+### F6 期间新增的 OPEN 项
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| OPEN-M5-8 | 判据 4 只做到「容器链路 59 断言全绿」，**无头浏览器截图未在容器内做** ——「`compose up` 后浏览器打开一个地址即可用 UI」的后半段（真在容器里点一遍）尚无证据 | **F7 部分处置**：`verify-images.py` 4.8.2 段已实现（宿主 Chrome 无头截图 + **PNG 颜色种类像素断言**，`IIP_CHROME_BIN` 显式传入才跑）。**但容器内无头浏览器所需镜像拉不下来**（2026-10-04 实测四条源全不通，详见 F7 实测记录）→ OPEN **仍未闭环**，判据 4 的后半段维持「部分」 |
+
+### F7 实测记录（2026-10-04）
+
+F7 的目标是消掉 F1~F6 累积的 OPEN 项并全跑四条链路。**本轮被环境阻塞**，
+但阻塞点已定位清楚、该做的代码已落地。以下是实测事实，不做美化。
+
+#### 一、判据 13 的 SKIP：断言已补，但跑不成
+
+`verify-images.py` 新增 4.8 段：用已有的 `golang:1.23-alpine` 在 Linux 容器内
+跑 `go test ./internal/webui/ -v`，断言三件事——
+
+| 断言 | 口径 | 为什么这么定|
+|---|---|---|
+| rc=0 | 容器内 go test 退出码 | 基础 |
+| **零 SKIP** | 输出里无 `--- SKIP:` 行 | 判据 13 的直接依据 |
+| `TestHandlerAllowsSymlinkedRoot` **真 PASS** | 显式匹配 `--- PASS: <该用例名>` | **零 SKIP 不等于它跑过了** —— 用例可能压根不在选择范围内或被 build tag 排掉，故单列一条 |
+
+刻意**不**写死「PASS 数 = N」：加一条用例就得改断言，而 N 变化时该期望多少
+无从判断（与 4.4 那条「表数 = 8」的教训同类）。
+
+选「容器内跑 Go 测试」而非「手工造 symlink 再发 HTTP」的理由：前者验的是
+**那条被SKIP 的断言真的成立**，后者验的是症状。`GOPROXY=off` + 挂宿主
+modcache 走零网络—— 容器内直连 `proxy.golang.org` 不通。
+
+**未跑成的原因（与环境有关，非代码问题）**：
+
+Docker daemon 进入**写操作卡死**状态。实测证据（同一分钟内）：
+
+| 命令 | 结果 |
+|---|---|
+| `docker info` / `ps` / `images` / `system df` | **0.3~1.7 秒返回** |
+| `docker run --rm golang:1.23-alpine echo hello` | **120 秒超时** |
+| `docker rm -f <容器>` | **120~180 秒超时** |
+| `docker pull golang:1.23-alpine`（本地已有该镜像） | **150 秒超时** |
+
+`docker ps -a` 显示 6 个卡在 `Created` 的僵尸容器（全部 `golang:1.23-alpine`，
+创建时间与本轮几次超时尝试吻合），它们把容器创建锁死了；`rm` 也救不了。
+**须重启 Docker Desktop**（会停掉 `iip-web-view`，本轮不擅自执行）。
+
+> 这也解释了本轮前几次「探针挂 11 分钟无输出」：不是命令写错，
+> 是 `docker run` 根本没返回。
+
+#### 二、OPEN-M5-8（容器内无头浏览器）：**镜像拉不下来，已实测四条源**
+
+| 镜像源 / 目标 | 实测结果 |
+|---|---|
+| `docker.xuanyuan.me`（`daemon.json` 里配的加速器） | HTTP **403 Forbidden**；`pull chromedp/headless-shell` 3 次全部 `context deadline exceeded` |
+| `1ms.run/chromedp/headless-shell` | **跑满 1500 秒超时**（rc=124），零字节下载 |
+| `hub.rat.dev` / `docker.m.daocloud.io` | 均 **401 Unauthorized** |
+| `registry-1.docker.io` 直连 | 经代理 **502 Bad Gateway** |
+
+本机现有 13 个镜像都是此前拉成功的，`golang:1.23-alpine` 等**本地已有**，
+但**拉不动任何新镜像**。另：`ms-playwright` 浏览器缓存目录不存在，
+故 Playwright 在本机只能用系统 Chrome（这与 F6 的设计一致）。
+
+**处置**：`verify-images.py` 4.8.2 段已实现宿主 Chrome 无头截图，
+由 `IIP_CHROME_BIN` 显式传入才跑（默认跳过并在报告里说明原因）。
+**做成可选而非默认，是因为默认跑会稳定红，而红的原因与产品质量无关** ——
+那会让门禁变成噪声。OPEN-M5-8 **仍未闭环**。
+
+#### 三、像素断言：不用「文件非空」这种恒真判据
+
+「截图不是空白页」若断言「文件存在且非空」，则**纯白/纯黑的失败截图同样通过**
+（实测Chrome 失败截图也有 3 KB）。故实现 `png_color_count()`：按 PNG 规范
+解 IDAT、逐行反滤波、统计**不同颜色数**。
+
+宿主Python 无 Pillow/numpy（实测 `zlib`/`struct` 可用，PIL 与 numpy 都缺），
+故按规范自己解，只支持 8bit 的 RGB/RGBA/灰度（覆盖 Chrome 截图全部实际形态）；
+遇调色板 PNG 直接抛异常，**不返回 0** —— 返回 0 会被误读成「纯色空白页」，
+那是假的 FAIL。
+
+**该函数已自测**（能区分，不是恒真）：
+
+| 输入 | 期望 | 实测 |
+|---|---|---|
+| 16×16 纯白PNG | 1 | **1** ✅ |
+| 16×16 纯黑 PNG | 1 | **1** ✅ |
+| 16×16 每行异色 | 16 | **16** ✅ |
+| 真实 Chrome 截图（深色底 + 白字） | 远大于 4 | **28** ✅ |
+
+断言阈值取 **>= 4**：要抓的是「有没有渲染出来」，不是「好不好看」。
+
+#### 四、顺带修掉的一处注释笔误
+
+`internal/webui/safepath_test.go` 里 `TestHandlerAllowsDotsInsideFilename`
+上方的注释写的是 `TestHandlerDoesNotEscapeViaSymlink` —— 后者**并不存在**
+（F2 的复制粘贴残留）。会误导后续维护者去找一个没有的测试。已改正。
+
+#### 五、不依赖 Docker 的门禁：全部实测 rc=0
+
+Docker 锁死期间，把**不需要容器**的门禁项全跑了一遍，确认本轮改动
+（`verify-images.py` 4.8 段 + `safepath_test.go` 注释）**没引入任何回归**：
+
+| 门禁项 | 命令 | rc | 耗时 |
+|---|---|---|---|
+| `go build ./...` | `go build ./...` | **0** | 20.7s |
+| `go vet ./...` | `go vet ./...` | **0** | 17.3s |
+| `golangci-lint` | `golangci-lint run --config=./.golangci.yml` | **0** | 23.7s |
+| `gofmt` | `gofmt -l internal/webui` | 空输出 | — |
+| tsc（src） | `tsc --noEmit` | **0** | 4.0s |
+| tsc（e2e） | `tsc -p tsconfig.e2e.json --noEmit` | **0** | 1.3s |
+| 组件测试 | `vitest run`（**114 用例**） | **0** | 23.6s |
+| 产物构建 | `vite build` | **0** | 8.6s |
+| webui 包（宿主 Windows） | `go test ./internal/webui/ -v` | **0** | 17.3s |
+| **真库全量** | `go test ./... -p 1 -v`（自带起 PG） | **0** | **38.7 min** |
+
+最后一行值得单独说：宿主跑 webui **全部 PASS，唯一 SKIP 仍是
+`TestHandlerAllowsSymlinkedRoot`**，与上一轮完全一致 —— **没有新增 SKIP**，
+那条注释改动零影响。（`gofmt -l` 会列出 5 个 `internal/db/*.sql.go`，
+那是 `sqlc` 生成物，门禁脚本按既有约定排除。）
+
+**真库全量实测：`PASS=767 FAIL=0 SKIP=1`**，与上一轮逐位相同。
+门禁 6 项里**只有「真库 SKIP=0」一项 FAIL**，而它的失败原因单一且已知
+（就是那条 Windows 上无法创建的 symlink）—— 换句话说，**判据 13 现在
+只差「在 Linux 上真跑那一条」这一步**，其余门禁项全部 rc=0。
+
+> 顺带记一个环境坑：沙箱里 `node_modules/.bin/*.cmd` 会**静默失败**
+> （无stdout、exit 1、耗时 0~1s）。前端门禁必须用托管 node 直接跑 JS 入口
+> （`typescript/bin/tsc`、`vitest/vitest.mjs`、`vite/bin/vite.js`）。
+> **别把「无输出 + exit 1」当成测试失败去改代码。**
+
+#### 六、本轮未完成项（**均不算通过**）
+
+- **判据 13 的容器侧**：断言已补齐，但**未跑成** → SKIP=1 仍未消除。
+- **判据 11 / 判据 4 后半段**：四条链路与容器链路因Docker 卡死**未跑**。
+- **OPEN-M5-8**：见上，镜像源阻塞。
+- 恢复办法：重启 Docker Desktop → 重跑
+  `python scripts/verify-images.py`（4.8 段会自动执行）。
+
+> **2026-10-04 23:20 更新**：`docker version` 已返回 Server 29.8.0，
+> daemon 看起来恢复了。**但 F8 没有重跑容器链路**，故上面三项仍按「未跑成」标注。
+> 单次探测不足以排除偶发，须连跑两次容器链路都绿才可宣布解除。
+
+> **2026-10-05 00:40 更正（上一轮的判断是错的）**：上面那句「daemon 看起来恢复了」
+> 依据是 `docker ps -a` rc=0。实测证明**这个依据不成立** —— daemon 半锁死时
+> **只读命令本来就全部 rc=0 且 0.1 秒返回**，只有「创建/启动容器」类写操作无限挂起。
+>
+> 本轮已真跑第二次容器链路，前置全部满足后启动：
+> 本地 13 个镜像齐备（**不需要 pull**）、8080 空闲、宿主 Chrome 在、GOMODCACHE 在。
+> 脚本停在 `### [1] 构建镜像 / building iip-server:0.0-m2 ...`，**19 分 21 秒无任何产出**，
+> 手工终止。定因用了两个不必再 fire docker 命令的判据：
+>
+> 1. **VM CPU 采样**：20 秒内 `vmmemWSL` CPU 增量 **0**、`vmcompute` 0、`wslservice` 0。
+>    容器真在编译 Go 的话 `vmmem` 必然烧 CPU —— 零增量 = **根本没有任何东西在执行**。
+> 2. **`Created` 僵尸增长**：`docker ps -a` 里停在该状态的容器从 2 个涨到 **9 个**，
+>    没有任何一个进入 `Up`。这是「容器 create 得出来、start 不起来」的直接证据。
+>
+> （第一版只采样了 Windows 侧进程，差点据此误报死锁；容器在 WSL2 VM 内，
+> CPU 记在 `vmmem` 头上，补测后才敢下结论。）
+>
+> 结论：上面三项**仍按「未跑成」标注，没有任何一项可以算通过**。
+> 要跑通必须先重启 Docker Desktop，而那会**停掉 `iip-web-view`（已 Up 2 天，禹在用）**
+> → 已征询禹，待定。
+
+---
+
+### F8 实测记录（2026-10-04，判据 1/2/3 补验收）
+
+**触发**：交付汇报时发现判据 1/2/3 在 §八 长期标「待验」——
+只有间接证据（组件测试 + PUT 落库），没有行为层的实测记录。
+按 AGENTS.md 约束 5/12「未做项必须如实标注」，**「待验」不能就这么留在交付物里**。
+
+**新增**：`web/e2e/e2e-06-cfg-evidence.spec.ts`（4 条，真 PG + 真 iip-server + 系统 Chrome）。
+
+#### 一、判据 1 的验证：可观测信号选错了两次
+
+**原设计的错误假设**：我以为`enabled=false` 时「告警照落库、只是不建关联边，
+3 条告警会落成 3 个独立事件」。实测拿到 **0 个事件**。
+
+读代码才看清真相（`internal/correlation/service.go:66`起）：
+`CorrelateAlerts` 在 `!cfg.Enabled` 时直接 `return nil`，
+而**创建 incident 的 `correlateOne` 就在这个函数内部** ——
+引擎一停，**事件根本不会被创建**。
+
+这与 Settings 页的文案并不矛盾：「已停用：告警仍落库，但不参与关联」
+指的是 **alerts 表**照写，而 **incidents 表**不会有新行。
+我的错误在于**拿事件表去验「落库」**。
+
+**修正后的判据**（分两张表看，这才是真正的不变量）：
+
+| 阶段 | alerts 表 | incidents 表 |
+|------|----------|--------------|
+| `enabled=false` | 3 条 | **0 个** |
+| `enabled=true`（**不重启**） | 3 条 | **1 个，且含 3 条告警** |
+
+第二行的「不重启」是本判据的**本体**：整个用例期间无任何进程重启动作，
+行为变化只能来自配置被重新读取（`GetConfig` 每轮查库、无缓存）。
+若引擎把配置缓存在进程里，这条会红而 E2E-4（只验 PUT 落库）仍会绿。
+
+**为什么不用权重做信号**：权重改动要「得分跨过阈值」才看得见，
+而得分依赖时间邻近/历史共现等随机因素，断言会不稳。`enabled` 是确定性的。
+
+#### 二、判据 2：后端文案本来就合格，是我把判据说错了
+
+第一版断言「错误文案要含英文 `weights`」，实测后端返回：
+
+```
+{"error":"五维权重之和必须为 1.0（允许误差 0.001），当前为 1.5"}
+```
+
+**它明确指出了是权重这一维、还给出了当前值，对用户完全够用**，
+只是没说「weights」这个 JSON 键名。断言成 `toContain('weights')`
+**会把一条正确的错误文案判成缺陷** —— 这与「测试写错而非产品缺陷」同类。
+
+改为断言**中文说法 + 当前值**（`['权重','1.5']`），
+并补了三条实测过的真实文案（`internal/correlation/types.go:90/94/97`）：
+
+| 输入 | 状态码 | 文案 |
+|------|--------|------|
+| 权重和 = 1.5 | 422 | 五维权重之和必须为 1.0（允许误差 0.001），当前为 1.5 |
+| `thresholds.merge=1.4` | 422 | thresholds.merge 必须在 [0,1] 区间，当前为 1.4 |
+| `merge=0.3, review=0.6` | 422 | merge 阈值 (0.3) 不能小于 review 阈值 (0.6) |
+| 键名拼错 `threshods` | **400** | 解析失败（不是 422 —— 它压根没解析成功） |
+
+最后一条单独说一句：**键名打错必须 400 而非 422**。
+回 422 会让用户以为「值不对」而其实「字段名错了」，方向完全跑偏。
+
+另加一条**收尾断言**：四条失败请求后配置必须**一字未改**。
+不验这条就会出现「测试全绿但配置被写坏」。
+
+#### 三、判据 2b：前端的 `dirty` 语义让我连错两次
+
+判据 2 要求「在**提交前**被拦」。组件测试已覆盖，但我想要真浏览器的证据。
+连错两次，**两次都是我错**：
+
+1. 把 time 改成 0.9（和 1.4）→按钮禁用 ✅ 符合预期。
+   接着只把 time 还原成 0.25 →断言「按钮应可用」❌
+   **实际禁用是对的**：此时 draft 与 baseline 一致，`dirty=false`，
+   而禁用条件是 `!dirty || blocking !== null`（`Settings.tsx:129`）。
+   「没有待保存的改动」⇒灰着，不是缺陷。
+2. 改成只动 time=0.35（和 1.1）→ 断言可用 ❌
+   **和1.1 本身就是非法的** → `blocking` 非空 → 灰着，仍然正确。
+
+**正确做法**：动**两个**维度让和保持 1.0（time 0.25→0.35、service 0.25→0.15），
+此时 `dirty=true` 且 `blocking=null` ⇒ 可点。
+这样才真的在验「合法改动可以保存」，而不是在验按钮的启用条件。
+
+#### 四、判据 3：URL 拼装完全正确，是我把「面板没部署」当成了失败
+
+第一版 `page.goto` 后断言「应拿到响应对象」，实测 `ERR_CONNECTION_REFUSED`。
+**但 URL 本身是对的** —— 报错里 `g0.expr=rate%28http_requests_total%7Bjob%3D%22api%22...`
+编码得一丝不差。失败只因E2E 不起 prometheus/grafana（`stack.mjs` 只起 PG + iip-server）。
+
+**判据方向不能搞反**：合法 URL + 面板未部署 = `ERR_CONNECTION_REFUSED`；
+非法 URL（乱码/控制字符/协议不对）在导航**前**就被浏览器拒绝，
+形态是 `ERR_INVALID_URL` / `ERR_ABORTED`。**「连不上」恰恰是 URL 合法的证据。**
+
+改为断言「失败原因属于连不上这一类、且不属于 URL 级错误」。
+把「连不上」当失败，等于要求每条单测的环境里都得有面板——
+那是把部署形态的验证错放到单条用例里。
+
+顺带修了一处真会静默失效的点：**Prometheus 的参数名是 `g0.expr` 不是 `query`**
+（`externalLinks.ts:89`）。我按 `query` 取值拿到 `null`，
+一度以为编码坏了。因此补了两条**只有真读实现才发现**的断言：
+
+- `g0.expr` 反解后应与原 PromQL 逐字相同；
+- Loki 直达的 `start`/`end` 必须是**毫秒**（10 位秒级会被 Loki 当 0，
+  症状是「链接点得开但永远返回空结果」—— 比链接打不开更难判断原因，
+  `externalLinks.ts:160` 记了这个坑）。
+
+另外验了 **k8s 证据不渲染任何链接**（`buildExternalLinks` 返回空数组）——
+「不是所有来源都有原始面板概念」，给一个语义不明的链接不如把 query 摆出来。
+
+#### 五、实测结果
+
+```
+e2e-06-cfg-evidence.spec.ts  4 passed (2.1m)
+  ok 1 判据 1  关掉引擎不重启 → 0 事件；打开 → 并成 1 个（91ms）
+  ok 2 判据 2  三类非法输入 422 + 文案点名；键名错 400（20ms）
+  ok 3 判据 2b 前端提交前拦截；两维同改（和=1.0）后可保存（3.1s）
+  ok 4 判据 3  真浏览器导航 3 条链接；g0.expr /毫秒时间戳逐字校验（786ms）
+```
+
+**连跑 3 轮全绿**（4/4 × 3，2.1–2.2m每轮）——
+按记忆里「连跑 3~4 次全绿才算通过」的纪律确认非flaky。
+**并复跑 E2E-4（原有 settings 用例）确认未污染全局配置**：
+它的前置断言是「起始必须是后端默认权重」，若本轮把 0.35 写进库它会假红——
+实测 1 passed，说明 `finally` 里的还原生效了。
+
+**这一轮 4 条红全部是「测试写错而非产品缺陷」**（判据 1 的信号选错、
+判据 2 的文案判据错、判据 2b 两次误解 `dirty`、判据 3 把连不上当失败），
+**产品零缺陷**。四处都已写进用例注释，避免下一个人重踩。
+
+### F8 期间新增的 OPEN 项
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| OPEN-M5-9 | `evidence.confidence` 仍全空（OPEN-M4-1 延续）。判据 1/2/3 的验收**不依赖**它，但 M4 手册把它列为待M5 处理的能力缺口 | 建议归入 M6（需 RCA 才有能力评估，见 OPEN-M4-1） |
+| OPEN-M5-10 | 判据 3 只验到「URL 合法且能发起连接」，**没有验证面板上真的能看到这条查询的结果**——那需要真 Prometheus/Grafana 实例 | 容器链路（判据 4）已覆盖部署形态，此项在 V1.0 内可接受；V1.1 若接真实面板则须补 |
 
 ---
 
@@ -1040,6 +1465,12 @@ python D:\_iip_setup\m4_final_gate.py
 
 # 2) 容器链路（含新增的部署形态断言）
 python scripts/verify-images.py
+
+# 2b) 可选：把无头浏览器截图也纳入容器链路（OPEN-M5-8）。
+# 不设则跳过并在报告里说明原因 —— 容器内无头浏览器需额外镜像，
+# 而本机镜像源不可达（见 F7 实测记录），默认跑会稳定红而红因与质量无关。
+# set IIP_CHROME_BIN=C:\Program Files\Google\Chrome\Application\chrome.exe
+# 4.8 段还需要宿主 Go modcache（默认 %USERPROFILE%\go\pkg\mod）才能零网络跑 go test
 
 # 3) 前端门禁
 cd web
@@ -1090,3 +1521,6 @@ docker compose -f deploy/docker-compose.yml --profile app down
 | 日期 | 变更 | 说明 |
 |------|------|------|
 | 2026-10-04 | 初稿 | 基于 M4 交接实测 + 开发计划 §9 起草。范围裁剪为 S1–S4 四项（5 个开发计划任务已在 M3 完成，另发现 2 个此前无人负责的缺口 C1/C2）。待禹确认 |
+| 2026-10-04 | F7 实测记录 | 补OPEN-M5-6/8 的断言（`verify-images.py` 4.8 段 + `png_color_count`）；**本机 Docker daemon 写操作卡死、镜像源四条全不通**，判据 13 与判据 11 未跑成，如实标注未通过 |
+| 2026-10-05 | **更正前一轮的判断** | 前一轮据 `docker ps` rc=0 说「daemon 已恢复」**是错的**：半锁死时只读命令本就全部 rc=0 且秒回。本轮真跑第二次容器链路（13 个本地镜像齐备、无需 pull），停在构建阶段 19 分 21 秒无产出，定因为 `vmmemWSL` 20 秒 CPU 增量 0 + `Created` 僵尸 2→9。**判据 4/11/13 的容器侧仍为「未跑成」，没有一项算通过**；解封须重启 Docker Desktop，涉及 `iip-web-view`（Up 2 天，禹在用），待禹决定 |
+| 2026-10-04 | **F8 实测记录** | **判据 1/2/3 补验收**：新增 `e2e-06-cfg-evidence.spec.ts` 4 条，E2E 由 5 条增至 **9 条**；三条判据由「待验」改为 ✅（判据 1 为**行为层**证明：不重启→事件数 0↔1）。本轮 4 条红**全是测试写错**，产品零缺陷，四处已写入用例注释。登记 OPEN-M5-9/10 |
