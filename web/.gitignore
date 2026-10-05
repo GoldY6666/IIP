@@ -11,3 +11,9 @@ dist/
 
 # vitest 覆盖率报告（pnpm test:coverage 产生）。
 coverage/
+
+# Playwright E2E 产物（M5 F6）
+test-results/
+playwright-report/
+blob-report/
+.playwright/

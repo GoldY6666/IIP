@@ -18,6 +18,11 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // e2e/ 是 Playwright 的用例，跑在真浏览器 + 真后端上，
+    // **绝不能被 vitest 收集**：那会开 jsdom 去跑
+    // 「真起 PG、真启服务」的测试，报错完全指向 vitest 而非真因。
+    // include 已限定 src/**，这里显式 exclude 是为了防「改 include 那天」。
+    exclude: ['e2e/**', 'node_modules/**', 'dist/**'],
     // 覆盖率口径：只统计被测的 src，不统计测试文件自身与类型声明。
     coverage: {
       provider: 'v8',
