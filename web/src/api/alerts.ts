@@ -22,11 +22,13 @@ export interface AlertListResponse {
   count: number
 }
 
-const API_BASE = '/api/v1'
+// 前缀与 token 头统一由 client.ts 提供（M6 S4），此处不再各写一份
+// '/api/v1' —— 四份字面量意味着「加头」要改四个地方，漏一处无编译错误。
+import { apiFetch } from './client'
 
 // 拉取最新一批告警（默认 100 条、不做 status 过滤，与后端一致）。
 export async function fetchAlerts(limit = 100, offset = 0): Promise<AlertListResponse> {
-  const res = await fetch(`${API_BASE}/alerts?limit=${limit}&offset=${offset}`)
+  const res = await apiFetch(`/alerts?limit=${limit}&offset=${offset}`)
   if (!res.ok) {
     throw new Error(`获取告警列表失败：HTTP ${res.status}`)
   }
@@ -67,7 +69,10 @@ const buildSamplePayload = () => ({
 })
 
 export async function sendSampleAlert(): Promise<void> {
-  const res = await fetch(`${API_BASE}/alerts/webhook`, {
+  // 走 apiFetch：webhook 也在 /api/v1 下，启用鉴权后同样要带 token。
+  // 这里曾经是「示例按钮能用但列表空白」的隐患来源 —— 两条路径的前缀相同，
+  // 很容易只改一处。
+  const res = await apiFetch('/alerts/webhook', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(buildSamplePayload()),

@@ -17,8 +17,8 @@
 //     M3 的 AlertCount 缺陷重演（250 条显示成 200 条）。
 
 import { readError } from './incidents'
-
-const API_BASE = '/api/v1'
+// 前缀与 token 头统一由 client.ts 提供（M6 S4），不再本文件自带API_BASE。
+import { apiFetch } from './client'
 
 // EvidenceType 的取值必须与 internal/evidence 的 6 个常量一致
 // （0001 迁移的 chk_evidence_type 约束）。
@@ -104,7 +104,7 @@ export async function fetchEvidence(
   if (params.limit !== undefined) sp.append('limit', String(params.limit))
   const qs = sp.toString()
 
-  const res = await fetch(`${API_BASE}/incidents/${incidentId}/evidence${qs ? `?${qs}` : ''}`)
+  const res = await apiFetch(`/incidents/${incidentId}/evidence${qs ? `?${qs}` : ''}`)
   if (!res.ok) throw await readError(res, `获取事件 #${incidentId} 的证据失败`)
   return (await res.json()) as EvidenceListResponse
 }

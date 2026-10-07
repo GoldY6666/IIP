@@ -9,7 +9,11 @@
 // 只有真实进程的字节流才暴露。前端这边同理：字段名对不上，页面不会报错，
 // 只会静默显示空值。所以这里逐字段标注了后端出处。
 
-const API_BASE = '/api/v1'
+// 前缀与 token 头统一由 client.ts 提供（M6 S4）。
+// 本文件原先自带一份 `const API_BASE = '/api/v1'`，与另外三个文件重复 ——
+// 重复本身无害，但加 token 头必须改每一处，漏一处不会有编译错误，
+// 症状是「某个页面永远 401 而别的页面正常」。
+import { apiFetch } from './client'
 
 // ---- 领域类型（与 internal/incident 的 json tag 一一对应）----
 
@@ -176,13 +180,13 @@ export async function fetchIncidents(params: ListIncidentsParams = {}): Promise<
     limit: params.limit,
     offset: params.offset,
   })
-  const res = await fetch(`${API_BASE}/incidents${qs}`)
+  const res = await apiFetch(`/incidents${qs}`)
   if (!res.ok) throw await readError(res, '获取事件列表失败')
   return (await res.json()) as IncidentListResponse
 }
 
 export async function fetchIncident(id: number): Promise<IncidentDetail> {
-  const res = await fetch(`${API_BASE}/incidents/${id}`)
+  const res = await apiFetch(`/incidents/${id}`)
   if (!res.ok) throw await readError(res, `获取事件 #${id} 详情失败`)
   return (await res.json()) as IncidentDetail
 }
@@ -197,7 +201,7 @@ export async function transitionIncident(
   actor: string,
   note?: string,
 ): Promise<TransitionResult> {
-  const res = await fetch(`${API_BASE}/incidents/${id}/transition`, {
+  const res = await apiFetch(`/incidents/${id}/transition`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ to, actor, note }),
@@ -207,7 +211,7 @@ export async function transitionIncident(
 }
 
 export async function addIncidentComment(id: number, actor: string, note: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/incidents/${id}/comments`, {
+  const res = await apiFetch(`/incidents/${id}/comments`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ actor, note }),
@@ -217,7 +221,7 @@ export async function addIncidentComment(id: number, actor: string, note: string
 
 export async function fetchReviews(limit = 100, offset = 0): Promise<ReviewListResponse> {
   const qs = buildQuery({ limit, offset })
-  const res = await fetch(`${API_BASE}/reviews${qs}`)
+  const res = await apiFetch(`/reviews${qs}`)
   if (!res.ok) throw await readError(res, '获取待确认队列失败')
   return (await res.json()) as ReviewListResponse
 }
@@ -229,7 +233,7 @@ export async function decideReview(
   actor: string,
   reason?: string,
 ): Promise<ReviewResult> {
-  const res = await fetch(`${API_BASE}/reviews/${incidentID}/${alertID}`, {
+  const res = await apiFetch(`/reviews/${incidentID}/${alertID}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ decision, actor, reason }),

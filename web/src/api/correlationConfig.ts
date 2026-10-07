@@ -10,6 +10,9 @@
 // 明写）。前端因此可以整份提交而不用自己算差量 —— 但这也意味着
 // 「提交一份残缺的 body」会静默保留其余现值，而不是报错。
 
+// 前缀与 token 头统一由 client.ts 提供（M6 S4），不再本文件自带 API_BASE。
+import { apiFetch } from './client'
+
 export interface Weights {
   time: number
   service: number
@@ -28,8 +31,6 @@ export interface CorrelationConfig {
   thresholds: Thresholds
   enabled: boolean
 }
-
-const API_BASE = '/api/v1'
 
 /** 权重和的允许误差，与后端 correlation.weightSumEpsilon 逐位一致。 */
 export const WEIGHT_SUM_EPSILON = 0.001
@@ -78,7 +79,7 @@ async function readError(res: Response): Promise<string> {
 }
 
 export async function fetchCorrelationConfig(): Promise<CorrelationConfig> {
-  const res = await fetch(`${API_BASE}/correlation/config`)
+  const res = await apiFetch('/correlation/config')
   if (!res.ok) {
     throw new ConfigApiError(res.status, await readError(res), '获取关联配置失败')
   }
@@ -86,7 +87,7 @@ export async function fetchCorrelationConfig(): Promise<CorrelationConfig> {
 }
 
 export async function putCorrelationConfig(cfg: CorrelationConfig): Promise<CorrelationConfig> {
-  const res = await fetch(`${API_BASE}/correlation/config`, {
+  const res = await apiFetch('/correlation/config', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(cfg),
