@@ -5,6 +5,55 @@
 - 编排细节依据 `docs/IIP-M0详细开发计划.md` §T0.6。
 - 本目录只放编排与配置，不得放入业务逻辑。
 
+## ⚠️ 当前默认配置仅供内网 / 演示环境
+
+**默认编排下没有任何鉴权**：任何能访问 `localhost:8080` 的人都能读写全部事件、
+复核告警、改关联配置。默认配置只适用于本机联调与内网演示。
+
+要放到内网以外（同事跨网段访问、反向代理后暴露）**必须**先启用鉴权，见
+[「启用 UI 鉴权（M6 S4）」](#启用-ui-鉴权m6-s4)。
+
+这不是「以后再说」的提示：M5 S3 交付静态托管时留下的条件义务是
+「不做鉴权就必须在部署文档标注内网限定」，S4 把鉴权做出来后该标注
+**依然保留**——因为「默认不启用」是刻意的向后兼容，任何人新起一个环境
+时默认仍是无鉴权状态。
+
+## 启用 UI 鉴权（M6 S4）
+
+不配置即完全不开鉴权；配置了则`/api/v1/*` 全部需要携带请求头
+`X-IIP-Token`。前端会自动带上，无需改任何前端代码。
+
+```bash
+# 1. 生成一个强随机 token（不要用人能猜到的口令）
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+
+# 2. 取消 docker-compose.yml 里 IIP_AUTH_TOKEN 的注释并填入该值
+#    （默认注释掉的就是「不启用」）
+
+# 3. 重建 iip-server 容器使环境变量生效
+docker compose -f deploy/docker-compose.yml --profile app up -d --force-recreate iip-server
+```
+
+验证是否真的生效：
+
+```bash
+# 应返回 401（未带 token）
+curl -i http://localhost:8080/api/v1/alerts
+
+# 应返回 200（带上正确的 token）
+curl -i -H "X-IIP-Token: <你配的值>" http://localhost:8080/api/v1/alerts
+```
+
+三条边界，配置前值得知道：
+
+| 路径 | 是否需要 token | 原因 |
+|------|----------------|------|
+| `/api/v1/*` | **需要** | 业务数据读写 |
+| `/healthz` | 不需要 | 容器的 `healthcheck.test` 不可能带自定义头，拦了会导致服务被判不健康 |
+| `/api/v1/auth/session` | 不需要 | 前端靠它拿 token，拦了就死锁（页面全白） |
+
+token 只在启动日志里以「已启用」出现，**不回显值**；`/healthz` 与静态托管始终放行。
+
 ## 服务分组
 
 `docker-compose.yml` 里有两组服务，用 `profiles` 隔离：

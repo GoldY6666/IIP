@@ -171,6 +171,20 @@ services:
       IIP_UI_PROMETHEUS_URL: http://localhost:9090
       IIP_UI_GRAFANA_URL: http://localhost:3000
       IIP_UI_LOKI_URL: http://localhost:3100
+      # M6 S4：UI 访问 token。**默认注释掉**——不配就是完全不开鉴权，
+      # 本地 `docker compose --profile app up` 的现有用法零改动可用。
+      #
+      # 启用方式：取消下面两行注释，并把 token 换成自己的值。
+      #
+      # 为什么不在这里给一个默认 token：默认 token 等于没有 token
+      # （所有部署共享同一个已知值），却让人以为「配过了= 有鉴权」。
+      # 「忘了配」需要猜用户意图，而猜错的后果是 UI 打不开。
+      #
+      # 生效范围只有 /api/v1/*：/healthz 与静态托管放行 ——
+      # 否则上面的 healthcheck（不可能带自定义头）会判定服务不健康，
+      # 症状是「服务起不来」而真因是鉴权。
+      # IIP_AUTH_TOKEN: "换成你自己的强随机串"
+      # 启用后前端会自动带上该 token（web/src/api/client.ts），无需改前端。
     volumes:
       # 拓扑是环境相关文件——config/topology.yaml 自述为「示例，请按真实环境替换」，
       # 因此走挂载而非烧进镜像，与 prometheus / alertmanager / loki 的配置供给方式一致。

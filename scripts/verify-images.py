@@ -114,16 +114,25 @@ def compose(*args: str, timeout: int = 900):
 
 # -------------------------------------------------------------------- http
 def http_request(url: str, method: str = "GET", data: bytes | None = None,
-                 timeout: float = 5.0):
+                 timeout: float = 5.0, headers: dict[str, str] | None = None):
     """发起 HTTP 请求，返回 (status, body)。status 为 None 表示连接层失败。
 
     M2 的配置接口是 PUT，而 urllib 的 urlopen 默认只发 GET。
     原先只有一个 http_get，无法验证「改配置无需重启即生效」这条 M2 验收——
     故统一为带 method 的实现，GET 保留 http_get 这个薄封装以兼容既有调用。
+
+    headers（S4）：鉴权断言必须带 X-IIP-Token 才能验证「带了头才放行」这一侧。
+    只验证「没带头→401」是半个判据 —— 一个「所有请求都 401」的实现同样能通过，
+    而真正要区分的是「凭据正确时能通」。
     """
     req = urllib.request.Request(url, data=data, method=method)
     if data is not None:
         req.add_header("Content-Type", "application/json")
+    # 逐个 add_header 而非一次性设置 dict：Request.add_header 会追加，
+    # 而这里要保证调用方传入的头覆盖掉上面那个 Content-Type 默认值。
+    # 顺序上先设默认再设调用方的，因此同名以后者为准。
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode("utf-8", "replace")
@@ -1112,7 +1121,119 @@ def main() -> int:
                          or "violates check constraint" in (out_c + "")),
           "rc=%d %s" % (rc_c, (out_c or "").strip()[:160]))
 
-    # 4.7.6 端到端：投一条告警 → 等 worker 采到 → evidence 表出现行。
+    # ============================================ 4.7.4cM6 S4：UI 鉴权
+    #
+    # 为什么必须跑真容器：单测里TestBuildRegistry 那种手工构造 cfg 的路子
+    # 证明不了「真二进制认IIP_AUTH_TOKEN 这个环境变量名」，而那正是本批的全部意义。
+    #
+    # 形态：另起一个 server 容器挂同一份镜像，注入 IIP_AUTH_TOKEN，
+    # 与宿主侧HTTP_PORT 错开（宿主那个仍是「未启用鉴权」的状态，
+    # 用于验「默认关」那一半）。
+    _AUTH_TOKEN = "S4Probe%sToken" % RUN_TOKEN
+    _auth_port = HTTP_PORT + 1
+    _apname = "iip-authprobe-%s" % RUN_TOKEN
+    if not port_in_use(_auth_port):
+        _net = compose("ps", "-q", "postgres")
+        if not _net:
+            check("M6 真二进制认IIP_AUTH_TOKEN（启用路径·容器侧）",
+                  False, "取不到 compose 网络，探针无法接入")
+        else:
+            _net = _net.strip()
+            # 探针只验 HTTP 鉴权、不碰采集器，但 server 启动早期会store.Connect
+            # —— 连不上库就直接退出，于是「端口不监听」，症状与「鉴权没生效」
+            # 完全无法区分。故必须接**真库**（与 trace 探针同一条教训）。
+            # 连接串**从 compose 动态读**，不自己拼。
+            # 硬编码踩过一次：compose 里是 postgres/dev，而 K8s 那套是别的组合。
+            _pg_env = compose("exec", "-T", "postgres", "printenv", "POSTGRES_PASSWORD")
+            _pg_user = compose("exec", "-T", "postgres", "printenv", "POSTGRES_USER")
+            _pg_db = compose("exec", "-T", "postgres", "printenv", "POSTGRES_DB")
+            _pu = ((_pg_user or "").strip() or "postgres")
+            _pd = ((_pg_db or "").strip() or "iip")
+            _pp = ((_pg_env or "").strip() or "dev")
+            _rc_a = docker(
+                "run", "-d", "--name", _apname,
+                "--network", _net,
+                "-e", "IIP_AUTH_TOKEN=%s" % _AUTH_TOKEN,
+                "-e", "IIP_HTTP_ADDR=0.0.0.0:%d" % _auth_port,
+                "-e", "IIP_PG_URL=postgres://%s:%s@postgres:5432/%s?sslmode=disable"
+                      % (_pu, _pp, _pd),
+                "-p", "127.0.0.1:%d:%d" % (_auth_port, _auth_port),
+                "iip-server:%s" % TAG,
+                timeout=300)
+            # 具名容器且**不**用 --rm：起来失败时还能 docker logs 看到原因。
+            # （上一批踩过：常驻容器被超时杀掉后，一个字都拿不到。）
+            if _rc_a != 0:
+                check("M6 真二进制认 IIP_AUTH_TOKEN（启用路径·容器侧）",
+                      False, "鉴权探针容器起不来 rc=%s" % _rc_a)
+            else:
+                # 等监听就绪
+                _up = False
+                _dl = time.time() + 90
+                while time.time() < _dl:
+                    if port_in_use(_auth_port):
+                        _up = True
+                        break
+                    time.sleep(2)
+                if not _up:
+                    check("M6 真二进制认 IIP_AUTH_TOKEN（启用路径·容器侧）",
+                          False, "鉴权探针 90s 内未监听 %d" % _auth_port)
+                else:
+                    _a_base = "http://127.0.0.1:%d" % _auth_port
+                    # ① 不带 token → 401。这是启用路径的**核心**判据。
+                    _s1, _b1 = http_request(_a_base + "/api/v1/alerts", timeout=8)
+                    # ② 带对 token → 200。只验 ① 是半个判据：
+                    #    一个「所有请求都 401」的实现同样能让① 通过。
+                    _s2, _b2 = http_request(
+                        _a_base + "/api/v1/alerts", timeout=8,
+                        headers={"X-IIP-Token": _AUTH_TOKEN})
+                    # ③ 带错 token → 401。验「不是只看头在不在」。
+                    _s3, _b3 = http_request(
+                        _a_base + "/api/v1/alerts", timeout=8,
+                        headers={"X-IIP-Token": _AUTH_TOKEN + "x"})
+                    check("M6 启用鉴权：无 token 请求被拒（401）",
+                          _s1 == 401, "status=%r body=%s" % (_s1, (_b1 or "")[:120]))
+                    check("M6 启用鉴权：带正确 token 放行（200）",
+                          _s2 == 200, "status=%r body=%s" % (_s2, (_b2 or "")[:120]))
+                    check("M6 启用鉴权：错误 token 被拒（401）",
+                          _s3 == 401, "status=%r" % _s3)
+                    # ④/healthz 不被拦：否则容器 healthcheck 判定不健康，
+                    #    症状是「服务起不来」而真因是鉴权。
+                    _s4, _b4 = http_request(_a_base + "/healthz", timeout=8)
+                    check("M6 启用鉴权：/healthz 仍可访问（容器 healthcheck 依赖它）",
+                          _s4 == 200, "status=%r" % _s4)
+                    # ⑤/auth/session 豁免：前端靠它拿 token，被拦即死锁。
+                    _s5, _b5 = http_request(
+                        _a_base + "/api/v1/auth/session", timeout=8)
+                    _ok5 = _s5 == 200 and '"auth_required":true' in (_b5 or "").replace(" ", "")
+                    check("M6 启用鉴权：/auth/session 豁免且回传 auth_required=true",
+                          _ok5, "status=%r body=%s" % (_s5, (_b5 or "")[:140]))
+                    # ⑥ 未启用鉴权的那一半（宿主侧 compose server 仍是默认关）：
+                    #    必须一切照常，否则「默认关」就是空头承诺。
+                    _s6, _b6 = http_request(
+                        "http://127.0.0.1:%d/api/v1/alerts" % HTTP_PORT, timeout=8)
+                    check("M6 未配 token：一切照常（200，向后兼容）",
+                          _s6 == 200, "status=%r" % _s6)
+                    # 401 响应体必须符合全站 {error, code} 契约 ——
+                    # 前端对所有 API 错误走同一个解析路径。
+                    _b1s = (_b1 or "")
+                    _c1 = ('"error"' in _b1s) and ('"code"' in _b1s) and \
+                          ('"unauthorized"' in _b1s)
+                    check("M6 401 响应体符合 {error, code} 契约且不回显 token",
+                          _c1 and (_AUTH_TOKEN not in _b1s),
+                          "body=%s" % _b1s[:160])
+                    # 前置条件断言：探针真的起来了（否则上面全红是「没起」而非产品缺陷）
+                    check("M6 鉴权探针容器运行中（前置条件）",
+                          _s1 is not None and _s2 is not None,
+                          "status1=%r status2=%r" % (_s1, _s2))
+                docker("rm", "-f", _apname, timeout=120)
+    else:
+        check("M6 真二进制认 IIP_AUTH_TOKEN（启用路径·容器侧）",
+              False, "端口 %d 已被占用，换一个再跑（本轮不判为产品缺陷）" % _auth_port)
+
+
+
+
+    # 4.7.6 端到端：投一条告警 → 等worker 采到 → evidence 表出现行。
     #
     # 用与 4.5 段不同的 alertname/instance：去重按**指纹**判定且无时间窗，
     # 同指纹的 firing 行若仍在库会被 skip（RUN_TOKEN 只解决了「本轮 vs 上一轮」，
@@ -1134,8 +1255,7 @@ def main() -> int:
             "startsAt": "2026-01-01T00:00:00Z",
         }],
     }).encode()
-    # http_request 内部在 data is not None 时自己加 Content-Type，
-    # 不接受 headers 参数（那是既有签名，改它会牵动全部调用点）。
+    # http_request 现在**接受** headers 参数（M6 S4 加的，用于鉴权断言）。
     rc_p, _ = http_request(
         "http://127.0.0.1:%d/api/v1/alerts/webhook" % HTTP_PORT,
         "POST", payload, timeout=10)
