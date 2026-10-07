@@ -209,10 +209,27 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 		chimw.RequestID,
 		chimw.RealIP,
 		appmw.AccessLog(logger),
+		// S4：静态 token 鉴权。位置在 AccessLog 之后 —— 被拒的请求
+		// 也必须留下访问日志，否则「配了 token 后前端全401」这件事
+		// 在日志里完全看不见（那是本批最容易踩的排查坑）。
+		//
+		// 放Recoverer 之前：鉴权本身不 panic，真panic 由 Recoverer兜。
+		// AuthToken 为空时中间件直接放行，本地开发与既有用法零影响。
+		appmw.RequireToken(cfg.AuthToken),
 		chimw.Recoverer,
 	)
 
 	r.Get("/healthz", handleHealthz(pool))
+
+	// S4：前端凭据来源。**必须注册在这里且不受鉴权**（见 api.AuthSession 注释）。
+	// 无凭据时也返回 200 + auth_required=false：那是合法状态而非错误。
+	r.Get(api.AuthSessionPath(), api.AuthSession(cfg.AuthToken, logger))
+
+	if appmw.AuthEnabled(cfg.AuthToken) {
+		// 刻意只说「已启用」不回显 token 值：启动日志常被收集到集中式日志系统，
+		// 那里不该出现凭据。是否真生效由容器链路的 401/200 两条断言验。
+		logger.Info("UI 访问鉴权已启用，受保护路径前缀 /api/v1/")
+	}
 
 	// 关联引擎（M2）：拓扑 + 配置仓储 + 服务。此处只装配，评分/决策在 internal/correlation。
 	//

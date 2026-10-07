@@ -47,6 +47,21 @@ type Config struct {
 	// 文件不存在不报错，依赖维退化为恒 0。规格依据：docs/IIP-M2详细开发手册.md §4.5。
 	TopologyFile string // IIP_TOPOLOGY_FILE，默认 "config/topology.yaml"
 
+	// AuthToken 是访问 /api/v1/* 所需的静态 token（M6 S4）。
+	//
+	// **空串= 不开鉴权**，这是刻意设计而非「漏配」：
+	// 本地开发与 `docker compose --profile app up` 的现有用法必须零改动可用，
+	// 而判定「是不是漏配」需要猜用户的意图 —— 猜错的后果要么是 UI 打不开，
+	// 要么是部署到内网却以为有鉴权。因此 Validate 里**没有**本字段的必填规则。
+	//
+	// 它是**明文**环境变量（不是文件、不是密钥管理），与手册 §八裁定#1 一致：
+	// 只做「环境变量注入静态 token」，不做登录页与密钥轮换。
+	// 它的定位是「挡住误暴露到公网的裸部署」，不是「抵御已能读到进程环境的人」。
+	//
+	// 只保护 /api/v1/*，**不保护 /healthz** —— 否则容器的 healthcheck
+	// 与外部探针都会因缺 token 而判定服务不健康（详见 RequireToken）。
+	AuthToken string // IIP_AUTH_TOKEN，默认 ""（不开鉴权）
+
 	// CorrelationEnabled 是 M2 关联引擎总开关；false 时 webhook 落库后不关联。
 	CorrelationEnabled bool // IIP_CORRELATION_ENABLED，默认 true
 
@@ -187,6 +202,9 @@ func Load(args []string) (*Config, error) {
 	fs.Duration("evidence-timeout", DefaultEvidenceTimeout, "单个采集器超时上限")
 	fs.String("prom-url", "", "Prometheus 查询端点根地址（启用该采集器时必填）")
 	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
+	// 空串 = 不开鉴权，故help 里明写这一点，避免「设了变量但没配值」
+	// 被误读成「配了但没生效」。
+	fs.String("auth-token", "", "访问 /api/v1/* 的静态 token；留空=不开鉴权（仅建议内网部署时开启）")
 	fs.String("k8s-url", "", "K8s API Server 根地址（启用该采集器时必填）")
 	fs.String("k8s-namespace", "", "K8s 采集器要查询的命名空间（启用该采集器时必填）")
 	fs.String("trace-url", "", "链路追踪后端根地址（启用该采集器时必填）")
@@ -236,6 +254,8 @@ func Load(args []string) (*Config, error) {
 		WebhookMaxBytes:    k.Int64("webhook-max-bytes"),
 		TopologyFile:       k.String("topology-file"),
 		CorrelationEnabled: k.Bool("correlation-enabled"),
+		// AuthToken 无 Validate 必填规则：空串是合法的「不开鉴权」（见字段注释）。
+		AuthToken: k.String("auth-token"),
 
 		WorkerTaskBatch:      k.Int("worker-task-batch"),
 		WorkerTaskStaleAfter: k.Duration("worker-task-stale-after"),
