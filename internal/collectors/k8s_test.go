@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/yu/iip/internal/evidence"
+	"github.com/yu/iip/internal/rca"
 )
 
 // k8sServer 是可分别控制 events / deployments 两个端点的 mock apiserver。
@@ -862,5 +863,384 @@ func TestK8sMockShapesAreValid(t *testing.T) {
 	}
 	if len(st["conditions"].([]map[string]any)) != 1 {
 		t.Errorf("conditions 构造失败: %v", st["conditions"])
+	}
+}
+
+// ---------- Warning 事件的基线对比（k8s_baseline.go） ----------
+
+// k8sWindow 是 [12:00, 13:00)，基线窗口因此是 [11:00, 12:00)。
+// 造数据时用这两个整点，边界归属一眼可辨。
+func baselineAt(hour, min, idx int) map[string]any {
+	return map[string]any{
+		"reason":    fmt.Sprintf("Base%02d", idx),
+		"eventTime": fmt.Sprintf("2026-10-03T%02d:%02d:00Z", hour, min),
+		"involvedObject": map[string]any{
+			"name": fmt.Sprintf("checkout-%d", idx), "kind": "Pod",
+		},
+	}
+}
+
+func curAt(min, idx int) map[string]any {
+	return map[string]any{
+		"reason":         fmt.Sprintf("Cur%02d", idx),
+		"eventTime":      fmt.Sprintf("2026-10-03T12:%02d:00Z", min),
+		"involvedObject": map[string]any{"name": fmt.Sprintf("checkout-%d", idx)},
+	}
+}
+
+// firstWarning 取第一条 Warning 事件证据，并断言其条数为 want。
+//
+// 条数必须显式断言而不是只取 [0]：若预期 2 条而实际出了 3 条，
+// 只看 [0] 的判据仍然会「通过」，而多出来那条可能是别的窗口的
+// 事件漏了进来 —— 那正是本组用例要防的错。
+func firstWarning(t *testing.T, evs []evidence.Evidence, want int) evidence.Evidence {
+	t.Helper()
+	w := onlyWarnings(evs)
+	if len(w) != want {
+		t.Fatalf("Warning 事件条数 = %d，期望 %d\n%s", len(w), want, dumpEvidence(evs))
+	}
+	return w[0]
+}
+
+// 基线 > 0：给出可信倍数。6 条基线、3 条事故 ⇒0.5 倍。
+func TestK8sEventChangeRatioAgainstBaseline(t *testing.T) {
+	s := newK8sServer(t)
+	items := []map[string]any{curAt(10, 1), curAt(20, 2), curAt(30, 3)}
+	for i := 0; i < 6; i++ {
+		items = append(items, baselineAt(11, 10+i, 100+i))
+	}
+	setEventsRaw(s, items...)
+
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	ev := firstWarning(t, got, 3)
+	if ev.Metadata["matched_before"] != "6" {
+		t.Errorf("matched_before = %q，期望 6（事故前窗口的 6 条）\n%s",
+			ev.Metadata["matched_before"], dumpEvidence([]evidence.Evidence{ev}))
+	}
+	if ev.Metadata["change_ratio"] != "0.5000" {
+		t.Errorf("change_ratio = %q，期望 0.5000（3/6）",
+			ev.Metadata["change_ratio"])
+	}
+}
+
+// **倍数必须随数据变化**：只断言「有 change_ratio」的话，
+// 一个把change_ratio 写死成 1.0000 的退化实现会全绿。
+// 因此必须与 TestK8sEventChangeRatioAgainstBaseline 并存，
+// 两条用不同的真实数据算出不同的倍数。
+func TestK8sEventChangeRatioVariesWithData(t *testing.T) {
+	cases := []struct {
+		name      string
+		cur       int
+		base      int
+		wantRatio string
+	}{
+		{"事故前 8 条事故中 2 条", 2, 8, "0.2500"},
+		{"事故前 2 条事故中 8 条", 8, 2, "4.0000"},
+		{"前后各 3 条", 3, 3, "1.0000"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newK8sServer(t)
+			var items []map[string]any
+			for i := 0; i < tc.cur; i++ {
+				items = append(items, curAt(10+i, i))
+			}
+			for i := 0; i < tc.base; i++ {
+				items = append(items, baselineAt(11, 10+i, 100+i))
+			}
+			setEventsRaw(s, items...)
+
+			c := NewK8sCollector(s.srv.URL, "prod")
+			got, err := c.Collect(context.Background(), k8sInput("checkout"))
+			if err != nil {
+				t.Fatalf("采集失败: %v", err)
+			}
+			ev := firstWarning(t, got, tc.cur)
+			if ev.Metadata["change_ratio"] != tc.wantRatio {
+				t.Errorf("change_ratio = %q，期望 %q（%d/%d）",
+					ev.Metadata["change_ratio"], tc.wantRatio, tc.cur, tc.base)
+			}
+		})
+	}
+}
+
+// 基线桶也必须过归属判定：别的服务的 Warning 不能进分母。
+//
+// 这与 belongsTo 里防的「checkout-staging 挂到 checkout 上」是同一类错挂，
+// 方向相反：那边是多收证据，这边是**分母被撑大** ——
+// 本服务其实一条没多，change_ratio 却显示暴涨，页面上完全看不出来。
+func TestK8sBaselineBucketAlsoFiltersOwnership(t *testing.T) {
+	s := newK8sServer(t)
+	// 命名空间里同时有 checkout 与 checkout-staging。
+	setDeployRaw(s,
+		k8sDeployJSON{Name: "checkout", Replicas: 1, Ready: 1,
+			Labels: map[string]string{"app": "checkout"},
+			Conditions: []k8sCondJSON{{
+				Type: "Available", Status: "True", LastUpdate: "2026-10-03T12:05:00Z",
+			}}}.marshal(),
+		k8sDeployJSON{Name: "checkout-staging", Replicas: 1, Ready: 1,
+			Labels: map[string]string{"app": "checkout-staging"},
+			Conditions: []k8sCondJSON{{
+				Type: "Available", Status: "True", LastUpdate: "2026-10-03T12:06:00Z",
+			}}}.marshal(),
+	)
+	// 基线窗口里 2 条属于 checkout、5 条属于 checkout-staging。
+	var items []map[string]any
+	items = append(items, curAt(10, 1), curAt(20, 2))
+	for i := 0; i < 2; i++ {
+		items = append(items, baselineAt(11, 10+i, 200+i))
+	}
+	for i := 0; i < 5; i++ {
+		items = append(items, map[string]any{
+			"reason":         fmt.Sprintf("StagingBase%02d", i),
+			"eventTime":      fmt.Sprintf("2026-10-03T11:%02d:00Z", 20+i),
+			"involvedObject": map[string]any{"name": fmt.Sprintf("checkout-staging-%d", i)},
+		})
+	}
+	setEventsRaw(s, items...)
+
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	ev := firstWarning(t, got, 2)
+	if ev.Metadata["matched_before"] != "2" {
+		t.Errorf("matched_before = %q，期望 2 —— checkout-staging 的 5 条"+
+			"混进分母了，那是别的服务的事故强度",
+			ev.Metadata["matched_before"])
+	}
+	if ev.Metadata["change_ratio"] != "1.0000" {
+		t.Errorf("change_ratio = %q，期望 1.0000（2/2，本服务其实没变）",
+			ev.Metadata["change_ratio"])
+	}
+}
+
+// 基线为 0：写 novelty，**不给** change_ratio，也**不写** baseline。
+//
+// 三者必须分别断言：把 novelty 换成 change_ratio="0.0000" 会让
+// Assess 落进 BandWeak，语义从「没有可比数据」变成「评估结果很弱」。
+func TestK8sEventBaselineZeroWritesNoveltyNotRatio(t *testing.T) {
+	s := newK8sServer(t)
+	setEventsRaw(s, curAt(10, 1), curAt(20, 2))
+
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	ev := firstWarning(t, got, 2)
+	if ev.Metadata["matched_before"] != "0" {
+		t.Errorf("matched_before = %q，期望 0", ev.Metadata["matched_before"])
+	}
+	if _, ok := ev.Metadata["change_ratio"]; ok {
+		t.Errorf("基线为 0 时不该给 change_ratio（实际 = %q）—— "+
+			"「变化 0 倍」会被读成「强度很弱」",
+			ev.Metadata["change_ratio"])
+	}
+	if ev.Metadata["novelty"] == "" {
+		t.Error("基线为 0 时应写novelty 说明这是新出现的")
+	}
+	if _, ok := ev.Metadata["baseline"]; ok {
+		t.Error("基线为 0 不等于「基线不可用」—— 写了 baseline 会让 Assess " +
+			"落第①步并说「基线窗口不可用」，与事实相反")
+	}
+}
+
+// TopN 截断不能污染基线：截断砍的是展示条数，不是真实命中数。
+// 用截断后的条数当分子会让「20 条涨到 5 条」算成没变化。
+func TestK8sTopNDoesNotPolluteRatio(t *testing.T) {
+	s := newK8sServer(t)
+	var items []map[string]any
+	for i := 0; i < 20; i++ {
+		items = append(items, curAt(i, i)) // 12:00..12:19
+	}
+	for i := 0; i < 5; i++ {
+		items = append(items, baselineAt(11, 10+i, 300+i))
+	}
+	setEventsRaw(s, items...)
+
+	c := NewK8sCollector(s.srv.URL, "prod", WithTopN(3))
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	w := onlyWarnings(got)
+	if len(w) != 3 {
+		t.Fatalf("事件条数 = %d，期望 3（TopN 生效）\n%s", len(w), dumpEvidence(w))
+	}
+	if w[0].Metadata["matched"] != "20" {
+		t.Errorf("matched = %q，期望 20（截断前的真实命中数）",
+			w[0].Metadata["matched"])
+	}
+	if w[0].Metadata["change_ratio"] != "4.0000" {
+		t.Errorf("change_ratio = %q，期望 4.0000（20/5）—— "+
+			"用截断后的 3 条当分子会算出 0.6000",
+			w[0].Metadata["change_ratio"])
+	}
+	if w[0].Metadata["matched_before"] != "5" {
+		t.Errorf("matched_before = %q，期望 5", w[0].Metadata["matched_before"])
+	}
+}
+
+// 两窗必须不重叠：正好落在 Start 的事件算**事故桶**，不算基线桶。
+//
+// 数据：11:59:59（基线桶唯一一条）+ 12:00:00（事故桶唯一一条）。
+// 正确实现的两个桶各1 条。若基线窗口写成 [Start-width, Start]（闭区间），
+// 12:00:00 会被重复计入，matched_before 变成 2 ——
+// 倍数被压低，而页面上看不出任何异常。
+func TestK8sBaselineWindowDoesNotOverlapIncident(t *testing.T) {
+	s := newK8sServer(t)
+	setEventsRaw(s,
+		map[string]any{"reason": "BeforeStart", "eventTime": "2026-10-03T11:59:59Z",
+			"involvedObject": map[string]any{"name": "checkout-1"}},
+		map[string]any{"reason": "AtStart", "eventTime": "2026-10-03T12:00:00Z",
+			"involvedObject": map[string]any{"name": "checkout-2"}},
+	)
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	ev := firstWarning(t, got, 1)
+	if !strings.Contains(ev.Value, "AtStart") {
+		t.Fatalf("留下的不是 AtStart 那条: %q", ev.Value)
+	}
+	if ev.Metadata["matched"] != "1" {
+		t.Errorf("matched = %q，期望 1", ev.Metadata["matched"])
+	}
+	if ev.Metadata["matched_before"] != "1" {
+		t.Errorf("matched_before = %q，期望 1 —— 基线桶只能有 11:59:59 那条；"+
+			"若基线窗口是闭区间，落在 Start 的这条会被重复计入",
+			ev.Metadata["matched_before"])
+	}
+}
+
+// 基线窗口也要过时间解析：无时间戳的事件不能进基线桶当分母。
+func TestK8sBaselineBucketSkipsEventsWithoutTimestamp(t *testing.T) {
+	s := newK8sServer(t)
+	setEventsRaw(s,
+		map[string]any{"reason": "NoTime", "message": "m",
+			"involvedObject": map[string]any{"name": "checkout-1"}},
+		curAt(10, 1),
+	)
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	ev := firstWarning(t, got, 1)
+	if ev.Metadata["matched_before"] != "0" {
+		t.Errorf("matched_before = %q，期望 0 —— 无时间的事件不能进基线桶"+
+			"（§4.4：不用采集时刻兜底）", ev.Metadata["matched_before"])
+	}
+}
+
+// rollout 必须说清「为什么给不出倍数」，而不是静默缺键。
+//
+// 静默缺键时 Assess 落第②步，basis 说「缺少 change_ratio，无法判断变化幅度」
+// —— 那把设计取舍说成了采集器缺陷，运维会去查代码而不是查集群。
+func TestK8sRolloutExplainsMissingBaseline(t *testing.T) {
+	s := newK8sServer(t)
+	setDeployRaw(s, k8sDeployJSON{
+		Name: "checkout", Generation: 7, Labels: map[string]string{"app": "checkout"},
+		Replicas: 3, Ready: 1, Updated: 1, Unavailable: 2,
+		Conditions: []k8sCondJSON{{
+			Type: "Progressing", Status: "False",
+			Reason: "ProgressDeadlineExceeded", LastUpdate: "2026-10-03T12:40:00Z",
+		}},
+	}.marshal())
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	roll := onlyOneWarning2(t, got, "rollout")
+	if roll.Metadata["baseline"] == "" {
+		t.Error("rollout 缺 baseline 说明键 —— Assess 会说「缺少 change_ratio」，" +
+			"把「K8s 没有历史数据」说成「采集器忘了写」")
+	}
+	if !strings.Contains(roll.Metadata["baseline"], "历史副本数") {
+		t.Errorf("baseline 文案未说清原因（应指出 K8s API 不保留历史副本数）: %q",
+			roll.Metadata["baseline"])
+	}
+	if _, ok := roll.Metadata["change_ratio"]; ok {
+		t.Errorf("rollout 不该有 change_ratio（实际 = %q）—— "+
+			"拿同一时刻的 ready/replicas 当比值，语义是「当前就绪比例」不是「变化」",
+			roll.Metadata["change_ratio"])
+	}
+}
+
+// rollout 与 Warning 事件同为 deployment 类型，但一个可评估一个不可评估。
+// 必须分别验：混在一起数条数会让「事件侧补了基线」这个改动看不出效果。
+func TestK8sEventAssessableAndRolloutNot(t *testing.T) {
+	s := newK8sServer(t)
+	setEventsRaw(s, curAt(10, 1), curAt(20, 2), baselineAt(11, 10, 400))
+	setDeployRaw(s, k8sDeployJSON{
+		Name: "checkout", Generation: 3, Labels: map[string]string{"app": "checkout"},
+		Replicas: 2, Ready: 2,
+		Conditions: []k8sCondJSON{{
+			Type: "Available", Status: "True", LastUpdate: "2026-10-03T12:30:00Z",
+		}},
+	}.marshal())
+
+	c := NewK8sCollector(s.srv.URL, "prod")
+	got, err := c.Collect(context.Background(), k8sInput("checkout"))
+	if err != nil {
+		t.Fatalf("采集失败: %v", err)
+	}
+	ev := firstWarning(t, got, 2)
+	if band, _ := rca.Assess(ev); band == rca.BandUnassessable {
+		t.Errorf("有基线的 Warning 事件被判为不可评估 —— matched_before=%q change_ratio=%q",
+			ev.Metadata["matched_before"], ev.Metadata["change_ratio"])
+	}
+	roll := onlyOneWarning2(t, got, "rollout")
+	band2, basis2 := rca.Assess(roll)
+	if band2 != rca.BandUnassessable {
+		t.Errorf("rollout band = %v，期望 Unassessable", band2)
+	}
+	// 第①步（baseline 键存在）而非第②步（缺 change_ratio）：
+	// 前者说「基线不可用」，后者说「缺少 change_ratio」——
+	// 后者会让人以为采集器漏写。
+	if !strings.Contains(basis2, "基线窗口不可用") {
+		t.Errorf("rollout 的 basis = %q，期望命中第①步「基线窗口不可用」", basis2)
+	}
+}
+
+// onlyOneWarning2 取指定 kind 的唯一一条证据。
+func onlyOneWarning2(t *testing.T, evs []evidence.Evidence, kind string) evidence.Evidence {
+	t.Helper()
+	var out []evidence.Evidence
+	for _, e := range evs {
+		if e.Metadata["kind"] == kind {
+			out = append(out, e)
+		}
+	}
+	if len(out) != 1 {
+		t.Fatalf("kind=%s 的证据条数 = %d，期望 1\n%s", kind, len(out), dumpEvidence(evs))
+	}
+	return out[0]
+}
+
+// 基线窗口函数的边界：等宽、紧邻、不重叠。
+func TestBaselineWindowShape(t *testing.T) {
+	w := k8sWindow() // [12:00, 13:00)
+	b := baselineWindow(w)
+	if !b.Start.Equal(time.Date(2026, 10, 3, 11, 0, 0, 0, time.UTC)) {
+		t.Errorf("基线起点 = %v，期望 11:00", b.Start)
+	}
+	if !b.End.Equal(w.Start) {
+		t.Errorf("基线终点 = %v，期望等于事故起点 %v（两窗必须紧邻）", b.End, w.Start)
+	}
+	if b.Duration() != w.Duration() {
+		t.Errorf("基线宽度 = %v，期望等于事故窗口宽度 %v（不等宽则总量不可比）",
+			b.Duration(), w.Duration())
+	}
+	if b.Start.Before(b.End) != w.Start.Before(w.End) {
+		t.Error("基线窗口方向与事故窗口不一致")
 	}
 }

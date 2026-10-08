@@ -141,23 +141,12 @@ func (c *K8sCollector) collectEvents(ctx context.Context, in evidence.Input,
 	allNames := allDeploymentNames(deployments)
 	owners := deploymentNamesFor(in.Service, deployments)
 
-	matched := make([]k8sEvent, 0, len(list.Items))
-	for _, e := range list.Items {
-		ts, ok := e.eventTime()
-		if !ok {
-			// §4.4：给不出真实时间的证据一律不写。
-			// K8s 事件偶有 lastTimestamp 为空（仅 firstTimestamp），
-			// 这种情况跳过，不拿采集时刻兜底。
-			continue
-		}
-		if ts.Before(in.Window.Start) || !ts.Before(in.Window.End) {
-			continue
-		}
-		if !e.belongsTo(allNames, owners, in.Service) {
-			continue
-		}
-		matched = append(matched, e)
-	}
+	// 分成事故窗口桶与基线桶（见 k8s_baseline.go）。
+	// 归属判定、时间解析、半开区间三件事都在 classifyEvents 里，
+	// 两个桶共用 —— 基线桶漏掉任何一件都会让change_ratio 系统性偏大。
+	buckets := classifyEvents(list.Items, in, allNames, owners)
+	matched := buckets.cur
+	baseCount := len(buckets.prev)
 
 	// 按时间倒序：最近的排前面，便于页面直接看到「最新发生了什么」。
 	sort.SliceStable(matched, func(i, j int) bool {
@@ -178,10 +167,13 @@ func (c *K8sCollector) collectEvents(ctx context.Context, in evidence.Input,
 			"kind":      "warning_event",
 			"namespace": c.namespace,
 			"rank":      strconv.Itoa(i + 1),
-			"matched":   strconv.Itoa(n),
 			"object":    e.InvolvedObject.Name,
 			"window":    formatWindow(in.Window),
 		}
+		// matched 与 change_ratio 用**截断前**的真实命中数 n 与基线条数，
+		// 不用 len(matched)：TopN 砍的是展示条数，
+		// 拿它当分子会把「20 条涨到 5 条」算成没变化。
+		applyEventBaseline(md, n, baseCount)
 		if e.Count > 1 {
 			// K8s 对同类事件做聚合，count>1 表示「这一类发生过 N 次」。
 			// 不给这个数字的话，一次反复重启 50 次的 Pod 探针失败
@@ -234,6 +226,12 @@ func (c *K8sCollector) collectRollouts(in evidence.Input,
 			"window":      formatWindow(in.Window),
 			"rollout_ok":  strconv.FormatBool(ready == replicas && replicas > 0),
 			"last_update": ts.UTC().Format(time.RFC3339),
+			// rollout **刻意不给 change_ratio**：Deployment 只有当前副本数，
+			// K8s API 不保留历史值，算不出「变化倍数」。
+			// 写这个说明键让 Assess 落第①步（基线不可用）而不是第②步
+			//（缺 change_ratio）—— 后者会把设计取舍说成采集器缺陷。
+			// 详见 k8s_baseline.go 的 rolloutBaselineReason。
+			"baseline": rolloutBaselineReason,
 		}
 		if unavailable > 0 {
 			md["unavailable"] = strconv.Itoa(unavailable)
