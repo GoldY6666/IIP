@@ -14,10 +14,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/yu/iip/internal/evidence"
 	"github.com/yu/iip/internal/incident"
+	"github.com/yu/iip/internal/rca"
 	"github.com/yu/iip/internal/task"
 )
 
@@ -236,6 +238,17 @@ func (p *Processor) processOne(ctx context.Context, t *task.Task) error {
 
 	applied := evidence.Apply([][]evidence.Evidence{collected}, p.cfg.MaxPerIncident)
 
+	// 置信度在**截断之后**算，不在之前。
+	//
+	// 顺序反过来会有两个错：一是覆盖度把已被砍掉的类型也数进去，
+	// 页面显示 50 条证据、覆盖度却写 4/6，人怎么算都对不上；
+	// 二是 Assign 会给随后被截断掉的证据白算一遍。
+	//
+	// 「为什么在这里调而不让各采集器各调一次」：覆盖度要跨采集器
+	// 才能算，而每个采集器只知道自己这一类。详见
+	// docs/S1-置信度判据设计.md §3.3。
+	st := rca.Assign(applied.Evidence)
+
 	kept := 0
 	if len(applied.Evidence) > 0 {
 		stored, saveErr := p.evidence.Save(ctx, incidentID, applied.Evidence)
@@ -259,12 +272,14 @@ func (p *Processor) processOne(ctx context.Context, t *task.Task) error {
 	}
 
 	p.appendEvidenceEntry(ctx, incidentID, applied, kept, win, results)
+	p.logHypotheses(incidentID, applied.Evidence)
 	p.logger.Info("证据采集完成",
 		slog.Int64("task_id", t.ID),
 		slog.Int64("incident_id", incidentID),
 		slog.Int("collected", applied.TotalCollected),
 		slog.Int("kept", kept),
 		slog.Bool("truncated", applied.Truncated),
+		slog.String("confidence", st.String()),
 		slog.String("window", win.Start.UTC().Format(time.RFC3339)+"/"+win.End.UTC().Format(time.RFC3339)))
 	return nil
 }
@@ -317,6 +332,58 @@ func (p *Processor) logCollectorResults(incidentID int64, results []evidence.Col
 				slog.String("reason", errText(r.DropReason)))
 		}
 	}
+}
+
+// logHypotheses 把根因假设候选打进日志，**只建议不写库**。
+//
+// 为什么不落 incidents.root_causes（手册 §2.2 明确列为不做）：
+// 自动写根因看起来聪明，但错的根因会误导处置且难以发现 ——
+// 与 `confidence` 填 1.0 是同一类错误。置信度是有判据、可复核的，
+// 根因没有；所以置信度可以入库，根因只能给人看。
+//
+// 必须在 Assign **之后**调：SuggestFrom 只用有置信度的证据，
+// 顺序反了它会按设计全部跳过，恒返回空列表 —— 而那个空列表
+// 看起来与「确实没有可推断的假设」完全一样。
+//
+// 一条都不打的情况有两种，措辞必须不同：
+//   - 有证据但全部不可评估（没基线）→ 正常，说明判据在起作用
+//   - 压根没有证据→ 无话可说，不必记
+func (p *Processor) logHypotheses(incidentID int64, evs []evidence.Evidence) {
+	if len(evs) == 0 {
+		return
+	}
+	s := rca.SuggestFrom(evs)
+	if s.AssessedCount == 0 {
+		p.logger.Info("根因假设暂不可推断（证据均无可复核的置信度来源）",
+			slog.Int64("incident_id", incidentID),
+			slog.Int("skipped", s.Skipped))
+		return
+	}
+	p.logger.Info("根因假设候选（仅建议，不写库，待人工确认）",
+		slog.Int64("incident_id", incidentID),
+		slog.Int("assessed", s.AssessedCount),
+		slog.Int("skipped", s.Skipped),
+		slog.Int("hypotheses", len(s.Hypotheses)))
+	for _, h := range s.Hypotheses {
+		conf := "未评估"
+		if h.Confidence != nil {
+			conf = formatConfidence(*h.Confidence)
+		}
+		p.logger.Info("  根因假设",
+			slog.String("summary", h.Summary),
+			slog.String("confidence", conf),
+			slog.Int("support", h.Support),
+			slog.String("basis", h.Basis))
+	}
+}
+
+// formatConfidence 把置信度格式化成两位小数的字符串。
+//
+// nil 的情形由调用方先判掉再决定用不用它 —— 这里不返回 "未评估"
+// 是因为「不可评估」与「0.00」在日志里必须长得不一样，
+// 而把两件事塞进一个函数只会诱使调用方顺手打出一个 0.00。
+func formatConfidence(v float64) string {
+	return strconv.FormatFloat(v, 'f', 2, 64)
 }
 
 // appendEvidenceEntry 写「采集完成」留痕；失败只记日志。

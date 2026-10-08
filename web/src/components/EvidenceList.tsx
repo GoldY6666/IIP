@@ -33,15 +33,65 @@ import {
 } from 'antd'
 import { CopyOutlined, ExportOutlined } from '@ant-design/icons'
 import {
+  CONFIDENCE_BAND_LABEL,
   EVIDENCE_TYPE_LABEL,
+  confidenceBand,
+  type ConfidenceBand,
   type Evidence,
   type EvidenceListResponse,
   type EvidenceType,
 } from '../api/evidence'
 import { buildExternalLinks } from '../api/externalLinks'
 import { uiEndpoints } from '../api/uiConfig'
+import { palette } from '../themeMode'
+import type { Palette } from '../theme'
 
 const { Text, Paragraph } = Typography
+
+/**
+ * CONFIDENCE_BAND_COLOR 是四档到语义色的映射。
+ *
+ * **配色方向是「越可信越绿」**：这是置信度，不是告警严重度。
+ * 复用 critical/warning 表达「高置信度」会让运维把
+ * 「这条证据很可靠」读成「这条证据很严重」—— 两个维度搞混的代价
+ * 是处置动作反了。
+ *
+ * 用调色板而非 antd 的 `Tag color="success"`：后者是**写死的那套绿**，
+ * 不随本项目双主题切换，在亮色卡片上对比度不达标。
+ * 四个值都取自 theme.ts 的语义色，那套已按 WCAG AA 4.5:1 校准过。
+ */
+const CONFIDENCE_BAND_COLOR: Record<ConfidenceBand, keyof Palette['semantic']> = {
+  high: 'success',
+  medium: 'info',
+  low: 'warning',
+  unassessable: 'neutral',
+}
+
+/**
+ * confidenceTooltip 拼出「这个数字是怎么来的」。
+ *
+ * **为什么必须把判据摊开给人看**：置信度是一个 0 到 1 之间的孤立数字，
+ * 没人能从 `0.65` 推出任何结论。而它是由「变化幅度档位 × 证据覆盖度」
+ * 算出来的——不展示这两项，用户就只能选择「信」或「不信」，
+ * 那这个数字还不如不给。
+ *
+ * 读 metadata 里的 `confidence_basis` / `confidence_coverage` 两个键，
+ * **原样展示、不解析**：basis 里含一句人话（如「变化 9.00 倍（band=strong）」），
+ * 解析它就是把文案当契约（详见 api/evidence.ts 的 confidenceBand 注释）。
+ */
+function confidenceTooltip(e: Evidence): string {
+  const parts: string[] = []
+  const basis = e.metadata?.confidence_basis
+  const coverage = e.metadata?.confidence_coverage
+  if (basis) parts.push(`判据：${basis}`)
+  if (coverage) parts.push(`证据覆盖度：${coverage} 种类型可评估`)
+  if (parts.length === 0) {
+    // 有置信度却没有判据键 = 后端填了值但没交代来源。
+    // 直说「缺判据」而不是省略：省略会让这个数字看起来是自明的。
+    parts.push('后端未提供判据明细，该数字无法复核')
+  }
+  return parts.join('；')
+}
 
 // SOURCE_LABEL 把来源码翻成中文；未收录的直接显示原值。
 //
@@ -229,6 +279,12 @@ function EvidenceCard({
   // 那会让人以为面板挂了，而真相是「这条证据本来就没有对应面板」。
   const extLinks = buildExternalLinks(evidence, uiEndpoints())
 
+  // 置信度分档。null 会落成 'unassessable'，但那条分支不渲染配色，
+  // 这里算出来只是为了下面有值时的分支能用 —— 提前算而不是
+  // 在 JSX 里写 confidence === null ? ... : confidenceBand(...)，
+  // 是为了让「什么时候用档位」在一处就能看全。
+  const band = confidenceBand(evidence.confidence)
+
   return (
     <Card
       size="small"
@@ -262,16 +318,32 @@ function EvidenceCard({
               </Tag>
             </Tooltip>
           )}
-          {/* confidence 为 null = 采集器没有这个判断能力（OPEN-M4-1），
+          {/* confidence 为 null = 没有基线可比、没资格评估（不是 0）。
               显示「未评估」而不是 0 或「—」：0 会被读成「没有支撑力」。 */}
           <Text type="secondary" style={{ fontSize: 12 }}>
             置信度{' '}
             {evidence.confidence === null ? (
-              <Tooltip title="M4 的采集器不评估置信度，RCA（M5）才有能力做">
+              <Tooltip title="这条证据没有事故前的基线可比，判据无法给出置信度。未评估不等于没有支撑力，只等于「没资格判断」。">
                 未评估
               </Tooltip>
             ) : (
-              evidence.confidence.toFixed(2)
+              <Tooltip title={confidenceTooltip(evidence)}>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: palette.semantic[CONFIDENCE_BAND_COLOR[band]],
+                  }}
+                >
+                  {evidence.confidence.toFixed(2)}
+                  <Text
+                    type="secondary"
+                    style={{ fontSize: 11, marginInlineStart: 4 }}
+                  >
+                    {CONFIDENCE_BAND_LABEL[band]}
+                  </Text>
+                </Text>
+              </Tooltip>
             )}
           </Text>
           {mdEntries.length > 0 && (

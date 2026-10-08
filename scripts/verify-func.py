@@ -113,6 +113,19 @@ def q(sql, db=DB):
     return out if rc == 0 else "ERR(%d)" % rc
 
 
+def qn(sql, db=DB):
+    """取单值**整数**查询结果，失败或非整数返回 -1。
+
+    为什么要这个助手而不是直接 int(q(...))：
+    「查询失败」「查到 0 条」「查到 3 条」是三件事，
+    但 int("ERR(1)") 会直接抛 ValueError 把整个脚本带走 ——
+    脚本崩在异常里，报告不落盘，看起来像「验收卡住了」而不是
+    「这条断言失败了」。返回 -1 让调用方能显式区分。
+    """
+    v = q(sql, db)
+    return int(v) if v.isdigit() else -1
+
+
 def req(method, path, body=None):
     """发 HTTP 请求，返回 (status, parsed_json_or_text)。"""
     data = None
@@ -288,26 +301,53 @@ class _MockCollector(object):
             pass
 
 
+# _PROM_SEEN 记住每条 RED 指标已见过的**最大**查询时刻。
+#
+# 为什么需要状态：Prometheus 采集器对每条指标查**两次**——
+# 事故窗口（End 较晚）与基线窗口（End 较晚减去一个窗口宽）。
+# 要让这两个查询返回不同的值，mock 必须能区分「哪个是本次（较晚）」。
+#
+# **不能用「计数器：第 1 次返 10、第 2 次返 1」** ——
+# 三条 RED 指标是交替查的（cur1, prev1, cur2, prev2, cur3, prev3），
+# 而三条指标共用同一对窗口时刻。按序号计数会把 cur2 判成 prev。
+#
+# 键用 query 串而不是指标名：三条 RED 指标的 PromQL 不同，
+# 用指标名区分需要在这里重复一份映射，而 PromQL 本身就是唯一键。
+_PROM_SEEN = {}
+
+
 def _prom_handler(path):
     """Prometheus /api/v1/query 的响应。
 
     值随「查询时刻」变化，好让 worker 的**基线对比**有东西可比。
-    判据：查询时刻早于事故起点算基线窗口（返回 1），否则算事故窗口（返回 10）。
+    判据：**较晚的那次查询返 10，较早的返 1** ⇒ change_ratio = 10.0（Strong）。
 
-    用 calendar.timegm 而不是 time.mktime：FIXED_START 带 Z（UTC），
-    而 mktime 把 struct_time 当**本地时间**解释 —— 本机在 UTC+8 时
-    锚点会偏 8 小时，基线窗口也被判成事故窗口，对比就恒为 1.0 倍，
-    断言「有变化幅度」会假失败。
+    **为什么不锚在 FIXED_START 上**（曾这么写，错在这里）：
+    FIXED_START 是**告警**的时间窗，而 worker 推导出的采集窗口是
+    `[now-maxLookback, now]`——ResolveWindow 会把过老的起点夹到 24h 内。
+    两者根本不是同一个区间（本机实测 FIXED_START=2026-10-03，
+    采集窗口却是 2026-10-07/08），于是基线查询与事故查询**都落在锚点之后**，
+    两边都返 10、ratio 恒为 1.0，变化幅度恒为 0 ⇒ 置信度恒为同一档。
+    症状是「断言『取值种类 >= 2』FAIL」，看起来像产品算错，
+    实际是 mock 造数造不出区分度。
+
+    **锚在「较晚/较早」这个真实不变量上**（事故窗口 End 晚于基线窗口 End，
+    见 prometheus.go 的 before = {Start-width, Start}）则不依赖任何具体日期，
+    采集窗口无论怎么推导都成立。
     """
-    import calendar
     import urllib.parse as up
     qs = up.parse_qs(up.urlparse(path).query)
     try:
         ts = int((qs.get("time") or ["0"])[0])
     except ValueError:
         ts = 0
-    anchor = calendar.timegm(time.strptime(FIXED_START, "%Y-%m-%dT%H:%M:%SZ"))
-    val = "1" if ts < anchor else "10"
+    key = (qs.get("query") or [""])[0]
+    seen = _PROM_SEEN.get(key)
+    if seen is None or ts > seen:
+        _PROM_SEEN[key] = ts
+        val = "10"
+    else:
+        val = "1"
     return {"status": "success",
             "data": {"resultType": "vector",
                      "result": [{"metric": {}, "value": [ts, val]}]}}
@@ -546,6 +586,90 @@ def m4_section(inc):
         st, ev3 = req("GET", "/api/v1/incidents/%d/evidence?type=bogus" % inc)
         check("非法 type -> 400 且错误信息列出合法值", st == 400,
               "status=%s body=%r" % (st, ev3))
+
+        # ============ F3：置信度落地（rca.Assign 接进真链路） ============
+        section("F5b-2 F3 置信度：rca.Assign 已接入真库链路")
+        # 这组断的是「编排层真的调了 Assign，且结果落到了库里」，
+        # **不是**「rca 包内部算得对」——后者由 internal/rca 的单测负责。
+        # 两者必须分开：rca 单测全绿而这里全红，说明线没接上；
+        # 这里全绿而 rca 单测红，说明 rca 被改坏了。混在一起两边都说不清。
+        items = (ev.get("evidence", []) if isinstance(ev, dict) else []) or []
+        # n_ev 是字符串（q 的返回），n_ev_int 是同一数字的整数形态。
+        # 分开而不是就地转型：n_ev 后面还要打日志给人看，
+        # 就地改类型会把「原始查询输出」变成「派生值」，两者再也分不开。
+        n_ev_int = int(n_ev) if n_ev.isdigit() else -1
+
+        n_conf = qn("SELECT count(*) FROM evidence "
+                    "WHERE incident_id = %s AND confidence IS NOT NULL" % inc)
+        check("非空 confidence 条数 > 0", n_conf > 0, "非空=%d" % n_conf)
+
+        # 只断「> 0」会被恒填 0.45 的退化实现整条放行 ——
+        # 那与 F3 之前「采集器一律留空」的差别只在于多了一个假数字。
+        n_distinct = qn("SELECT count(DISTINCT confidence) FROM evidence "
+                        "WHERE incident_id = %s AND confidence IS NOT NULL" % inc)
+        check("confidence 取值种类 >= 2", n_distinct >= 2, "distinct=%d" % n_distinct)
+
+        # 合法档位来自 docs/S1-置信度判据设计.md 的 coverageBase 表
+        # {1:0.45, 2:0.60, 3:0.75, 4:0.90} + WeakCap 0.50 + StrongBonus 0.05。
+        # 手写成常量而非从文档解析：解析 Markdown 表格进验收脚本，
+        # 是把「判据依赖被测之外的文本」变成常态，那条文本一改就假红。
+        legal = (0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95)
+        n_illegal = qn("SELECT count(*) FROM evidence WHERE incident_id = %s "
+                       "AND confidence IS NOT NULL AND confidence NOT IN (%s)"
+                       % (inc, ",".join("%.2f" % v for v in legal)))
+        check("confidence 取值全部落在判据设计的档位内",
+              n_illegal == 0, "越界=%d" % n_illegal)
+
+        # 「不可评估」必须落成 NULL。写成 0 的话，页面上「没资格判断」
+        # 与「明确没有支撑力」会长得一模一样。
+        n_zero = qn("SELECT count(*) FROM evidence "
+                    "WHERE incident_id = %s AND confidence = 0" % inc)
+        check("未评估的证据写 NULL 而不是 0", n_zero == 0, "写成 0 的条数=%d" % n_zero)
+
+        n_nobasis = qn("SELECT count(*) FROM evidence WHERE incident_id = %s "
+                       "AND confidence IS NOT NULL AND (metadata->>'confidence_basis' IS NULL "
+                       "OR metadata->>'confidence_coverage' IS NULL)" % inc)
+        check("每条非空 confidence 都带判据来源与覆盖度（人工可复核）",
+              n_nobasis == 0, "缺键=%d" % n_nobasis)
+
+        # 分母固定 6 = 证据类型总数，且**只数可评估的类型**。
+        # 若把不可评估的类型也计进分母，会出现「采到 3 条但全无基线」
+        # 被写成覆盖度 3/6 —— 那是把「采到了」说成「判断得了」。
+        n_badcov = qn("SELECT count(*) FROM evidence WHERE incident_id = %s "
+                      "AND confidence IS NOT NULL AND ("
+                      "metadata->>'confidence_coverage' IS NULL "
+                      "OR metadata->>'confidence_coverage' NOT LIKE '%%/6')" % inc)
+        check("覆盖度分母固定为 6", n_badcov == 0, "分母不为 6 的条数=%d" % n_badcov)
+
+        # band 真的参与了 Compose？把「变化倍数 → confidence」排序后
+        # 验不下降。前提是先确认存在 2 种以上不同倍数，
+        # 否则单点序列恒满足「不降」，这条就成了恒绿断言。
+        def _ratio_of(i):
+            v = (i.get("metadata") or {}).get("change_ratio")
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        pairs = sorted((_ratio_of(i), i.get("confidence")) for i in items
+                       if i.get("confidence") is not None and _ratio_of(i) is not None)
+        ratios = sorted(set(r for r, _ in pairs))
+        check("存在 2 种以上不同变化幅度的证据（band 判据可被区分）",
+              len(ratios) >= 2, "不同倍数=%s" % ratios)
+        if len(ratios) >= 2:
+            mono = all(pairs[k][1] <= pairs[k + 1][1] for k in range(len(pairs) - 1))
+            check("变化幅度越大 confidence 不越低（band 参与 Compose）",
+                  mono, "(倍数, 置信度)=%s" % [(r, c) for r, c in pairs])
+
+        # 仓储层不能把字段吃掉：DB 里有的，API 必须回传。
+        n_api = sum(1 for i in items if i.get("confidence") is not None)
+        check("API 回传的非空条数与库内一致",
+              n_conf == n_api, "db=%d api=%d" % (n_conf, n_api))
+        # 且必须以 null 区分「未评估」，不能序列化成 0。
+        n_null_api = sum(1 for i in items if "confidence" in i and i["confidence"] is None)
+        check("API 对未评估的证据回传 null（而非 0）",
+              n_null_api == max(0, n_ev_int - n_conf),
+              "api null=%d 期望=%d" % (n_null_api, max(0, n_ev_int - n_conf)))
 
         # --- timeline 有 evidence_found ---
         st, det = req("GET", "/api/v1/incidents/%d" % inc)

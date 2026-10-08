@@ -1323,13 +1323,73 @@ def main() -> int:
         check("M4 证据 timestamp 无「未来时间」（未用采集时刻兜底）",
               _sane == "0", "异常条数=%s" % _sane)
 
-        # confidence 本期**必须为空**（OPEN-M4-1）：填 1.0 等于宣称
-        # 「这条证据确凿」而没有依据。断言「全空」而不是「全为 1.0」，
-        # 是把「未评估」与「确凿」两件事分开。
+        # ---- F3：置信度在容器链路必然全空，且必须说清「为什么」 ----
+        #
+        # 裁定（2026-10-07，禹）：保持「全空」这条结论，但把它从
+        # 一句无依据的断言改成**有因的**断言。
+        #
+        # 为什么容器链路必然全空——完整推算链（任何一环变了结论就变，
+        # 所以下面每一条断言都绑在某一环上，而不是笼统断「全空」）：
+        #   1. 告警 startsAt = 2026-01-01T00:00:00Z（见本节投告警处），
+        #      ResolveWindow 走「情况二」——start 早于 maxLookback(24h)，
+        #      于是窗口被夹成 [now-24h, now]，**宽 24h**。
+        #   2. Loki 基线窗口 = [now-48h, now-24h)。
+        #   3. 本脚本灌入的 18 条日志时间戳全在 now 附近（毫秒级），
+        #      落在**事故窗口**里，基线窗口 0 条。
+        #   4. Loki 走 baselineEmpty 分支：写 novelty/burst，**不写 change_ratio**。
+        #   5. rca.Assess 第②步「change_ratio 缺失」→ BandUnassessable
+        #      → Assign 保持 nil。
+        # ⇒ 7 条 loki 证据的 confidence 全是 NULL。
+        #
+        # 关键：**「全空」本身不能区分「Assign 没被调用」与
+        # 「Assign 调了但输入不可评估」**——两种情况下都是全空。
+        # 所以必须配一条交叉验证：worker 日志里出现 rca.Stats 的
+        # confidence 字段，且 unassessable > 0、coverage=0/6。
+        # 日志里有这个字段 ⇒ Assign 被调用了 ⇒ 全空是判据在起作用，
+        # 而不是接线漏了。这与 verify-func.py 的断言互为对照：
+        # 那里非空（mock 数据源两窗口都返东西），这里全空（真 Loki 灌不进基线）。
         _cf = sql_val("SELECT count(*) FROM evidence "
                       "WHERE confidence IS NOT NULL;")
-        check("M4 evidence.confidence 保持为空（OPEN-M4-1）", _cf == "0",
-              "非空条数=%s" % _cf)
+        check("容器链路 evidence.confidence 全空（Loki 基线窗口无数据，见下因果断言）",
+              _cf == "0", "非空条数=%s" % _cf)
+
+        # 因果断言 1：这些证据确实**没有** change_ratio 键。
+        # 若这一条红而上面那条也红，说明 Loki 采集器改了行为
+        # （比如开始写 change_ratio），那「全空」就变成真缺陷了。
+        _no_ratio = sql_val(
+            "SELECT count(*) FROM evidence WHERE metadata ? 'change_ratio';")
+        check("容器内证据均无 change_ratio 键（基线窗口无数据，非采集器缺陷）",
+              _no_ratio == "0", "带 change_ratio 的条数=%s" % _no_ratio)
+
+        # 因果断言 2：有 novelty/burst 键的证据，其 confidence 必须是 NULL。
+        # 这条是「不可评估绝不写 0」的容器侧对照——
+        # 只断「全空」的话，写成 0 也满足。
+        _nov = sql_val("SELECT count(*) FROM evidence "
+                       "WHERE (metadata ? 'novelty' OR metadata ? 'burst') "
+                       "AND confidence IS NOT NULL;")
+        check("novelty/burst 类证据的 confidence 为 NULL（未评估≠0）",
+              _nov == "0", "被写入数=%s" % _nov)
+
+        # 因果断言 3（交叉验证，最关键的一条）：worker 日志里有
+        # rca.Stats 的输出。没有它，上面两条都可能是「Assign 压根没跑」。
+        rc_c, out_c = docker("logs", "--tail", "300", "iip-worker", timeout=60)
+        _stat = [ln.strip() for ln in out_c.splitlines() if "confidence=" in ln]
+        check("M6 worker 日志含 rca.Stats 的 confidence 字段（Assign 已接线）",
+              bool(_stat), "实际: %s" % (_stat[-1][:150] if _stat else "无"))
+        if _stat:
+            _last = _stat[-1]
+            check("Stats 显示全部不可评估且覆盖度为 0（全空是判据在起作用）",
+                  "assigned=0" in _last and "unassessable=0" not in _last
+                  and "coverage=0/6" in _last,
+                  "实际: %s" % _last[:200])
+
+        # 因果断言 4：没有 coverage_basis/coverage_coverage 键。
+        # Assign 的覆写路径会写这两个键；一条都没有 ⇒ 它一次都没写过值。
+        _basis = sql_val("SELECT count(*) FROM evidence "
+                         "WHERE metadata ? 'confidence_basis' "
+                         "OR metadata ? 'confidence_coverage';")
+        check("容器内证据无 confidence_basis/coverage 键（Assign 未覆写任何一条）",
+              _basis == "0", "带键条数=%s" % _basis)
 
         w("  证据按来源分布：")
         rc_d, out_d = docker(

@@ -93,6 +93,62 @@ export interface ListEvidenceParams {
   limit?: number
 }
 
+/** ConfidenceBand 是置信度的**展示档位**，只影响配色与文案，不影响数值。 */
+export type ConfidenceBand = 'high' | 'medium' | 'low' | 'unassessable'
+
+/** CONFIDENCE_BAND_LABEL 是四档的中文标签。 */
+export const CONFIDENCE_BAND_LABEL: Record<ConfidenceBand, string> = {
+  high: '强',
+  medium: '中',
+  low: '弱',
+  unassessable: '未评估',
+}
+
+/**
+ * CONFIDENCE_BAND_THRESHOLD 是「高」与「中」的分界。
+ *
+ * **为什么不按后端的 coverageBase 档（0.45/0.60/0.75/0.90）分界**：
+ * 那些是**覆盖度**的档位，置信度是「档位 × 覆盖度」的合成结果，
+ * 两者的分界点不在同一处。前端若照抄后端常量，改后端规则就会连带改前端，
+ * 而用户看到的是「0.62 算强还是算中」这种从没被定义过的问题。
+ *
+ * 取 0.75 的理由：合成后的实际取值集合是
+ * {0.45,0.50,0.55,0.60,0.65,0.70,0.75,0.80,0.85,0.90,0.95}，
+ * 0.75 把它们切成「偏强的 4 档」与「偏弱的 7 档」，
+ * 落在分界两侧的取值都是 0.70 与 0.75，粒度已经是最细的了。
+ */
+const CONFIDENCE_HIGH_FROM = 0.75
+
+/** CONFIDENCE_MEDIUM_FROM 是「中」与「弱」的分界。 */
+const CONFIDENCE_MEDIUM_FROM = 0.6
+
+/**
+ * confidenceBand 把置信度数值映射到展示档位。
+ *
+ * **三条设计约束**（每条都对应一个真实的踩坑形态）：
+ *
+ * 1. **null 单列一档**，不参与数值比较。
+ *    把 null 当 0 会显示成「弱」—— 那等于说这条证据**没有支撑力**，
+ *    而真相是「没有基线，没资格判断」。两者在处置上的含义完全相反。
+ *
+ * 2. **不解析 `confidence_basis` 里的 `（band=strong）` 文本**。
+ *    那是给人看的说明文案，不是给程序读的字段。后端改一次措辞
+ *    （比如把 band 换成中文），前端的分档就会静默全错，
+ *    而且不会有任何报错——颜色还在，只是全变成了同一档。
+ *
+ * 3. **NaN 与越界值归入「弱」而不是「强」**。
+ *    `NaN >= 0.75` 是 false，天然落到 else；但显式处理
+ *    是为了让「越界的高值」（比如后端算错成 1.2）不会因为
+ *    「越大越可信」的单调假设而被显示成最强。
+ */
+export function confidenceBand(v: number | null | undefined): ConfidenceBand {
+  if (v === null || v === undefined) return 'unassessable'
+  if (!Number.isFinite(v)) return 'low'
+  if (v >= CONFIDENCE_HIGH_FROM) return 'high'
+  if (v >= CONFIDENCE_MEDIUM_FROM) return 'medium'
+  return 'low'
+}
+
 export async function fetchEvidence(
   incidentId: number,
   params: ListEvidenceParams = {},
