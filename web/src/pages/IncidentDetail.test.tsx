@@ -104,6 +104,31 @@ async function ready() {
   await screen.findByRole('button', { name: /转为已缓解/ })
 }
 
+/**
+ * 这三条 422 用例的总时长预算（vitest 默认 5000ms 不够）。
+ *
+ * **为什么需要单独放宽，而不是改 vitest.config.ts 全局设testTimeout**：
+ * 全局放宽会让「某条用例真的死锁」也要等满20s 才报错，拖慢整个套件反馈；
+ * 而这里放宽的是**总时长**，不是判据阈值 —— 被测行为本身的阈值
+ * （`unlockedMs < 1000`）一个字没动。
+ *
+ * **为什么默认 5000ms 确实不够**：打点实测（2026-10-08），
+ * 每条用例的第一步 `ready()` 就要 5.7–6.0 秒——
+ * 它 `waitFor(/处置/)` 再 `findByRole(/转为已缓解/)`，要等 React Query
+ * 把详情请求跑完并让 antd Table 完成 jsdom 下的布局测量。
+ * 这是环境固有成本，与「loading 是否被 message 拖住」这个被测行为无关。
+ *
+ * 实测分段（full run，--testTimeout=60000）：
+ *   ready=5706~6020ms | click=2532~2694ms | waitMsg=10~15ms
+ *   waitUnlock=15ms | click2=2693ms | waitPost2=4ms
+ * 注意 waitMsg / waitUnlock / waitPost2 三项都在 15ms 以内 ——
+ * 这才是判据真正关心的量，余量约 60 倍。
+ *
+ * 20000ms 的余量：按最坏实测（6.0s ready + 2.7s click × 2 + 等待）约 12s，
+ * 留 ~1.6 倍给机器抖动。**不写 15000 是因为余量太薄，机器一忙就假红。**
+ */
+const SLOW_MS = 20_000
+
 /** 找出 transition 那次 POST 的请求体。 */
 function transitionBody(fetchMock: ReturnType<typeof okFetch>) {
   const call = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
@@ -200,7 +225,7 @@ describe('IncidentDetail 后端 422', () => {
     // 判据是「界面上出现了后端那句原文」，不是「出现了一个错误提示」。
     // 前端自造的文案永远不包含服务端的具体状态名与建议路径。
     await waitFor(() => expect(screen.getByText(new RegExp(SERVER.slice(0, 24)))).toBeInTheDocument())
-  })
+  }, SLOW_MS)
 
   it('422 时不谎报成功（不出现「已流转到…」提示）', async () => {
     const fetchMock = failFetch('流转被拒：状态已被他人改为 resolved')
@@ -215,7 +240,7 @@ describe('IncidentDetail 后端 422', () => {
     // 失败时若还弹成功提示，用户会以为问题已解决而不再跟进 ——
     // 这是比「报错文案不好看」严重得多的后果。
     expect(screen.queryByText(/已流转到/)).toBeNull()
-  })
+  }, SLOW_MS)
 
   // **本批次修掉的缺陷的回归锁**（手册 §4.6.1）。
   //
@@ -223,12 +248,14 @@ describe('IncidentDetail 后端 422', () => {
   // duration）；修后应在 message 时长之前解除。判据是**带阈值的耗时**，不是
   // 「最终会恢复」—— 修前也会恢复，只是慢 3 秒，只验恢复会假通过。
   //
-  // **阈值为什么是 2000ms 而不是 1000ms**：判据真正要区分的是
-  // 「随 message 解除（≈3s）」与「请求结束即解除（远小于 3s）」，
-  // 1000ms 并不比 2000ms 更有区分度—— 它同样远低于 3s。
-  // 而 1000ms 在**全量用例并行**时会被挤破（实测1080ms，单跑 3次全绿）：
-  // 本条测的是墙钟耗时，机器一忙就红，且红的不是产品。
-  // 2000ms 仍稳稳低于 3s，回归照样抓得住。
+  // **阈值为什么是 1000ms**：判据真正要区分的是「随 message 解除（≈3s）」
+  // 与「请求结束即解除（实测 15ms，见下方计时起点注释）」。
+  // 1000ms 稳稳落在这两者中间，对 ≈3s 的回归还留着 3 倍余量。
+  //
+  // 历史教训（2026-10-08）：阈值曾是 2000ms，**5 次全量并行稳定假红**
+  // （unlockedMs 落在 2632–2777ms 的窄带里，是确定性放大不是随机抖动）。
+  // 原因不是产品 —— 判据把 userEvent.click 的 2.7s 模拟开销也算进了预算。
+  // 「放宽阈值」是错的修法：它只是把缺陷藏起来，换个机器就又红了。
   it('422 后 message 时长前解锁且能立即再操作（loading 不被 message 时长拖住）', async () => {
     const fetchMock = failFetch('流转被拒：状态已被他人改为 resolved')
     vi.stubGlobal('fetch', fetchMock)
@@ -245,16 +272,22 @@ describe('IncidentDetail 后端 422', () => {
       ).length
     expect(loadingCount()).toBe(0)
 
-    const t0 = Date.now()
     await userEvent.click(transBtn('已缓解'))
     await waitFor(() => expect(screen.getByText(/流转被拒/)).toBeInTheDocument())
 
-    // 等 loading 解除，并记下耗时。**上限 2000ms 是本条的判据本体**：
-    // 超过它说明 loading 又被 message 生命周期拖住了（回归）。
-    // 阈值依据见上方注释：判据要区分的是「≈3s」与「远小于 3s」。
-    await waitFor(() => expect(loadingCount()).toBe(0), { timeout: 2000 })
-    const unlockedMs = Date.now() - t0
-    expect(unlockedMs).toBeLessThan(2000)
+    // **计时起点在 message 出现之后，不在点击之前** —— 这条判据真正要区分的
+    // 两个量是「loading 随 message 解除（≈3s）」与「请求结束即解除」，
+    // 两者都发生在**消息已经显示**之后。而 `await userEvent.click(...)` 在
+    // jsdom 里要逐个模拟 pointer/mouse/click 事件，全量并行实测占
+    // **2702ms**，与产品无关（打点实测三段：click=2702 / msg=12 / unlock=15）。
+    //
+    // 为什么必须挪：把 click 的模拟开销算进 2000ms 预算，等于让判据替测试
+    // 框架的固有成本买单 —— 阈值无论调到多少都是在赌机器够闲。
+    // 挪起点后余量从「-700ms（欠预算）」变成**约 60 倍**（实测 15ms 对 1000ms）。
+    const tUnlock = Date.now()
+    await waitFor(() => expect(loadingCount()).toBe(0), { timeout: 1000 })
+    const unlockedMs = Date.now() - tUnlock
+    expect(unlockedMs).toBeLessThan(1000)
 
     // 解除之后必须真能再操作：解锁 ≠ 可用。
     const again = await screen.findByRole('button', { name: /转为\s*已解决/ })
@@ -262,5 +295,5 @@ describe('IncidentDetail 后端 422', () => {
     await waitFor(() =>
       expect(fetchMock.mock.calls.filter(([, i]) => i?.method === 'POST').length).toBe(2),
     )
-  })
+  }, SLOW_MS)
 })
