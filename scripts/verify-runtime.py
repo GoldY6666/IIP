@@ -97,6 +97,15 @@ WORKER_POLL = "1s"            # 加快轮询，让心跳更快出 poll_count
 
 DBNAME = "iip_e2e_" + uuid.uuid4().hex[:8]
 
+# SQL/psql 超时。
+# 为什么可配：CREATE DATABASE 在慢 IO 环境（Windows + 沙箱文件系统过滤层）
+# 实测恒定 ~122 秒，而原先固定 30 秒必然超时 —— 而超时报错会长得
+# 「产品建库失败」，把环境问题误判成缺陷。这里给足余量，
+# 需要收紧时用 IIP_PSQL_TIMEOUT 覆盖，不必改代码。
+PSQL_TIMEOUT = int(os.environ.get("IIP_PSQL_TIMEOUT", "300"))
+# 进程/端口等待超时：server 启动要连库建连接池，PG 若正在 fsync 会更慢。
+WAIT_TIMEOUT = int(os.environ.get("IIP_WAIT_TIMEOUT", "90"))
+
 lines = []
 results = []   # (name, status, detail)  status: PASS/FAIL/BLOCKED
 
@@ -121,14 +130,19 @@ def port_free(port):
             return False
 
 
-def psql(sql, db="postgres", timeout=30):
-    """执行 SQL，返回 (rc, stdout, stderr)。"""
+def psql(sql, db="postgres", timeout=None):
+    """执行 SQL，返回 (rc, stdout, stderr)。
+
+    timeout=None 表示用PSQL_TIMEOUT（默认 300s）。
+    显式传值则用传入值 —— 调用方若知道这条语句是快查，可自行收紧。
+    """
     env = dict(os.environ)
     env["PGPASSWORD"] = PG_PASS
     cmd = [PSQL, "-h", PG_HOST, "-p", str(PG_PORT), "-U", PG_USER,
            "-d", db, "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                       errors="ignore", timeout=timeout)
+                       errors="ignore",
+                       timeout=PSQL_TIMEOUT if timeout is None else timeout)
     return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
 
 
@@ -256,10 +270,11 @@ srv = subprocess.Popen([bin_server], cwd=SRC, env=server_env,
 record("iip-server 进程已拉起", "PASS", f"pid={srv.pid}")
 
 port_num = int(HTTP_ADDR.split(":")[1])
-if wait_port("127.0.0.1", port_num, timeout=30):
+if wait_port("127.0.0.1", port_num, timeout=WAIT_TIMEOUT):
     record(f"HTTP 端口 {HTTP_ADDR} 开始监听", "PASS")
 else:
-    record(f"HTTP 端口 {HTTP_ADDR} 开始监听", "FAIL", "30s 内未监听")
+    record(f"HTTP 端口 {HTTP_ADDR} 开始监听", "FAIL",
+           "%ds 内未监听" % WAIT_TIMEOUT)
 
 # ---------------------------------------------------------------- 探活
 log("")
@@ -274,7 +289,7 @@ else:
 # 用二进制自带的 --healthcheck 子命令（与 compose healthcheck 同一路径）
 r = subprocess.run([bin_server, "--healthcheck", f"--http-addr={HTTP_ADDR}"],
                    cwd=SRC, env=server_env, capture_output=True,
-                   text=True, errors="ignore", timeout=30)
+                   text=True, errors="ignore", timeout=WAIT_TIMEOUT)
 if r.returncode == 0:
     record("二进制定 --healthcheck 子命令 rc=0", "PASS", f"out={(r.stdout or '').strip()!r}")
 else:
@@ -337,11 +352,13 @@ INSERT_COLS = ("INSERT INTO alerts "
                "(fingerprint, source, severity, status, starts_at, raw_payload) ")
 
 
-def psql_val(sql, db="postgres", timeout=30):
+def psql_val(sql, db="postgres", timeout=None):
     """执行 SQL 并返回「第一行第一列」的纯值。
 
     psql -c 会把命令标签（如 INSERT 0 1）一并输出，且 -t -A 下仍可能有多行。
     这里取第一行的非空内容，避免把命令标签误当结果。
+
+    timeout=None 表示用 PSQL_TIMEOUT，理由同 psql()。
     """
     rc, out, err = psql(sql, db=db, timeout=timeout)
     first = ""

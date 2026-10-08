@@ -91,12 +91,19 @@ def port_open(p):
 
 
 def psql(sql, db="postgres"):
+    """执行 SQL，返回 (rc, stdout)。
+
+    超时取 PSQL_TIMEOUT（默认 300s，可用 IIP_PSQL_TIMEOUT 覆盖）。
+    为什么放大：CREATE/DROP DATABASE 在慢 IO 环境实测 ~102s / ~38s，
+    原先固定 120s 恰好压不住 —— 而超时报错会长得「产品建库失败」，
+    把环境问题误判成缺陷。
+    """
     env = {**os.environ, "PGPASSWORD": "dev"}
     p = subprocess.run(
         [os.path.join(PG_BIN, "psql.exe"), "-h", "127.0.0.1", "-p", str(PORT_PG),
          "-U", "postgres", "-d", db, "-t", "-A", "-c", sql],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        env=env, timeout=120)
+        env=env, timeout=PSQL_TIMEOUT)
     return p.returncode, (p.stdout or "").strip()
 
 
@@ -203,6 +210,10 @@ def rev_alert_name(alert_id):
 EXE_WORKER = os.path.join(tempfile.gettempdir(), "_func_iip-worker.exe")
 PORT_PROM = int(os.environ.get("IIP_FUNC_PROM_PORT", "9099"))
 PORT_LOKI = int(os.environ.get("IIP_FUNC_LOKI_PORT", "3100"))
+
+# psql 超时：CREATE/DROP DATABASE 在慢 IO 环境实测 ~102s / ~38s，
+# 原先固定 120s 压不住。可用 IIP_PSQL_TIMEOUT 覆盖（理由见 psql() 文档串）。
+PSQL_TIMEOUT = int(os.environ.get("IIP_PSQL_TIMEOUT", "300"))
 # worker 轮询间隔压到 1s：门禁要的是「2 分钟内 ≥5 条证据」，
 # 用默认 30s 会让这一段白等 30 秒才跑第一轮。
 WORKER_POLL = "1s"
@@ -1090,9 +1101,16 @@ def main():
                 psql("DROP DATABASE IF EXISTS %s WITH (FORCE)" % DB)
             except Exception:
                 pass
-            subprocess.run([os.path.join(PG_BIN, "pg_ctl.exe"), "-D", PG_DATA,
-                            "stop", "-m", "fast", "-t", "300"],
-                           capture_output=True, timeout=360)
+            # 停库：慢 IO 下 data 目录 fsync 实测要数百秒，所以给足窗口。
+            # 必须 try/except：pg_ctl 超时抛 TimeoutExpired 会**中断整个 finally**，
+            # 导致下面写 OUT 的代码永不执行 —— 报告直接丢失。
+            # 停没停干净以端口实际状态为准，不以 pg_ctl 的 rc 为准。
+            try:
+                subprocess.run([os.path.join(PG_BIN, "pg_ctl.exe"), "-D", PG_DATA,
+                                "stop", "-m", "fast", "-t", "600"],
+                               capture_output=True, timeout=660)
+            except subprocess.TimeoutExpired:
+                w("[end] pg_ctl stop 超时（不代表库没停，看下面端口状态）")
             w("[end] PG 已停（仍监听=%s）" % port_open(PORT_PG))
         if os.path.exists(EXE):
             try:
