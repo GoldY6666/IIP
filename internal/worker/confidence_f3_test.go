@@ -51,15 +51,6 @@ func noveltyEv(t evidence.Type, src string, ts time.Time) evidence.Evidence {
 	}
 }
 
-// confOf 取第 i 条落库证据的 confidence 指针。
-func confOf(t *testing.T, evs []evidence.Evidence, i int) *float64 {
-	t.Helper()
-	if i >= len(evs) {
-		t.Fatalf("落库证据只有 %d 条，取不到第 %d 条", len(evs), i)
-	}
-	return evs[i].Confidence
-}
-
 // byType 按证据类型取落库结果里**唯一**的那一条。
 //
 // **刻意不按落库索引取**：evidence.Registry.Collectors() 按来源字典序
