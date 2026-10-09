@@ -46,10 +46,20 @@ export default defineConfig({
     //   CI：ubuntu runner 没有系统 Chrome → 必须用 Playwright 自带的 chromium
     // 写成硬编码 'chrome' 会让 CI 那个 job 必然红，而「CI 里加了个
     // 跑不通的 e2e job」比不加更糟：它会让人以为 E2E 被 CI 覆盖了。
-    // CI 侧设 PLAYWRIGHT_CHANNEL='' 即表示「用自带的」。
-    ...(process.env.PLAYWRIGHT_CHANNEL !== undefined
-      ? { channel: process.env.PLAYWRIGHT_CHANNEL || undefined }
-      : { channel: 'chrome' }),
+    //
+    // **哨兵值 'none' 表示「用自带的」**（2026-10-09 修正）：
+    // 之前 CI 侧设的是空串 ''，语义靠 `|| undefined` 兜。
+    // 但「YAML 空串经环境变量后是否仍被保留为 ''（而非 unset）」没验证过 ——
+    // 若被当成 unset 就会回落到 channel:'chrome'，而 runner 没有系统
+    // Chrome ⇒ e2e 挂。改成显式哨兵后不依赖这层语义：
+    //   未设      → 本机，用系统 Chrome
+    //   'none'    → CI，用 Playwright 自带
+    //   其他值    → 显式指定（将来要试 chrome-beta 之类时用）
+    ...(process.env.PLAYWRIGHT_CHANNEL === undefined
+      ? { channel: 'chrome' }
+      : process.env.PLAYWRIGHT_CHANNEL === 'none'
+        ? {}
+        : { channel: process.env.PLAYWRIGHT_CHANNEL }),
     headless: true,
     // 断言中文按钮时不能靠精确名（antd 会插空格），
     // 但失败时要能看清现场。

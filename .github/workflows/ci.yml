@@ -30,6 +30,33 @@ jobs:
   backend:
     name: backend (go)
     runs-on: ubuntu-latest
+    # **真库集成测试要真 PG**（2026-10-09 静态审查补，硬伤④）：
+    # 之前 backend job 既无 services.postgres 也没设 IIP_TEST_PG_URL，
+    # internal/testsupport/pg.go:51-57 的 SkipIfNoPG 会 t.Skipf →
+    # CI 上真库测试一条不跑，go test 仍 rc=0（**恒绿**）。
+    # 这直接违反 M6 DoD「真库 SKIP=0」，且让「ci.yml 跑过」这个信号本身失效。
+    #
+    # 用 service 容器起 PG16；testsupport 自己 CREATE DATABASE iip_testsession
+    # （pg.go:183 createDatabaseIfAbsent，存在则跳过），adminDSN 用默认
+    # postgres 库即可，host 名 = service 名 `postgres`（Actions 网络内解決）。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # 健康检查必须做：没有它，go test 起来时 PG 还没 ready，
+        # 表现为「connection refused」，而真因是服务没起完。
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      IIP_TEST_PG_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
     defaults:
       run:
         working-directory: .
@@ -59,7 +86,21 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          # 版本必须与 .golangci.yml 的配置格式（v1 格式）兼容
+          # **版本与 action 的兼容矩阵（2026-10-09 联网核实 action README）**：
+          #   v4.0.0+ 要求前面已有 actions/setup-go（本文件已满足）
+          #   v6.0.0+ 移除 annotations 与默认输出格式，**仍支持 golangci-lint v1.x**
+          #   v7.0.0 才是 v2 only
+          # ⇒ `@v6` + v1.x 是可用组合，**不要因为「v6 配 v1 很怪」就升到 @v7**
+          #（升了必须同时把 .golangci.yml 迁成 `version: "2"` 格式）。
+          #
+          # `version` 是**必填项**（action README 标 required），不存在「默认安装」。
+          #
+          # ⚠️ **已知风险（本地无法验证，首次 CI 实跑才能确认）**：
+          # v1.61.0 是 2024-09 的版本，构建它的 Go 版本低于 go.mod 声明的
+          # `go 1.23` 时，golangci-lint 会直接报
+          #「the Go language version used to build golangci-lint is lower than
+          # the targeted Go version」并退出。**真出现时的修法是升 v1.x 最新版
+          # （如 v1.64.x，仍是 v1 配置格式），不是改 go.mod 降版本。**
           version: v1.61.0
           args: --config=./.golangci.yml --timeout=5m
           # 只在 Go 代码变更时跑由 action 自行判断，这里保持默认
@@ -68,7 +109,16 @@ jobs:
         run: go build ./...
 
       - name: Test (race + coverage)
-        run: go test -race -coverprofile=coverage.out ./...
+        # **`-p 1` 不可省**（2026-10-09 静态审查补）：
+        # internal/testsupport/pg.go:104 自己写着「若将来要并行，需改为每个子测试
+        # 各自调 NewDB」—— 现在多个包会共用同一个 iip_testsession 库去 CREATE SCHEMA，
+        # 并行时互相把对方的 schema 建掉/删掉，整包全挂。
+        # 宿主门禁 m4_final_gate.py 早就用 -p 1，**这里必须与它一致**，
+        # 否则「本地绿、CI 红」且报错完全不指向真因。
+        #
+        # 特征识别：并行失败时每条用例都 <2s（本机正常 10s/条），
+        # **看起来极像「数据库连不上」，极易误判成产品缺陷**。
+        run: go test -p 1 -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage artifact
         if: always()
@@ -138,22 +188,17 @@ jobs:
     # E2E 要起 PG + 编译 Go 二进制 + 跑浏览器，比前端 job 重
     timeout-minutes: 20
 
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5434:5432
-        # 健康检查必须做：没有它，stack.mjs 起来时 PG 还没 ready，
-        # 表现为「connection refused」，而真因是服务没起完。
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    # **刻意不用 services.postgres 容器**（2026-10-09 静态审查修正）：
+    # web/e2e/stack.mjs 自己就.initdb + 自己 spawn postgres，占的也是 5434
+    # （stack.mjs:137`spawn(exe('postgres'), [..., '-p', String(pgPort)])`），
+    # 而 stack.mjs:119-124 在 `portBusy(pgPort)` 为真时直接 `process.exit(2)`。
+    # ⇒ 声明一个映射 5434 的 service 容器，**一起来就把stack.mjs 顶死**，
+    # e2e job 必然红，且报错是「端口已占用」，完全不指向真因。
+    #
+    # 用runner 预装的 PG 二进制即可（ubuntu-24.04 自带 PG 16.13/16.15，
+    # 路径 /usr/lib/postgresql/16/bin，与下面 E2E_PG_BIN 一致）。
+    # 注意：**预装的 PG 服务本身是 disabled at boot，但我们要的是二进制
+    # 而不是那个服务** —— stack.mjs 用 initdb 在 /tmp 建自己的实例。
 
     defaults:
       run:
@@ -167,9 +212,15 @@ jobs:
       E2E_PG_PASSWORD: postgres
       E2E_GO_BIN: /usr/local/go/bin/go
       E2E_SERVER_BIN: /tmp/iip-e2e-server
-      # CI 上没有系统 Chrome，必须用 Playwright 自带的 chromium。
+      # CI 上没有「必须用系统 Chrome」的理由（那|本机约束），必须用
+      # Playwright 自带的 chromium。
       # 本机反之（无网络，装不了浏览器）—— 所以 config 里做成可覆盖。
-      PLAYWRIGHT_CHANNEL: ''
+      #
+      # **用哨兵值 'none' 而不是空串**（2026-10-09 修正）：
+      # 空串经过 YAML → 环境变量这一层是否被保留为 ''（而非 unset）
+      # **未经验证**；若被当成 unset，config 会回落到 channel:'chrome'，
+      # 而 runner 上没有系统 Chrome ⇒ e2e 挂。哨兵值不依赖这层语义。
+      PLAYWRIGHT_CHANNEL: none
 
     steps:
       - name: Checkout
