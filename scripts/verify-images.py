@@ -28,10 +28,18 @@
   IIP_CHROME_BIN   宿主 Chrome 绝对路径。**不设则跳过无头浏览器截图**
                    （4.8.2 段，OPEN-M5-8）。设了才对compose 起着的
                    8080 端口截图，并断言截图颜色种类 >= 4（非空白页）
+  IIP_NODE_BIN     托管 node 的绝对路径。不设则回退 PATH 查找；
+                   找不到则跳过 S3 交互截图（4.8.3 段）。
+                   **S3 不依赖 IIP_CHROME_BIN**：它自己带默认路径
+                   （宿主 Chrome 的常见安装位置），需要 node +
+                   已装好的 @playwright/test（web/package.json 的
+                   devDependency）。宿主 Chrome 装在别处时，
+                   给 s3-shots.mjs 的 IIP_CHROME_BIN 传绝对路径即可
 """
 import json
 import os
 import re
+import shutil
 import socket
 import sys
 import time
@@ -1611,6 +1619,85 @@ def main() -> int:
               "颜色种类=%d，文件 %d 字节。纯白/纯黑失败页只有 1 种颜色"
               % (_colors, _size))
         w("  截图：%s（%d 字节，%d 种颜色）" % (_shot, _size, _colors))
+
+    # 4.8.3 S3：真浏览器走完「列表 → 详情 → 处置」（DoD 3，收 OPEN-M5-8）
+    #
+    # 为什么与 4.8.2 并存而不是替换：
+    #   - 4.8.2 用 `chrome --headless --screenshot=URL` 截**单URL 首屏**，
+    #     它验的是「渲染没白屏」；
+    #   - 4.8.3 用 Playwright **真实点击**，验的是「点了按钮之后页面变成什么样」。
+    # 两者是不同的不变量，互补，各自的判据都不能替代对方。
+    #
+    # 为什么走Playwright 而不是 chrome CLI：chrome CLI 无法点击，
+    # 「处置」这一步就无从验证（DoD 3 明确要求走完处置）。
+    #
+    # 判据分层（每条都在防自证失效）：
+    #   - 判**DOM 内容**而非「截图文件非空」—— 纯白页也非空；
+    #   - 处置那一步**额外回读 API** —— 页面变了不等于数据落库；
+    #   - 每步截图数颜色种类 >= 4 —— 排除白屏/黑屏；
+    #   - 事件 id **不写死**（随运行次数变），按 service 前缀筛。
+    _node = os.environ.get("IIP_NODE_BIN", "").strip() or shutil.which("node")
+    _s3 = os.path.join(PROJ, "web", "e2e", "s3-shots.mjs")
+    if not _node:
+        w("  [跳过] S3 交互截图：未找到 node（设 IIP_NODE_BIN 指向托管 node）。"
+          "OPEN-M5-8 保持未闭环。")
+    elif not os.path.isfile(_s3):
+        check("S3 交互截图脚本存在", False, "未找到 %s" % _s3)
+    else:
+        _s3_report = os.path.join(os.environ.get("IIP_LOG_DIR", PROJ),
+                                  "_verify_s3.txt")
+        _s3_shots = os.path.join(os.environ.get("IIP_LOG_DIR", PROJ),
+                                 "screenshots")
+        _env = dict(os.environ)
+        _env["S3_BASE_URL"] = "http://127.0.0.1:%d" % HTTP_PORT
+        _env["S3_REPORT"] = _s3_report
+        _env["S3_OUT_DIR"] = _s3_shots
+        # 判据里「前置条件 mine.length > 0」依赖上一段已注入 e2e-svc-* 事件。
+        # 若这一段跑在事件注入之前，会如实 FAIL 而不是假装通过 —— 那正是
+        # 「恒真判据」要避免的情形。
+        _rc3, _out3 = run([_node, "e2e/s3-shots.mjs"],
+                          timeout=600, cwd=os.path.join(PROJ, "web"))
+        # **必须读脚本自落的报告，不读 wrapper 的 stdout 副本**
+        # （同上：验收数据以脚本自落报告为准）。
+        _s3_txt = ""
+        if os.path.isfile(_s3_report):
+            with open(_s3_report, encoding="utf-8", errors="replace") as fh:
+                _s3_txt = fh.read()
+        else:
+            w("  S3 报告未生成：%s" % _s3_report)
+
+        _m3 = re.search(r"=== S3 汇总：(\d+) PASS / (\d+) FAIL ===", _s3_txt)
+        check("S3 交互流程有可解析的汇总行（列表 → 详情 → 处置）",
+              _m3 is not None,
+              "已匹配汇总行" if _m3
+              else "未在报告中找到汇总行，node rc=%s，stdout=%s"
+                   % (_rc3, _out3[-200:]))
+
+        # 三张截图各自要存在且非空白。三步是三个不同的不变量，
+        # 合成一个「至少存在一张」是恒真判据。
+        for _n, _label in (("01-list", "列表页"), ("02-detail", "详情页"),
+                           ("03-transition", "处置后")):
+            _p = os.path.join(_s3_shots, _n + ".png")
+            _ok = os.path.isfile(_p)
+            _c = -1  # -1 = 解不出来；**不能当 0 种颜色**（那是两件事）
+            if _ok:
+                try:
+                    _c = png_color_count(_p)
+                except Exception as e:  # noqa: BLE001
+                    w("  PNG 解码失败（%s）: %r" % (_n, e))
+            check("S3 %s截图已生成且非空白（颜色种类 >= 4）" % _label,
+                  _ok and _c >= 4,
+                  "颜色种类=%d，文件 %s" % (
+                      _c, _p if _ok else "未生成"))
+
+        if _m3:
+            _p3, _f3 = int(_m3.group(1)), int(_m3.group(2))
+            check("S3 全部断言通过", _f3 == 0 and _p3 > 0,
+                  "%d PASS / %d FAIL" % (_p3, _f3))
+            w("  S3 交互截图：%d PASS / %d FAIL，截图目录 %s"
+              % (_p3, _f3, _s3_shots))
+        w("  S3 报告：%s" % _s3_report)
+
     w()
 
     # ------------------------------------------------------ 5. 证据留存
