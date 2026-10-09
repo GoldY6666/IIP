@@ -93,6 +93,28 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
+def _stat_int(line: str, key: str) -> int:
+    """从 rca.Stats 日志行里取一个计数，解析失败返回 -1。
+
+    **为什么要解析而不是 `in` 判断**：`"unassessable=0" not in line`
+    只排除「恰好为 0」，`unassessable=10` 照样通过 —— 那是恒真判据。
+    判据要问的是「unassessable > 0」，只有解析出数值才能判。
+
+    解析失败返回 -1（不是 0）：**「解析不出」与「值是 0」是两件事**，
+    混成0 会让一条坏日志看起来像「不可评估」。
+    """
+    m = re.search(key + r"=(\d+)", line)
+    return int(m.group(1)) if m else -1
+
+
+def _stats_total(line: str) -> int:
+    return _stat_int(line, "total")
+
+
+def _stats_unassessable(line: str) -> int:
+    return _stat_int(line, "unassessable")
+
+
 # ------------------------------------------------------------------ docker
 DOCKER, ENV = connect()
 # cli-plugins 目录的 PATH 装配也在 lib_docker.make_env() 里完成，
@@ -1133,24 +1155,42 @@ def main() -> int:
     _auth_port = HTTP_PORT + 1
     _apname = "iip-authprobe-%s" % RUN_TOKEN
     if not port_in_use(_auth_port):
-        _net = compose("ps", "-q", "postgres")
+        # compose() 返回 (rc, out)，不是裸字符串。
+        # 这几处曾漏了解包 ⇒ `_net` 是 tuple、下面 `.strip()` 直接抛
+        # AttributeError，且**崩在 F3 断言之前**，整条容器链路跑不到底。
+        # 范式照抄 211 行 svc_container()：`rc, out = compose(...)`。
+        #
+        # **网络名必须用 1012 行那个取法**（docker inspect .NetworkSettings），
+        # 不能用 `compose ps -q postgres` —— 后者返回的是**容器 ID**，
+        # 把它当网络名传给 `--network` 会得到
+        #「failed to set up container networking: network <64位hex> not found」，
+        # 容器卡在 Created 状态、logs 为空。实测踩过两轮才发现。
+        _rc_net, _out_net = docker(
+            "inspect", "-f",
+            "{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}",
+            PG_C, timeout=60)
+        _net = ((_out_net or "").strip().splitlines() or [""])[0].strip()
         if not _net:
             check("M6 真二进制认IIP_AUTH_TOKEN（启用路径·容器侧）",
                   False, "取不到 compose 网络，探针无法接入")
         else:
-            _net = _net.strip()
             # 探针只验 HTTP 鉴权、不碰采集器，但 server 启动早期会store.Connect
             # —— 连不上库就直接退出，于是「端口不监听」，症状与「鉴权没生效」
             # 完全无法区分。故必须接**真库**（与 trace 探针同一条教训）。
             # 连接串**从 compose 动态读**，不自己拼。
             # 硬编码踩过一次：compose 里是 postgres/dev，而 K8s 那套是别的组合。
-            _pg_env = compose("exec", "-T", "postgres", "printenv", "POSTGRES_PASSWORD")
-            _pg_user = compose("exec", "-T", "postgres", "printenv", "POSTGRES_USER")
-            _pg_db = compose("exec", "-T", "postgres", "printenv", "POSTGRES_DB")
+            _rc_pw, _pg_env = compose("exec", "-T", "postgres", "printenv", "POSTGRES_PASSWORD")
+            _rc_user, _pg_user = compose("exec", "-T", "postgres", "printenv", "POSTGRES_USER")
+            _rc_dbn, _pg_db = compose("exec", "-T", "postgres", "printenv", "POSTGRES_DB")
             _pu = ((_pg_user or "").strip() or "postgres")
             _pd = ((_pg_db or "").strip() or "iip")
             _pp = ((_pg_env or "").strip() or "dev")
-            _rc_a = docker(
+            # docker() 与 compose() 一样返回 (rc, out)。
+            # 这里曾按裸 rc 用 ⇒ `_rc_a` 是 tuple，
+            # `"..." % _rc_a` 抛 TypeError: not all arguments converted。
+            # **教训：修一处漏解包时必须把整个函数的调用点一起扫**——
+            # 同一段里连着三处 printenv 与一处 docker run，是同一种错。
+            _rc_a, _out_a = docker(
                 "run", "-d", "--name", _apname,
                 "--network", _net,
                 "-e", "IIP_AUTH_TOKEN=%s" % _AUTH_TOKEN,
@@ -1164,7 +1204,8 @@ def main() -> int:
             # （上一批踩过：常驻容器被超时杀掉后，一个字都拿不到。）
             if _rc_a != 0:
                 check("M6 真二进制认 IIP_AUTH_TOKEN（启用路径·容器侧）",
-                      False, "鉴权探针容器起不来 rc=%s" % _rc_a)
+                      False, "鉴权探针容器起不来 rc=%s out=%s"
+                            % (_rc_a, (_out_a or "").strip()[:160]))
             else:
                 # 等监听就绪
                 _up = False
@@ -1372,16 +1413,40 @@ def main() -> int:
 
         # 因果断言 3（交叉验证，最关键的一条）：worker 日志里有
         # rca.Stats 的输出。没有它，上面两条都可能是「Assign 压根没跑」。
-        rc_c, out_c = docker("logs", "--tail", "300", "iip-worker", timeout=60)
-        _stat = [ln.strip() for ln in out_c.splitlines() if "confidence=" in ln]
+        #
+        # **必须轮询等，不能只读一次**（2026-10-08 实测踩过）：
+        # 证据落库早于 worker 打出 Stats 日志 —— 上面那条
+        #「worker 自动采到证据（evidence=7）」已经 PASS 时，
+        # 带 confidence 的那行日志**还没出现**。原因是 Assign 在
+        # Save 之后、logHypotheses 随其后，而断言跑在中间。
+        # 实测时间线：断言处~09:28:0x，Stats 日志 09:29:15。
+        # 单次读日志 ⇒ 「实际: 无」假红，看起来像接线漏了。
+        _stat: list[str] = []
+        _dl_stats = time.time() + 120
+        while time.time() < _dl_stats:
+            rc_c, out_c = docker("logs", "--tail", "300", "iip-worker", timeout=60)
+            _stat = [ln.strip() for ln in (out_c or "").splitlines()
+                     if '"confidence":"' in ln or "confidence=" in ln]
+            if _stat:
+                break
+            time.sleep(5)
         check("M6 worker 日志含 rca.Stats 的 confidence 字段（Assign 已接线）",
-              bool(_stat), "实际: %s" % (_stat[-1][:150] if _stat else "无"))
+              bool(_stat),
+              "实际: %s" % (_stat[-1][:150] if _stat else "120s 内未见（等不到非代表采样）"))
         if _stat:
-            _last = _stat[-1]
-            check("Stats 显示全部不可评估且覆盖度为 0（全空是判据在起作用）",
-                  "assigned=0" in _last and "unassessable=0" not in _last
+            # 只认「total 与 unassessable 都 > 0」的这条：
+            # total=0 的那几条是**空采样**（采集器没采到东西，
+            # unassessable 自然也是 0），拿它们当证据会把
+            # 「没采到」当成「采到了但不可评估」。
+            # 原写法 `"unassessable=0" not in _last` 只排除恰好为 0，
+            # 而 unassessable=10 也照样通过 —— 改为解析数值。
+            _reached = [ln for ln in _stat if _stats_total(ln) > 0]
+            _last = (_reached or _stat)[-1]
+            _t, _u = _stats_total(_last), _stats_unassessable(_last)
+            check("Stats 显示采到证据且全部不可评估（全空是判据在起作用）",
+                  bool(_reached) and _u > 0 and "assigned=0" in _last
                   and "coverage=0/6" in _last,
-                  "实际: %s" % _last[:200])
+                  "total=%d unassessable=%d 行=%s" % (_t, _u, _last[:160]))
 
         # 因果断言 4：没有 coverage_basis/coverage_coverage 键。
         # Assign 的覆写路径会写这两个键；一条都没有 ⇒ 它一次都没写过值。
