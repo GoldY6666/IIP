@@ -12,8 +12,8 @@
 |---|---|
 | 本地仓库路径 | `D:\Documents\qwen-agent\iip` |
 | 分支 | `main` |
-| 提交数 | **80** |
-| HEAD | `3bb325c chore: .gitignore 加规则拦 GitHub Desktop 的嵌套空克隆` |
+| 提交数 | 以 `git rev-list --count HEAD` 为准（§九 漂移守卫） |
+| HEAD | 同上，`git log --oneline -1` |
 | 工作树 | **完全干净**（无未提交改动） |
 | 仓库体积 | **1.33 MiB**（已 `git gc` 压成单个 pack，1048 个对象） |
 | remote | `https://github.com/GoldY6666/IIP.git`（**已确认无 token 残留**） |
@@ -54,7 +54,7 @@
    > ⚠️ **注意选父目录**，不要选 `D:\Documents\qwen-agent\iip\IIP`
    > （那个同名空目录已被 `.gitignore` 拦住，但**添加仓库时仍要选对**）
 4. 点 **Add Repository**
-5. 左栏应显示 **80 个 commit**，顶部有 **"Push origin"** 按钮
+5. 左栏会显示全部 commit（数量以 `git rev-list --count HEAD` 为准），顶部有 **"Push origin"** 按钮
 6. 点 **Push origin**
 7. 首次会弹登录窗：用 `GoldY6666` + 你的 PAT
    > PAT 需含 **Contents: Read and write** + **Workflows: Read and write**
@@ -151,3 +151,28 @@ GitHub 收到 `.github/workflows/ci.yml` 后会**自动跑第一次 CI**，包�
 | `remote: Repository not found` | 仓库名大小写错 | 必须是 `GoldY6666/IIP`（**大写**） |
 | `Updates were rejected` | 远程已有提交 | 先 `git fetch origin` 看远程状态 |
 | `error: RPC failed; curl 56` | 网络中断 | 重试；对象已压成单 pack，正常不会发生 |
+
+---
+
+## 九、本文档的漂移守卫（改本文前先读）
+
+**本文写了两个会随提交变化的数字：提交数与 HEAD。**
+
+- **提交数**：改动本文并提交后提交数会 +1 ⇒ §一 与 §三.5 里的数字会过期。
+- **HEAD 提交号**：**本文件无法自引用自己的提交号** ——
+  提交那一刻才产生该 SHA，写进去必然是上一个提交的 SHA。
+
+⇒ **用法**：HEAD 行不写具体 SHA（避免自引用悖论），**以 `git log --oneline -1` 实际输出为准**。
+
+交付时已执行的复核：
+
+```bash
+git rev-list --count HEAD              # 与 §一 的「提交数」比对
+git log --oneline -1                   # HEAD 实际 SHA
+git count-objects -vH | grep size-pack # 与 §一 的「仓库体积」比对
+git status --porcelain                 # 应为空 = 工作树干净
+```
+
+> **写文档时最容易出的错就是这类漂移**：写进去的数字当时为真，
+> 提交那一刻起就成了假的。**凡文档出现「当前值」，要么标注"以实际输出为准"，
+> 要么配一条守卫命令** —— 与 M6 里「覆盖度分母固定 6 而非手写常量、配漂移守卫」同源。
