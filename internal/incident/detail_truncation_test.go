@@ -115,12 +115,12 @@ type countingStore struct {
 
 func (c *countingStore) CountAlerts(ctx context.Context, id int64) (int, error) {
 	c.countCalls++
-	return c.fakeTransactor.store.CountAlerts(ctx, id)
+	return c.store.CountAlerts(ctx, id)
 }
 
 func (c *countingStore) CountNeedsReviewAlerts(ctx context.Context, id int64) (int, error) {
 	c.needsCountCalls++
-	return c.fakeTransactor.store.CountNeedsReviewAlerts(ctx, id)
+	return c.store.CountNeedsReviewAlerts(ctx, id)
 }
 
 // TestDetailQueriesCountsOnlyWhenTruncated 断言「未截断时不多查真计数」。

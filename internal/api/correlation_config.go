@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	appmw "github.com/yu/iip/internal/middleware"
+
 	"github.com/yu/iip/internal/correlation"
 )
 
@@ -35,7 +37,7 @@ func CorrelationConfigGet(store CorrelationConfigStore, logger *slog.Logger) htt
 		if err != nil {
 			logger.Error("读取关联配置失败",
 				slog.String("error", err.Error()),
-				slog.String("remote_addr", r.RemoteAddr))
+				slog.String("peer_addr", appmw.PeerAddr(r)))
 			writeError(w, logger, http.StatusServiceUnavailable, msgStorageUnavailable)
 			return
 		}

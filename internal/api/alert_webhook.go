@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"time"
 
+	appmw "github.com/yu/iip/internal/middleware"
+
 	"github.com/yu/iip/internal/alert"
 )
 
@@ -91,7 +93,7 @@ func AlertWebhook(ingestor AlertIngestor, maxBytes int64, logger *slog.Logger) h
 			// 日志必须带根因，否则线上只见一片 503，无从定位。
 			logger.Error("告警 webhook 处理失败",
 				slog.String("error", err.Error()),
-				slog.String("remote_addr", r.RemoteAddr))
+				slog.String("peer_addr", appmw.PeerAddr(r)))
 			writeError(w, logger, http.StatusServiceUnavailable, msgStorageUnavailable)
 			return
 		}
@@ -113,14 +115,14 @@ func readBody(w http.ResponseWriter, r *http.Request, maxBytes int64, logger *sl
 		if errors.As(err, &maxBytesErr) {
 			logger.Warn("告警 webhook 请求体超限",
 				slog.Int64("limit_bytes", maxBytes),
-				slog.String("remote_addr", r.RemoteAddr))
+				slog.String("peer_addr", appmw.PeerAddr(r)))
 			writeError(w, logger, http.StatusRequestEntityTooLarge, msgPayloadTooLarge)
 			return nil, false
 		}
 		// 上游中途断开连接等：客户端已收不到响应，但仍要留日志。
 		logger.Warn("读取告警 webhook 请求体失败",
 			slog.String("error", err.Error()),
-			slog.String("remote_addr", r.RemoteAddr))
+			slog.String("peer_addr", appmw.PeerAddr(r)))
 		writeError(w, logger, http.StatusBadRequest, msgReadBodyFailed)
 		return nil, false
 	}

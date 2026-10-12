@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strconv"
 
+	appmw "github.com/yu/iip/internal/middleware"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/yu/iip/internal/incident"
@@ -56,7 +58,7 @@ func ReviewList(lister ReviewLister, logger *slog.Logger) http.HandlerFunc {
 		if err != nil {
 			logger.Error("查询待确认队列失败",
 				slog.String("error", err.Error()),
-				slog.String("remote_addr", r.RemoteAddr))
+				slog.String("peer_addr", appmw.PeerAddr(r)))
 			writeErrorCode(w, logger, http.StatusServiceUnavailable, CodeStorageUnavail, msgStorageUnavailable)
 			return
 		}

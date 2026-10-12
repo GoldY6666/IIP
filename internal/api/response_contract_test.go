@@ -142,7 +142,7 @@ func TestResponseBodyUsesSnakeCase_Detail(t *testing.T) {
 		}},
 		TruncatedAlerts: true, TruncatedTimeline: true,
 	}}
-	var h http.HandlerFunc = IncidentDetail(detailer, discardLogger())
+	h := IncidentDetail(detailer, discardLogger())
 	r := muxWithIncidentRoutes("", h)
 
 	rec := httptest.NewRecorder()
@@ -229,7 +229,7 @@ func TestResponseBodyUsesSnakeCase_TransitionAndComment(t *testing.T) {
 		ID: 7, Title: "t", Severity: "critical", Status: incident.StatusResolved,
 		Service: "api", StartedAt: fixed, UpdatedAt: fixed,
 	}}
-	var h http.HandlerFunc = IncidentTransition(transitioner, discardLogger())
+	h := IncidentTransition(transitioner, discardLogger())
 	r := muxWithIncidentRoutes("", h)
 
 	rec := httptest.NewRecorder()
@@ -250,7 +250,7 @@ func TestResponseBodyUsesSnakeCase_TransitionAndComment(t *testing.T) {
 		IncidentID: 7, EventType: incident.EventUserComment,
 		Description: "n", Actor: "yu", Timestamp: fixed,
 	}}
-	var hc http.HandlerFunc = IncidentComment(commenter, discardLogger())
+	hc := IncidentComment(commenter, discardLogger())
 	rc := muxWithIncidentRoutes("", hc)
 
 	recC := httptest.NewRecorder()

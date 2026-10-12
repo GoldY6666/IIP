@@ -304,7 +304,7 @@ func (t traceData) rootSpan() *traceSpan {
 			return &t.Spans[i]
 		}
 	}
-	var bestIdx int = -1
+	bestIdx := -1
 	var bestEnd int64 = -1
 	for i := range t.Spans {
 		us, ok := parseUnixMicros(t.Spans[i].StartTime)

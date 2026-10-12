@@ -157,7 +157,7 @@ func TestIncidentDetailOK(t *testing.T) {
 		Timeline:          []incident.Entry{{EventType: incident.EventAlertFired}},
 		TruncatedTimeline: true,
 	}}
-	var h http.HandlerFunc = IncidentDetail(detailer, discardLogger())
+	h := IncidentDetail(detailer, discardLogger())
 	r := muxWithIncidentRoutes("", h)
 
 	rec := httptest.NewRecorder()
@@ -182,7 +182,7 @@ func TestIncidentDetailOK(t *testing.T) {
 }
 
 func TestIncidentDetailBadID(t *testing.T) {
-	var h http.HandlerFunc = IncidentDetail(&fakeIncidentDetailer{}, discardLogger())
+	h := IncidentDetail(&fakeIncidentDetailer{}, discardLogger())
 	r := muxWithIncidentRoutes("", h)
 
 	rec := httptest.NewRecorder()

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 
+	appmw "github.com/yu/iip/internal/middleware"
+
 	"github.com/yu/iip/internal/alert"
 )
 
@@ -54,7 +56,7 @@ func AlertList(querier AlertQuerier, logger *slog.Logger) http.HandlerFunc {
 		if err != nil {
 			logger.Error("查询告警列表失败",
 				slog.String("error", err.Error()),
-				slog.String("remote_addr", r.RemoteAddr))
+				slog.String("peer_addr", appmw.PeerAddr(r)))
 			writeError(w, logger, http.StatusServiceUnavailable, msgStorageUnavailable)
 			return
 		}

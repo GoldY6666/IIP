@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	appmw "github.com/yu/iip/internal/middleware"
+
 	"github.com/go-chi/chi/v5"
 
 	"github.com/yu/iip/internal/incident"
@@ -108,7 +110,7 @@ func IncidentList(lister IncidentLister, logger *slog.Logger) http.HandlerFunc {
 		if err != nil {
 			logger.Error("查询事件列表失败",
 				slog.String("error", err.Error()),
-				slog.String("remote_addr", r.RemoteAddr))
+				slog.String("peer_addr", appmw.PeerAddr(r)))
 			writeErrorCode(w, logger, http.StatusServiceUnavailable, CodeStorageUnavail, msgStorageUnavailable)
 			return
 		}
@@ -239,7 +241,7 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, logger *slog.Logger, d
 	if err := dec.Decode(dst); err != nil {
 		logger.Warn(what+"请求体解析失败",
 			slog.String("error", err.Error()),
-			slog.String("remote_addr", r.RemoteAddr))
+			slog.String("peer_addr", appmw.PeerAddr(r)))
 		writeErrorCode(w, logger, http.StatusBadRequest, CodeInvalidBody, "请求体不是合法 JSON 或含未知字段")
 		return false
 	}

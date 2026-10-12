@@ -7,16 +7,38 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
 )
 
+// PeerAddr 导出 peerAddr，供 internal/api 各 handler 复用 ——
+// 避免 8 处各自重复 SplitHostPort，也避免某处忘记处理裸 IP 的情形。
+func PeerAddr(r *http.Request) string { return peerAddr(r) }
+
+// ClientIP 取本次请求的可信客户端 IP（由 ClientIPFromRemoteAddr 写入 context）。
+//
+// 取不到时返回空串 —— **不回退到 r.RemoteAddr**：那正是本函数存在的
+// 理由（避免各 handler 各自随手打一个可被伪造的字段）。
+func ClientIP(r *http.Request) string { return middleware.GetClientIP(r.Context()) }
+
 // accessLog 记录每个请求的访问日志（结构化 JSON）。
 //
 // 使用 chi 的 RequestID 中间件写入的 request id 关联本次请求。
+//
+// **client_ip 与 peer_addr 的区别**（2026-10-12，勿再直接打 r.RemoteAddr）：
+//   - peer_addr  = r.RemoteAddr 的 host 部分，即 TCP 连接对端。本进程直连时
+//     它就是真实客户端；但前面若有反代，它是反代地址。
+//   - client_ip  = chimw.GetClientIP(ctx)，由 main.go 的
+//     ClientIPFromRemoteAddr 写入 context。只信 TCP 对端、不采信任何
+//     X-Forwarded-For / X-Real-IP（攻击者可任意伪造那类头）。
+//
+// 两个字段都记：只留client_ip 在加反代后会误以为拿到的是客户端地址；
+// 只留 peer_addr 则读日志的人分不清「对端」与「客户端」的区别。
 func AccessLog(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,10 +54,34 @@ func AccessLog(logger *slog.Logger) func(http.Handler) http.Handler {
 				slog.Int("status", ww.Status()),
 				slog.Int("bytes", ww.BytesWritten()),
 				slog.Duration("duration", time.Since(start)),
-				slog.String("remote_addr", r.RemoteAddr),
+				slog.String("client_ip", middleware.GetClientIP(r.Context())),
+				slog.String("peer_addr", peerAddr(r)),
 			)
 		})
 	}
+}
+
+// peerAddr 取 r.RemoteAddr 的 host 部分（去掉端口），并把 v4-mapped IPv6
+// 折叠为纯 IPv4。
+//
+// RemoteAddr 形如 "1.2.3.4:56789" 或 "[::ffff:1.2.3.4]:56789"（IPv4 客户端在
+// 双栈监听上就长这样）；测试里可能已是裸 IP，SplitHostPort 失败时原样返回，
+// 不吞错也不臆造。
+//
+// **折叠必须做**：chi 的 ClientIPFromRemoteAddr 内部会 netip.Unmap，
+// 若peerAddr 不做，同一个客户端在 client_ip 与 peer_addr 里会呈现成
+// 两种字面量，按日志做关联聚合时同一个来源被拆成两条。
+// 另外 v4-mapped 与纯 v4 是不同字面量但同一主机，后续若引入基于前缀的
+// 可信判断（ClientIPFromXFF），不折叠就能用另一种写法绕过同一份名单。
+func peerAddr(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr // 可能已是裸 IP（httptest 直接赋值）
+	}
+	if addr, perr := netip.ParseAddr(host); perr == nil {
+		return addr.Unmap().String()
+	}
+	return host
 }
 
 // AuthHeader 是客户端携带 token 的请求头名。

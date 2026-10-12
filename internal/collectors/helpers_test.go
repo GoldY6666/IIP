@@ -60,9 +60,9 @@ func dumpEvidence(list []evidence.Evidence) string {
 	}
 	var b strings.Builder
 	for i, e := range list {
-		b.WriteString(fmt.Sprintf("  [%d] type=%s src=%s ts=%s\n      value=%s\n      query=%s\n      md=%s\n",
+		fmt.Fprintf(&b, "  [%d] type=%s src=%s ts=%s\n      value=%s\n      query=%s\n      md=%s\n",
 			i, e.Type, e.Source, e.Timestamp.UTC().Format("15:04:05"),
-			truncate(e.Value, 120), truncate(e.Query, 120), formatMetadata(e.Metadata)))
+			truncate(e.Value, 120), truncate(e.Query, 120), formatMetadata(e.Metadata))
 	}
 	return b.String()
 }
@@ -74,7 +74,7 @@ func dumpPatterns(list []logPattern) string {
 	}
 	var b strings.Builder
 	for i, p := range list {
-		b.WriteString(fmt.Sprintf("  [%d] count=%d key=%q\n", i, p.count, p.key))
+		fmt.Fprintf(&b, "  [%d] count=%d key=%q\n", i, p.count, p.key)
 	}
 	return b.String()
 }

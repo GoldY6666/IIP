@@ -207,7 +207,27 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	r := chi.NewRouter()
 	r.Use(
 		chimw.RequestID,
-		chimw.RealIP,
+		// **客户端 IP 来源：ClientIPFromRemoteAddr，不是 RealIP**（2026-10-12）。
+		//
+		// chi 的 `RealIP` 已被官方标记弃用（SA1019）并点名安全缺陷
+		// （GHSA-3fxj-6jh8-hvhx / GHSA-rjr7-jggh-pgcp / GHSA-9g5q-2w5x-hmxf）：
+		// 它**无条件**把 r.RemoteAddr 改写成 X-Forwarded-For 最左值、
+		// True-Client-IP 或 X-Real-IP —— 无论本进程前面到底有没有代理、
+		// 代理有没有覆写这些头。任何客户端都能发一个
+		// `X-Forwarded-For: 10.0.0.1` 就把自己的地址写进访问日志。
+		//
+		// `ClientIPFromRemoteAddr` 只认 TCP 连接对端（fail-closed：
+		// 解析不出合法 IP 就不设值，不回退到更低可信的来源），
+		// 并把 v4-mapped IPv6（::ffff:a.b.c.d）折叠成纯 v4 —— 否则
+		// 攻击者可用两种写法绕过任何基于前缀的可信列表。
+		//
+		// **为什么这里不用 ClientIPFromXFF**：本项目部署形态是
+		// compose 直连（deploy/docker-compose.yml 中 iip-server 直接
+		// `8080:8080`，无nginx/traefik 等反代）。没有反代时
+		// RemoteAddr 就是真实客户端 IP；一旦哪天真加了反代，
+		// 正确改法是显式配置 `ClientIPFromXFF(可信CIDR...)`，
+		// **不是**换回 RealIP —— 那正是本条修复要消除的信任假设。
+		chimw.ClientIPFromRemoteAddr,
 		appmw.AccessLog(logger),
 		// S4：静态 token 鉴权。位置在 AccessLog 之后 —— 被拒的请求
 		// 也必须留下访问日志，否则「配了 token 后前端全401」这件事
