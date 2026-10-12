@@ -206,20 +206,28 @@ func (q *Queries) ListIncidents(ctx context.Context, arg ListIncidentsParams) ([
 }
 
 const listOpenIncidentsWithAlerts = `-- name: ListOpenIncidentsWithAlerts :many
-SELECT i.id              AS incident_id,
-       i.status          AS incident_status,
-       i.severity        AS incident_severity,
-       a.id              AS alert_id,
-       a.fingerprint     AS alert_fingerprint,
-       a.severity        AS alert_severity,
-       a.labels          AS alert_labels,
-       a.starts_at       AS alert_starts_at,
-       a.ends_at         AS alert_ends_at
-FROM incidents i
-JOIN incident_alerts ia ON ia.incident_id = i.id
-JOIN alerts a           ON a.id = ia.alert_id
-WHERE i.status IN ('open', 'investigating')
-ORDER BY i.id, a.id
+WITH ranked AS (
+    SELECT i.id           AS incident_id,
+           i.status       AS incident_status,
+           i.severity     AS incident_severity,
+           a.id           AS alert_id,
+           a.fingerprint  AS alert_fingerprint,
+           a.severity     AS alert_severity,
+           a.labels       AS alert_labels,
+           a.starts_at    AS alert_starts_at,
+           a.ends_at      AS alert_ends_at,
+           ROW_NUMBER() OVER (PARTITION BY i.id ORDER BY a.id DESC) AS rn
+    FROM incidents i
+    JOIN incident_alerts ia ON ia.incident_id = i.id
+    JOIN alerts a           ON a.id = ia.alert_id
+    WHERE i.status IN ('open', 'investigating')
+)
+SELECT incident_id, incident_status, incident_severity,
+       alert_id, alert_fingerprint, alert_severity, alert_labels,
+       alert_starts_at, alert_ends_at
+FROM ranked
+WHERE $1::int4 <= 0 OR rn <= $1::int4
+ORDER BY incident_id, alert_id
 `
 
 type ListOpenIncidentsWithAlertsRow struct {
@@ -237,8 +245,18 @@ type ListOpenIncidentsWithAlertsRow struct {
 // 取所有 open / investigating 的 Incident 及其已关联告警（供逐对评分）。
 // 每行是「一条已关联告警」；调用方按 incident_id 聚合。
 // ends_at 可能为 NULL（仍 firing），由 Go 侧按当前时刻兜底。
-func (q *Queries) ListOpenIncidentsWithAlerts(ctx context.Context) ([]ListOpenIncidentsWithAlertsRow, error) {
-	rows, err := q.db.Query(ctx, listOpenIncidentsWithAlerts)
+//
+// **每个 incident 只返回最近 limit_per_incident 条**（R7，2026-10-12 实测加）：
+// 旧版无上限 ⇒ 候选集 = 全部 open incident 的成员总数，且随告警量只增不减。
+// 实测 1 万条告警（8 个 incident）时候选集 7555 条：本查询单次 11ms、
+// correlateOne 每条新告警评分 7555 次 ⇒ 吞吐从 1785 条/s 崩到 ~4.5 条/s。
+// 限额后候选集 ≤ incident 数 × K，把 O(成员总数) 降为 O(incident 数 × K)。
+//
+// 取「最近」而非「最早」：ROW_NUMBER 按 a.id 降序，而 id 自增 ⇒ 留下的是
+// 最新加入的告警，它们最能代表该事件当前的形态（时间窗、服务、标签）。
+// limit_per_incident <= 0 视为不限额（保持旧行为，便于对比与回归）。
+func (q *Queries) ListOpenIncidentsWithAlerts(ctx context.Context, limitPerIncident int32) ([]ListOpenIncidentsWithAlertsRow, error) {
+	rows, err := q.db.Query(ctx, listOpenIncidentsWithAlerts, limitPerIncident)
 	if err != nil {
 		return nil, err
 	}

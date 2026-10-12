@@ -55,7 +55,7 @@ func (f *fakeIncidentStore) CreateIncident(_ context.Context, in Incident) (Inci
 	return in, nil
 }
 
-func (f *fakeIncidentStore) ListOpenIncidentAlerts(context.Context) ([]CandidateAlert, error) {
+func (f *fakeIncidentStore) ListOpenIncidentAlerts(_ context.Context, _ int32) ([]CandidateAlert, error) {
 	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
@@ -228,11 +228,20 @@ func TestCorrelateAlerts_NewWhenNoCandidates(t *testing.T) {
 	}
 }
 
-// TestCorrelateAlerts_MergeOnHighScore：历史共现拉满时得分 0.80（≥merge），应合并。
+// TestCorrelateAlerts_MergeOnHighScore：非历史维拉满时得分恰达 merge 阈值 0.80，应合并。
+//
+// R7 前后改写（2026-10-12）：旧版靠假存储注入 co=1/total=1 把历史维拉满凑 0.80，
+// 但实时 webhook 路径查共现**恒得 0**（新告警尚未 link 到任何 incident）——
+// 那个场景生产不可达。现改由拓扑共同邻居把依赖维拉到 0.5：
+// 0.25(时间) + 0.25(服务) + 0.20(标签) + 0.5×0.20(依赖) = 0.80，恰达阈值。
+// 「恰好达标」不是巧合：CalculateScore 的 6 位量化正是为这个边界修的
+// （TestCalculateScoreThresholdBoundary），此处顺带在服务编排层回归它。
 func TestCorrelateAlerts_MergeOnHighScore(t *testing.T) {
+	topo := &Topology{}
+	topo.AddEdges(map[string][]string{"checkout": {"payment"}})
 	store := &fakeIncidentStore{candidates: []CandidateAlert{candidateOnCheckout(7, "pod-old")}}
-	cfgStore := &fakeConfigStore{cfg: DefaultConfig(), co: 1, total: 1}
-	svc := newCorrService(store, cfgStore, nil)
+	cfgStore := &fakeConfigStore{cfg: DefaultConfig()}
+	svc := newCorrService(store, cfgStore, topo)
 
 	if err := svc.CorrelateAlerts(context.Background(), []alert.StoredAlert{newFiringOnCheckout(101, "pod-new")}); err != nil {
 		t.Fatalf("CorrelateAlerts 返回意外错误: %v", err)
@@ -291,7 +300,7 @@ func TestCorrelateAlerts_ReviewOnMidScore(t *testing.T) {
 // TestCorrelateAlerts_SkipsResolved：resolved 告警不建也不并事件（生命周期归 M3 状态机）。
 func TestCorrelateAlerts_SkipsResolved(t *testing.T) {
 	store := &fakeIncidentStore{candidates: []CandidateAlert{candidateOnCheckout(7, "pod-old")}}
-	cfgStore := &fakeConfigStore{cfg: DefaultConfig(), co: 1, total: 1}
+	cfgStore := &fakeConfigStore{cfg: DefaultConfig()}
 	svc := newCorrService(store, cfgStore, nil)
 
 	resolved := corrAlert(102, "checkout", "LatencyHigh", alert.StatusResolved, "pod-c", corrStart, corrEnd, true)
@@ -374,33 +383,32 @@ func TestCorrelateAlerts_BatchAccumulates(t *testing.T) {
 	}
 }
 
-// TestCorrelateAlerts_CoOccurrenceMemoized：同一对指纹在一批内只查一次历史共现。
-func TestCorrelateAlerts_CoOccurrenceMemoized(t *testing.T) {
-	dup := candidateOnCheckout(7, "pod-old")
-	store := &fakeIncidentStore{candidates: []CandidateAlert{dup, dup}}
+// TestCorrelateAlerts_HistoryNotQueriedInRealtimePath：实时 webhook 路径对历史
+// 共现**一次查询都不发**。
+//
+// R7 背景：旧实现按「新指纹 × 每个候选指纹」逐对查共现（memo 仅批内有效，
+// 1 万个不同指纹几乎不命中）。但刚落库的告警尚未 link 到任何 incident，
+// 这些查询恒返回 co=0 —— 纯浪费，实测把吞吐从 1785 条/s 拖到 ~4.5 条/s。
+// 新实现因此注入「无历史」闭包（与真实查询的结果完全一致：都是 0），
+// coCalls 必须为 0。若将来有人把逐对查询加回实时路径，本条用例立刻变红。
+//
+// 同时锁定分数：历史按 0 计后，同源候选仍应按 0.70 判 REVIEW——
+// 证明「不查历史」没有顺手改掉别的评分维（只断言查询次数的话，
+// 把历史维整个删掉也能绿）。
+func TestCorrelateAlerts_HistoryNotQueriedInRealtimePath(t *testing.T) {
+	store := &fakeIncidentStore{candidates: []CandidateAlert{candidateOnCheckout(7, "pod-old")}}
+	// co=1/total=1：若实现真的去查了历史，分数会偏离 0.70，本条用例抓住它。
 	cfgStore := &fakeConfigStore{cfg: DefaultConfig(), co: 1, total: 1}
 	svc := newCorrService(store, cfgStore, nil)
 
 	if err := svc.CorrelateAlerts(context.Background(), []alert.StoredAlert{newFiringOnCheckout(101, "pod-new")}); err != nil {
 		t.Fatalf("CorrelateAlerts 返回意外错误: %v", err)
 	}
-	if cfgStore.coCalls != 1 {
-		t.Errorf("同一对指纹应只查 1 次历史共现，实查 %d 次", cfgStore.coCalls)
-	}
-}
-
-// TestCorrelateAlerts_HistoricalErrorTreatedAsZero：历史共现查询失败只降级为 0 分，
-// 不能让整条关联失败（历史维是加分项，非必需项）。
-func TestCorrelateAlerts_HistoricalErrorTreatedAsZero(t *testing.T) {
-	store := &fakeIncidentStore{candidates: []CandidateAlert{candidateOnCheckout(7, "pod-old")}}
-	cfgStore := &fakeConfigStore{cfg: DefaultConfig(), coErr: errors.New("pg 连接中断")}
-	svc := newCorrService(store, cfgStore, nil)
-
-	if err := svc.CorrelateAlerts(context.Background(), []alert.StoredAlert{newFiringOnCheckout(101, "pod-new")}); err != nil {
-		t.Fatalf("历史查询失败不应让关联失败，实得错误: %v", err)
+	if cfgStore.coCalls != 0 {
+		t.Errorf("实时路径不应查历史共现（实查 %d 次）——O(N²) 缺陷已回潮", cfgStore.coCalls)
 	}
 	if len(store.links) != 1 {
-		t.Fatalf("应仍建立 1 条关联边，实得 %d", len(store.links))
+		t.Fatalf("应建立 1 条关联边，实得 %d", len(store.links))
 	}
 	if store.links[0].Score == nil || !almostEq(*store.links[0].Score, 0.70) {
 		t.Errorf("历史按 0 计后分数应为 0.70，实得 %v", store.links[0].Score)

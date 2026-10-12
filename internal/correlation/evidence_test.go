@@ -78,13 +78,15 @@ func TestEvidenceTasks_EnqueuesOnMerge(t *testing.T) {
 	store := &fakeIncidentStore{
 		candidates: []CandidateAlert{candidateOnCheckout(77, "pod-old")},
 	}
-	// co/total = 1/1 把分数顶进 MERGE 档 —— 与 service_test.go 的
-	// TestCorrelateAlerts_MergeOnHighScore 用同一组数据口径。
-	// 不给这两个值时分数落在 REVIEW 档，测的就不是 MERGE 路径了。
-	cfgStore := &fakeConfigStore{cfg: DefaultConfig(), co: 1, total: 1}
+	// R7 后实时路径历史维恒 0（新告警未 link 到 incident ⇒ 查共现必得 0），
+	// MERGE 档改由拓扑达成：同服务同标签同窗口 + 共同邻居依赖维 0.5 ⇒ 恰 0.80。
+	// 与 service_test.go 的 TestCorrelateAlerts_MergeOnHighScore 同一口径。
+	topo := &Topology{}
+	topo.AddEdges(map[string][]string{"checkout": {"payment"}})
+	cfgStore := &fakeConfigStore{cfg: DefaultConfig()}
 	enq := &recordingEnqueuer{}
 
-	svc := newCorrService(store, cfgStore, &Topology{}).WithEvidenceTasks(enq)
+	svc := newCorrService(store, cfgStore, topo).WithEvidenceTasks(enq)
 
 	alerts := []alert.StoredAlert{
 		corrAlert(2, "checkout", "LatencyHigh", alert.StatusFiring, "pod-new", corrStart, corrEnd, false),

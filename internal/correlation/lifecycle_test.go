@@ -85,6 +85,15 @@ func newLifecycleService(store *fakeIncidentStore, cfgStore *fakeConfigStore, tl
 	return svc
 }
 
+// newLifecycleServiceWithTopo 是 newLifecycleService 的带拓扑变体。
+// R7（2026-10-12）后实时路径历史维恒 0，MERGE 只能靠非历史维达成，
+// 需要拓扑的用例经此构造（同服务 + 共同邻居 ⇒ 依赖维 0.5 ⇒ 总分恰 0.80）。
+func newLifecycleServiceWithTopo(store *fakeIncidentStore, cfgStore *fakeConfigStore, tl *fakeTimeline, sup *fakeSuppressions, topo *Topology) *Service {
+	svc := newLifecycleService(store, cfgStore, tl, sup)
+	svc.topo = topo
+	return svc
+}
+
 // TestTimelineWrittenOnNew 断言 NEW 档写的是「事件创建」而非「告警合入」。
 func TestTimelineWrittenOnNew(t *testing.T) {
 	store := &fakeIncidentStore{}
@@ -122,20 +131,26 @@ func TestTimelineWrittenOnNew(t *testing.T) {
 // TestTimelineWrittenOnMergeAndReview 断言两种建边场景各写一条 alert_linked，
 // 且 needs_review 与 score 如实落进 metadata。
 func TestTimelineWrittenOnMergeAndReview(t *testing.T) {
+	// R7（2026-10-12）后实时路径历史维恒 0（新告警未 link 到 incident ⇒
+	// 查共现必得 co=0），MERGE 档改由拓扑依赖维达成：同服务 + 共同邻居
+	// ⇒ 0.25+0.25+0.20+0.5×0.20 = 恰 0.80。旧版注入 co=1/total=1 的写法
+	// 对应的场景生产不可达，已废弃。
+	mergeTopo := &Topology{}
+	mergeTopo.AddEdges(map[string][]string{"checkout": {"payment"}})
 	cases := []struct {
 		name       string
-		co, total  float64
+		topo       *Topology
 		wantScore  string
 		wantReview string
 	}{
-		{"MERGE 档（有历史加分，0.80）", 1, 1, "0.8000", "false"},
-		{"REVIEW 档（无历史加分，0.70）", 0, 0, "0.7000", "true"},
+		{"MERGE 档（拓扑依赖加分，0.80）", mergeTopo, "0.8000", "false"},
+		{"REVIEW 档（无依赖无历史，0.70）", nil, "0.7000", "true"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &fakeIncidentStore{candidates: []CandidateAlert{candidateOnCheckout(7, "pod-old")}}
 			tl := &fakeTimeline{}
-			svc := newLifecycleService(store, &fakeConfigStore{cfg: DefaultConfig(), co: tc.co, total: tc.total}, tl, nil)
+			svc := newLifecycleServiceWithTopo(store, &fakeConfigStore{cfg: DefaultConfig()}, tl, nil, tc.topo)
 
 			if err := svc.CorrelateAlerts(context.Background(),
 				[]alert.StoredAlert{newFiringOnCheckout(101, "pod-new")}); err != nil {
@@ -225,7 +240,10 @@ func TestSuppressionDowngradesReviewToNew(t *testing.T) {
 func TestSuppressionOnlyAppliesToReview(t *testing.T) {
 	store := &fakeIncidentStore{candidates: []CandidateAlert{candidateOnCheckout(7, "pod-old")}}
 	sup := &fakeSuppressions{hit: true}
-	svc := newLifecycleService(store, &fakeConfigStore{cfg: DefaultConfig(), co: 1, total: 1}, nil, sup)
+	// MERGE 档由拓扑达成（R7 后历史维在实时路径恒 0，见 MergeOnHighScore 注释）。
+	topo := &Topology{}
+	topo.AddEdges(map[string][]string{"checkout": {"payment"}})
+	svc := newLifecycleServiceWithTopo(store, &fakeConfigStore{cfg: DefaultConfig()}, nil, sup, topo)
 
 	if err := svc.CorrelateAlerts(context.Background(),
 		[]alert.StoredAlert{newFiringOnCheckout(101, "pod-new")}); err != nil {

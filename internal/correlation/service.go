@@ -67,7 +67,7 @@ func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAler
 		return nil
 	}
 
-	candidates, err := s.incidents.ListOpenIncidentAlerts(ctx)
+	candidates, err := s.incidents.ListOpenIncidentAlerts(ctx, CandidateLimitPerIncident)
 	if err != nil {
 		return fmt.Errorf("读取候选事件失败: %w", err)
 	}
@@ -79,9 +79,15 @@ func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAler
 	}
 
 	ref := time.Now().UTC()
-	memo := make(map[string]float64)
-	hist := func(fpA, fpB string) float64 { return s.coOccurrence(ctx, memo, fpA, fpB) }
-	scorer := NewScorer(cfg, s.topo, hist, ref)
+	// **历史维不查库**（2026-10-12 R7 实测）：本批告警都是刚落库的，
+	// 尚未 link 到任何 incident ⇒ 对「新指纹 × 候选指纹」查共现恒得 co=0。
+	// 逐对查 M 次全是白干（实测占 correlate 耗时的大头且随候选数线性增长）。
+	// 注入无历史闭包与逐对查询的**结果完全一致**（都是 0），
+	// 与 NewScorer 既有的 hist==nil 退化路径同一条路。
+	// 若将来需要真实历史维（如回放评估、告警 link 后重关联），
+	// 在此处换成 s.config.CoOccurrence 的查表闭包即可。
+	noHistory := func(_, _ string) float64 { return 0 }
+	scorer := NewScorer(cfg, s.topo, noHistory, ref)
 
 	// 按索引遍历并取址：StoredAlert 184 字节，`for _, a := range` 每轮复制一份
 	// （gocritic rangeValCopy）；取址后直接喂给 NewAlertView，省掉第二份复制。
@@ -198,33 +204,6 @@ func (s *Service) link(ctx context.Context, incidentID int64, v AlertView, score
 		return fmt.Errorf("回写告警 %d 的 incident_id 失败: %w", v.ID, err)
 	}
 	return nil
-}
-
-// coOccurrence 带批次内记忆的历史共现比例（同一对指纹只查一次库）。
-func (s *Service) coOccurrence(ctx context.Context, memo map[string]float64, fpA, fpB string) float64 {
-	if fpA == "" || fpB == "" || fpA == fpB {
-		return 0
-	}
-	key := fpA + "|" + fpB
-	if fpA > fpB {
-		key = fpB + "|" + fpA
-	}
-	if v, ok := memo[key]; ok {
-		return v
-	}
-	co, total, err := s.config.CoOccurrence(ctx, fpA, fpB)
-	ratio := 0.0
-	if err != nil {
-		// 历史维只是加分项，查询失败不应让整条关联失败；按 0 计并告警。
-		s.logger.Warn("历史共现查询失败，按 0 计",
-			slog.String("error", err.Error()),
-			slog.String("fingerprint_a", fpA),
-			slog.String("fingerprint_b", fpB))
-	} else if total > 0 {
-		ratio = co / total
-	}
-	memo[key] = ratio
-	return ratio
 }
 
 // incidentTitle 由告警派生事件标题：优先 alertname，附 service/namespace 便于辨识。

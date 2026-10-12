@@ -46,8 +46,12 @@ func (r *Incidents) CreateIncident(ctx context.Context, in correlation.Incident)
 }
 
 // ListOpenIncidentAlerts 取所有 open / investigating Incident 的已关联告警。
-func (r *Incidents) ListOpenIncidentAlerts(ctx context.Context) ([]correlation.CandidateAlert, error) {
-	rows, err := r.queries.ListOpenIncidentsWithAlerts(ctx)
+//
+// perIncidentLimit 限定每个 incident 最多返回多少条（<=0 不限额）：
+// 无上限时候选集 = 全部 open incident 的成员总数，随告警量只增不减
+// （实测 1 万条时 7555 条，把关联拖到 ~4.5 条/s）。传 correlation.CandidateLimitPerIncident。
+func (r *Incidents) ListOpenIncidentAlerts(ctx context.Context, perIncidentLimit int32) ([]correlation.CandidateAlert, error) {
+	rows, err := r.queries.ListOpenIncidentsWithAlerts(ctx, perIncidentLimit)
 	if err != nil {
 		return nil, fmt.Errorf("repository: 查询候选事件告警失败: %w", err)
 	}

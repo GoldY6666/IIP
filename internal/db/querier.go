@@ -160,6 +160,11 @@ type Querier interface {
 	//   co    = 同时包含两者的 Incident 数
 	//   total = 包含任一者的 Incident 数（并集）
 	// 零历史（total=0）时调用方返回 0.0。
+	//
+	// **实时 webhook 路径上不查它**（2026-10-12 R7 实测）：新落库的告警尚未
+	// link 到任何 incident，故对「新指纹 × 候选指纹」恒返回 co=0。调用方
+	// （CorrelateAlerts）因此直接注入「无历史」闭包，与逐对查询的结果一致
+	// 但省掉 O(候选数) 次往返。本查询保留给回放评估等「双方均已有历史」的场景。
 	FingerprintCoOccurrence(ctx context.Context, arg FingerprintCoOccurrenceParams) (FingerprintCoOccurrenceRow, error)
 	// 支撑 GET /api/v1/alerts/{id}（手册 §3.1 的 P1 项）。
 	GetAlert(ctx context.Context, id int64) (Alert, error)
@@ -319,7 +324,17 @@ type Querier interface {
 	// 取所有 open / investigating 的 Incident 及其已关联告警（供逐对评分）。
 	// 每行是「一条已关联告警」；调用方按 incident_id 聚合。
 	// ends_at 可能为 NULL（仍 firing），由 Go 侧按当前时刻兜底。
-	ListOpenIncidentsWithAlerts(ctx context.Context) ([]ListOpenIncidentsWithAlertsRow, error)
+	//
+	// **每个 incident 只返回最近 limit_per_incident 条**（R7，2026-10-12 实测加）：
+	// 旧版无上限 ⇒ 候选集 = 全部 open incident 的成员总数，且随告警量只增不减。
+	// 实测 1 万条告警（8 个 incident）时候选集 7555 条：本查询单次 11ms、
+	// correlateOne 每条新告警评分 7555 次 ⇒ 吞吐从 1785 条/s 崩到 ~4.5 条/s。
+	// 限额后候选集 ≤ incident 数 × K，把 O(成员总数) 降为 O(incident 数 × K)。
+	//
+	// 取「最近」而非「最早」：ROW_NUMBER 按 a.id 降序，而 id 自增 ⇒ 留下的是
+	// 最新加入的告警，它们最能代表该事件当前的形态（时间窗、服务、标签）。
+	// limit_per_incident <= 0 视为不限额（保持旧行为，便于对比与回归）。
+	ListOpenIncidentsWithAlerts(ctx context.Context, limitPerIncident int32) ([]ListOpenIncidentsWithAlertsRow, error)
 	// 待确认队列：needs_review 为真的关联边（0003 已建部分索引，直接可用）。
 	// 与列表接口同样用 limit+1 探测分页，故 limit 由调用方按 limit+1 传入。
 	ListReviewEdges(ctx context.Context, arg ListReviewEdgesParams) ([]ListReviewEdgesRow, error)

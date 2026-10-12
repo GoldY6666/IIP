@@ -42,6 +42,11 @@ type FingerprintCoOccurrenceRow struct {
 //   co    = 同时包含两者的 Incident 数
 //   total = 包含任一者的 Incident 数（并集）
 // 零历史（total=0）时调用方返回 0.0。
+//
+// **实时 webhook 路径上不查它**（2026-10-12 R7 实测）：新落库的告警尚未
+// link 到任何 incident，故对「新指纹 × 候选指纹」恒返回 co=0。调用方
+// （CorrelateAlerts）因此直接注入「无历史」闭包，与逐对查询的结果一致
+// 但省掉 O(候选数) 次往返。本查询保留给回放评估等「双方均已有历史」的场景。
 func (q *Queries) FingerprintCoOccurrence(ctx context.Context, arg FingerprintCoOccurrenceParams) (FingerprintCoOccurrenceRow, error) {
 	row := q.db.QueryRow(ctx, fingerprintCoOccurrence, arg.Fingerprint, arg.Fingerprint_2)
 	var i FingerprintCoOccurrenceRow
