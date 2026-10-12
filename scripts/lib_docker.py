@@ -88,10 +88,23 @@ def run(args: list[str], env: dict, timeout: int = 900, cwd: str | None = None):
     永不抛异常：超时/找不到可执行文件都用可辨识的非零 rc 表示
     （124 = 超时，沿用 GNU timeout 的约定；-998 = 其它异常）。
     这样调用方可以统一按 rc 判定，不必到处包 try。
+
+    **encoding 必须显式给 "utf-8"（2026-10-12 修）**：
+    只写 `text=True` 时 subprocess 用本机 locale 编码解码 —— Windows 上是 GBK，
+    而容器 stdout 是 UTF-8，于是「worker 已连接 PostgreSQL」被解成乱码，
+    判据按中文子串匹配自然全部落空（实测 11 项 FAIL，其中 4 项纯属此因，
+    而容器日志里那些行**本来就存在**）。
+
+    这个bug 极具欺骗性：它表现为「功能没实现」，真因却是「读日志时编码错了」。
+    判据自身与被测行为必须能区分 —— 否则会照着不存在的缺陷去改产品代码。
+
+    `errors="replace"` 而非 "ignore"：ignore 会把解不出的字节**静默丢弃**，
+    那会让「日志里有这行」与「日志里没这行」变得无法区分；
+    replace 至少留下替换符，看得出「这里本来有非 ASCII 字符」。
     """
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout,
-                           errors="ignore", env=env, cwd=cwd)
+                           encoding="utf-8", errors="replace", env=env, cwd=cwd)
         return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
     except subprocess.TimeoutExpired:
         return 124, "TIMEOUT after %ss" % timeout

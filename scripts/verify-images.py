@@ -128,9 +128,26 @@ DOCKER, ENV = connect()
 # cli-plugins 目录的 PATH 装配也在 lib_docker.make_env() 里完成，
 # 这里拿到的 ENV 已经能直接跑 `docker compose`。
 
-def run(args: list[str], timeout: int = 900, cwd: str | None = None):
-    """执行命令，返回 (rc, stdout+stderr)。默认在仓库根执行。"""
-    return _run(args, ENV, timeout=timeout, cwd=cwd or PROJ)
+def run(args: list[str], timeout: int = 900, cwd: str | None = None,
+        extra_env: dict | None = None):
+    """执行命令，返回 (rc, stdout+stderr)。默认在仓库根执行。
+
+    **extra_env 是叠加而非替换**（2026-10-12 加）：底层 ENV 里含
+    lib_docker.make_env() 装配的 cli-plugins PATH，直接整体替换会把
+    docker 的 PATH 弄丢。所以这里以 ENV 为底、extra_env 覆盖同名键。
+
+    为什么需要它：S3 段要把自己要的 S3_BASE_URL / S3_REPORT /
+    S3_OUT_DIR / IIP_CHROME_BIN 传给子进程。此前它构造了 _env 却
+    **从未传给 run()** —— run 的签名里根本没有 env 参数，于是
+    「不传就静默用默认值」：报告落到 web/ 下、截图落到
+    docs/screenshots/，而判据读的是仓库根，永远读不到。
+    症状是「S3 脚本自己报 10 PASS / 0 FAIL，外层却说报告未生成」。
+    """
+    _e = ENV
+    if extra_env:
+        _e = dict(ENV)
+        _e.update(extra_env)
+    return _run(args, _e, timeout=timeout, cwd=cwd or PROJ)
 
 
 def docker(*args: str, timeout: int = 900):
@@ -1536,16 +1553,38 @@ def main() -> int:
 
     else:
         w("  modcache = %s" % _modcache)
+
+        # **工具链来源（2026-10-12 修）**：本段原本只用 golang:1.23-alpine
+        # + GOPROXY=off，2026-10-12 项目升到 go1.26 后必然失败于
+        # `go.mod requires go >= 1.26.0 (running go 1.23.12; GOTOOLCHAIN=local)`。
+        #
+        # 为什么不能靠 GOTOOLCHAIN=auto 自举：**GOPROXY=off 是本段刻意设的**
+        # （容器内直连 proxy.golang.org 实测 connection refused），而工具链自举
+        # 本身就要下载 —— 关掉代理就必然拉不到。
+        #
+        # 为什么不挂宿主工具链：宿主那份是 **windows-amd64** 版（只有 go.exe），
+        # 挂进 Linux 容器执行不了。实测排除，别再走这条路。
+        #
+        # 采用：让本段用**构建期已验证可用的代理**跑一次 go test。
+        # 构建阶段已实测 golang:1.23-alpine + goproxy.cn 能自举到 go1.26.9
+        # （Dockerfile 第 4/9 层日志「工具链已自举并对齐：go1.26.9」为证），
+        # 所以这里复用同一代理即可，与构建路径保持一致。
         _rc, _out = docker(
             "run", "--rm",
             "-v", PROJ.replace("\\", "/") + ":/src",
-            "-v", _modcache.replace("\\", "/") + ":/go/pkg/mod:ro",
+            "-v", _modcache.replace("\\", "/") + ":/go/pkg/mod",
             "-w", "/src",
-            "-e", "GOPROXY=off",   # 零网络：容器内直连 proxy.golang.org 不通
+            # 依赖走宿主 modcache（可写：go 可能要写 cache 之外的元数据），
+            # 工具链走代理 —— 两者分工明确，不混成一个开关。
+            "-e", "GOPROXY=" + GOPROXY,
             "-e", "GOFLAGS=-mod=mod",
             "-e", "GOCACHE=/tmp/gocache",
+            "-e", "GOTOOLCHAIN=auto",
             "golang:1.23-alpine",
-            "go", "test", "./internal/webui/", "-v", "-count=1",
+            "sh", "-c",
+            # 显式打印实际版本：断言「用对编译器」不能靠假设，
+            # 也不能靠「go.mod 会报错」间接推断。
+            "go version && go test ./internal/webui/ -v -count=1",
             timeout=900)
 
         if _rc != 0:
@@ -1648,15 +1687,83 @@ def main() -> int:
                                   "_verify_s3.txt")
         _s3_shots = os.path.join(os.environ.get("IIP_LOG_DIR", PROJ),
                                  "screenshots")
+
+        # ---- S3 专用数据注入（本段新增，2026-10-12）----
+        #
+        # **为什么必须在这里造，而不是「依赖上一段」**：S3 脚本按
+        # service 前缀 `e2e-svc-` 挑事件，而本文件其它段注入的
+        # service 分别是 checkout / payment / container-check ——
+        # **没有一个带该前缀**。所以 S3-2「库里有 e2e 造的事件」
+        # 在改动前恒为 0 条 → 恒假判据，S3 必然 FAIL 且 FAIL 得毫无意义
+        # （不是产品缺陷，是前提从未成立）。
+        #
+        # 用独立 service 名而非复用现有的：① 不会与其它段的
+        # 去重指纹（labels 参与指纹，fingerprint.go）互相干扰；
+        # ② 前缀筛选天然把 S3 的用��圈在本段内，删库/重跑都干净。
+        #
+        # instance 带 RUN_TOKEN：同指纹的 firing 行若仍在库会被 skip，
+        # 跨轮次必须唯一（与 4.5 段同一个坑）。
+        _svc_s3 = "e2e-svc-s3"
+        _inc_s3_before = db_count("incidents")
+        _pl_s3 = json.dumps({
+            "version": "4",
+            "status": "firing",
+            "alerts": [{
+                "status": "firing",
+                "labels": {
+                    "alertname": "S3InteractiveProbe",
+                    "service": _svc_s3,
+                    "instance": "s3-%s" % RUN_TOKEN,
+                    "severity": "critical",
+                },
+                "annotations": {"summary": "S3 交互截图探针"},
+                "startsAt": "2026-01-01T00:00:00Z",
+            }],
+        }).encode()
+        _rc_s3, _ = http_request(
+            "http://127.0.0.1:%d/api/v1/alerts/webhook" % HTTP_PORT,
+            "POST", _pl_s3, timeout=10)
+        check("S3 前置：投递 e2e-svc- 告警 -> 200", _rc_s3 == 200,
+              "rc=%d" % _rc_s3)
+        # 事件是异步生成的（告警落库 → 关联去重 → 生成 incident），
+        # 立刻查会读到 0 条 —— 那是时序没到，不是没造进去。
+        _dl_s3 = time.time() + 30
+        _got_s3 = 0
+        while time.time() < _dl_s3:
+            # 用 sql_val 直查而非 db_count：后者只接受表名、不支持 WHERE
+            # （db_count 的签名是 db_count(table)）。
+            _v_s3 = sql_val("SELECT count(*) FROM incidents "
+                            "WHERE service = '%s';" % _svc_s3)
+            _got_s3 = int(_v_s3) if _v_s3.isdigit() else -1
+            if _got_s3 > 0:
+                break
+            time.sleep(2)
+        check("S3 前置：e2e-svc- 事件已落库（等 30s）",
+              _got_s3 > 0,
+              # -1 = 查询本身失败（如列名不存在）。它与「真的 0 条」是
+              # 两件事，混成同一句文案会把脚本 bug 误读成产品缺陷。
+              "service=%s %s / incidents 总数 %d->%d"
+              % (_svc_s3,
+                 "查询失败(sql_val 返回空)" if _got_s3 < 0 else "%d 条" % _got_s3,
+                 _inc_s3_before, db_count("incidents")))
+
         _env = dict(os.environ)
         _env["S3_BASE_URL"] = "http://127.0.0.1:%d" % HTTP_PORT
         _env["S3_REPORT"] = _s3_report
         _env["S3_OUT_DIR"] = _s3_shots
-        # 判据里「前置条件 mine.length > 0」依赖上一段已注入 e2e-svc-* 事件。
-        # 若这一段跑在事件注入之前，会如实 FAIL 而不是假装通过 —— 那正是
-        # 「恒真判据」要避免的情形。
+        # **显式传浏览器路径**：s3-shots.mjs 自带默认路径，但那是
+        # 硬编码的 `C:\Program Files\...`；宿主装在别处时它会静默
+        # launch 失败。由调用方注入，与 4.8.2 段用同一个来源。
+        _chrome_s3 = os.environ.get("IIP_CHROME_BIN", "").strip() or \
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        if os.path.isfile(_chrome_s3):
+            _env["IIP_CHROME_BIN"] = _chrome_s3
+        else:
+            w("  [提示] 默认 Chrome 路径不存在：%s（S3 将如实 FAIL）"
+              % _chrome_s3)
         _rc3, _out3 = run([_node, "e2e/s3-shots.mjs"],
-                          timeout=600, cwd=os.path.join(PROJ, "web"))
+                          extra_env=_env, timeout=600,
+                          cwd=os.path.join(PROJ, "web"))
         # **必须读脚本自落的报告，不读 wrapper 的 stdout 副本**
         # （同上：验收数据以脚本自落报告为准）。
         _s3_txt = ""

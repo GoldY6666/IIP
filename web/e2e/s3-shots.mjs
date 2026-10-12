@@ -43,9 +43,32 @@ let pass = 0
 let fail = 0
 const lines = []
 
+/**
+ * 写一行到报告文件。
+ *
+ * **log() 必须自己落盘，不能只 push 进内存**（2026-10-12 修）：
+ * 原实现里只有 check() 会重写文件，而 log() 仅 push 到 lines。
+ * 于是「汇总行」——判据 `=== S3 汇总：N PASS / N FAIL ===` 的唯一
+ * 数据来源——只在进程正常走到末尾时才存在于内存；一旦中途异常
+ * （或 browser.close() 卡住被外部超时杀掉），文件里就永远缺这一行，
+ * 外层判据只能报「未在报告中找到汇总行」，而实际断言可能全 PASS。
+ * 症状是「S3 全绿但外层判红」，且报告本身毫无线索。
+ *
+ * 顺手让写入变成「尽量完成」：报告是取证材料，写失败不该把
+ * 整个脚本带崩（原来的 writeFileSync 抛出会让最后一条判据丢失）。
+ */
+function flush() {
+  try {
+    writeFileSync(REPORT, lines.join('\n') + '\n', 'utf8')
+  } catch (e) {
+    console.error(`[warn] 报告写入失败 ${REPORT}: ${e && e.message}`)
+  }
+}
+
 function log(s) {
   lines.push(s)
   console.log(s)
+  flush()
 }
 
 /** 判据统一在这里落报告 —— 顺手全量重写，进程被杀也能拿到最新进度。 */
@@ -57,7 +80,7 @@ function check(name, ok, detail = '') {
     fail++
     log(`  [FAIL] ${name}  -- ${detail}`)
   }
-  writeFileSync(REPORT, lines.join('\n') + '\n', 'utf8')
+  flush()
 }
 
 /**
@@ -166,13 +189,23 @@ export async function runS3() {
   log(`  OUT=${OUT}`)
   log(`  chrome=${CHROME}`)
 
-  const browser = await chromium.launch({
-    executablePath: CHROME,
-    args: ['--disable-gpu'],
-  })
-  const page = await browser.newContext({ viewport: { width: 1440, height: 900 } }).then((c) => c.newPage())
-
+  // **launch 必须放进 try**：Chromium 启动失败（浏览器缺失、版本不匹配、
+  // 沙箱参数冲突）是最常见的失败形态，而它发生在 try 之外时，
+  // catch 抓不到→ 报告文件一个字节都不落，调用方只看到
+  // 「报告未生成 + rc=1」这种无信息量的组合，只能靠猜。
+  // 反过来，launch 放进 try 后即便浏览器起不来，报告里也会留下
+  // 「S3 脚本执行无异常 -- <真实错误>」这一行可直接定位的证据。
+  let browser = null
+  let page = null
   try {
+    browser = await chromium.launch({
+      executablePath: CHROME,
+      args: ['--disable-gpu'],
+    })
+    page = await browser
+      .newContext({ viewport: { width: 1440, height: 900 } })
+      .then((c) => c.newPage())
+
     // ---- 1. 列表页 ----
     await page.goto(BASE + '/', { waitUntil: 'networkidle', timeout: 60_000 })
     await page.getByText('事件').first().waitFor({ timeout: 30_000 })
@@ -191,7 +224,7 @@ export async function runS3() {
       `service 以 ${SERVICE_PREFIX} 开头 ${mine.length} 条 / 全库 ${all.length} 条`,
     )
     if (mine.length === 0) {
-      await browser.close()
+      // 不 close 浏览器：交给 finally 统一关，避免两处 close 竞态。
       log('')
       log(`=== S3 汇总：${pass} PASS / ${fail} FAIL ===`)
       return { pass, fail }
@@ -248,7 +281,9 @@ export async function runS3() {
   } catch (e) {
     check('S3 脚本执行无异常', false, String((e && e.message) || e))
   } finally {
-    await browser.close().catch(() => {})
+    // browser 可能是 null（launch 本身失败）—— 直接 close 会再抛一次，
+    // 那个二次异常会盖掉上面 catch 里刚写进报告的真实错误。
+    if (browser) await browser.close().catch(() => {})
   }
 
   log('')

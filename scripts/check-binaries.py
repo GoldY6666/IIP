@@ -127,7 +127,7 @@ for name, pkg, _need_mig, _desc in ROLE_SPEC:
            f"-ldflags=-s -w -X main.version={VERSION}",
            "-o", outpath, pkg]
     r = subprocess.run(cmd, cwd=SRC, env=env, capture_output=True,
-                       text=True, errors="ignore", timeout=900)
+                       text=True, encoding="utf-8", errors="replace", timeout=900)
     if r.returncode != 0 or not os.path.exists(outpath):
         fail(f"{name}: 构建失败 rc={r.returncode} {(r.stderr or '')[:200]}")
         built.append((name, None))

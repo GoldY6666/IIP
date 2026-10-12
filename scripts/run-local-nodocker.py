@@ -82,7 +82,8 @@ def w(s=""):
 def run(args, timeout=60, env=None, cwd=None):
     try:
         r = subprocess.run(args, capture_output=True, text=True, timeout=timeout,
-                           errors="ignore", env=env or os.environ, cwd=cwd)
+                           encoding="utf-8", errors="replace",
+                           env=env or os.environ, cwd=cwd)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except Exception as exc:  # noqa: BLE001
         return -998, "EXC %r" % (exc,)

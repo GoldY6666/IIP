@@ -141,7 +141,7 @@ def psql(sql, db="postgres", timeout=None):
     cmd = [PSQL, "-h", PG_HOST, "-p", str(PG_PORT), "-U", PG_USER,
            "-d", db, "-v", "ON_ERROR_STOP=1", "-t", "-A", "-c", sql]
     r = subprocess.run(cmd, env=env, capture_output=True, text=True,
-                       errors="ignore",
+                       encoding="utf-8", errors="replace",
                        timeout=PSQL_TIMEOUT if timeout is None else timeout)
     return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
 
@@ -196,7 +196,8 @@ DOCKER = r"C:\Users\Yu\AppData\Local\Programs\DockerDesktop\resources\bin\docker
 docker_ok = False
 if os.path.exists(DOCKER):
     r = subprocess.run([DOCKER, "info", "--format", "{{.ServerVersion}}"],
-                       capture_output=True, text=True, errors="ignore", timeout=30)
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=30)
     docker_ok = r.returncode == 0 and bool((r.stdout or "").strip())
 record("Docker daemon 可用", "PASS" if docker_ok else "BLOCKED",
        "" if docker_ok else "Docker Desktop 未运行（本机 WSL2 已就绪："
@@ -222,7 +223,7 @@ for name, pkg, outp in (("iip-server", "./cmd/iip-server", bin_server),
            "-ldflags=-s -w -X main.version=0.0-m0-v1",
            "-o", outp, pkg]
     r = subprocess.run(cmd, cwd=SRC, env=env, capture_output=True,
-                       text=True, errors="ignore", timeout=600)
+                       text=True, encoding="utf-8", errors="replace", timeout=600)
     if r.returncode != 0 or not os.path.exists(outp):
         record(f"编译 {name}", "FAIL", (r.stderr or "")[:200])
         build_ok = False
@@ -289,7 +290,7 @@ else:
 # 用二进制自带的 --healthcheck 子命令（与 compose healthcheck 同一路径）
 r = subprocess.run([bin_server, "--healthcheck", f"--http-addr={HTTP_ADDR}"],
                    cwd=SRC, env=server_env, capture_output=True,
-                   text=True, errors="ignore", timeout=WAIT_TIMEOUT)
+                   text=True, encoding="utf-8", errors="replace", timeout=WAIT_TIMEOUT)
 if r.returncode == 0:
     record("二进制定 --healthcheck 子命令 rc=0", "PASS", f"out={(r.stdout or '').strip()!r}")
 else:
