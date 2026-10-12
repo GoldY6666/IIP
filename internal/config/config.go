@@ -132,6 +132,15 @@ type Config struct {
 	UILokiURL       string // IIP_UI_LOKI_URL，默认 http://localhost:3100
 	UILokiTenantID  string // IIP_UI_LOKI_TENANT_ID，默认空（单租户）
 
+	// HTTPTimeout 是单个 HTTP 请求的处理超时上限（实现见 httptimeout.go）。
+	//
+	// 超时后返回 504 并取消请求的 ctx —— 本项目所有业务层方法首参都是 ctx
+	// 且底层是 pgx，故取消会**真正中断**正在跑的数据库查询。
+	//
+	// 它与 EvidenceTimeout 是两回事：后者约束 worker 进程里的单次外部采集，
+	// 从不出现在 HTTP 请求路径上。
+	HTTPTimeout time.Duration // IIP_HTTP_TIMEOUT，默认 15s
+
 	// 三个 evidence*Explicit 记录采集器开关是否被**显式**配置过。
 	//
 	// 不导出给业务用，只服务 validateM4：见该方法的说明。
@@ -210,6 +219,8 @@ func Load(args []string) (*Config, error) {
 	fs.String("trace-url", "", "链路追踪后端根地址（启用该采集器时必填）")
 	// M5：前端静态托管（手册 §4.3）。注册在 m5.go，默认空 = 关闭。
 	registerM5Flags(fs)
+	// S5：HTTP 请求超时。注册在 httptimeout.go。
+	registerHTTPTimeoutFlags(fs)
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -280,6 +291,9 @@ func Load(args []string) (*Config, error) {
 	// M5：WebRoot 为空即不启用静态托管（手册 §4.3）。
 	readM5(k, cfg)
 
+	// S5：HTTP 请求超时（见 httptimeout.go）。
+	readHTTPTimeout(k, cfg)
+
 	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
 	//
 	// 判据用 pflag 的 Changed（而非 koanf的键是否存在）：
@@ -312,6 +326,10 @@ func (c *Config) Validate() error {
 	}
 	if c.WorkerPoll <= 0 {
 		return fmt.Errorf("WorkerPoll 必须为正数，当前为 %s", c.WorkerPoll)
+	}
+	// S5：请求超时。零值会让中间件立刻超时 → 所有请求 504，故同样在启动期拦下。
+	if err := validateHTTPTimeout(c); err != nil {
+		return err
 	}
 	if c.WebhookMaxBytes <= 0 {
 		// 0 或负数会让 MaxBytesReader 拒绝一切请求体（含合法告警），

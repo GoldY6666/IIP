@@ -236,6 +236,17 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 		// 放Recoverer 之前：鉴权本身不 panic，真panic 由 Recoverer兜。
 		// AuthToken 为空时中间件直接放行，本地开发与既有用法零影响。
 		appmw.RequireToken(cfg.AuthToken),
+		// S5：请求超时。位置在 AccessLog **内层**、RequireToken **外层**：
+		//
+		//  - 在 AccessLog 内层：AccessLog 是在 next 返回后才打日志的，
+		//    只有这样它记下的 status 才是最终状态（超时则 504）。
+		//    放外面的话，日志里会看到 200 而客户端收到 504 ——
+		//    排查时会被彻底带偏。
+		//  - 在 RequireToken 外层：鉴权本身是常数时间的字符串比较，不会慢，
+		//    但被拒的请求仍应走完整的超时包装，语义统一。
+		//
+		// 在 Recoverer 之外：panic 由 Recoverer 处理，超时只管「慢」不管「崩」。
+		appmw.Timeout(cfg.HTTPTimeout),
 		chimw.Recoverer,
 	)
 

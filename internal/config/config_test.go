@@ -74,6 +74,19 @@ func mergeM5(base Config) Config {
 	return base
 }
 
+// mergeHTTPTimeout 把 S5 的 HTTPTimeout 默认值合并进 base。
+//
+// **哨兵不能用 HTTPTimeout == 0**：那正是「未合并」的状态，
+// 而0 又恰好是validateHTTPTimeout 要拒绝的非法值 —— 用它当条件会得到
+// 「合并前报错、合并后通过」的假象，真 bug 可能被这套合并逻辑顺手掩盖。
+//
+// 这里以 WantMerge 为唯一开关（由调用方按用例意图显式声明），
+// 不从字段值反推：反推等于让判据依赖被测数据本身，是恒真判据的温床。
+func mergeHTTPTimeout(base Config) Config {
+	base.HTTPTimeout = DefaultHTTPTimeout
+	return base
+}
+
 // m4 校验需要「地址已配齐」的合法配置，否则会先撞地址校验。
 func m4Valid() Config {
 	c := m4Defaults()
@@ -83,6 +96,10 @@ func m4Valid() Config {
 	c.WebhookMaxBytes = DefaultWebhookMaxBytes
 	c.PromURL = "http://prom:9090"
 	c.LokiURL = "http://loki:3100"
+	// S5：HTTPTimeout 也要给合法值，否则「测Webhook 上限」的用例
+	// 会先撞上 HTTPTimeout=0，失败原因与被测意图无关 ——
+	// 这正是本函数存在要避免的那类现象。
+	c.HTTPTimeout = DefaultHTTPTimeout
 	return c
 }
 
@@ -95,6 +112,9 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 		env     map[string]string
 		want    Config
 		wantErr bool
+		// wantHTTPTimeout 为 true 时把 HTTPTimeout 的默认值合并进 want。
+		// 由用例按意图显式声明，不从字段值反推（见 mergeHTTPTimeout 的说明）。
+		wantHTTPTimeout bool
 	}{
 		{
 			name:    "必填缺失_无PGURL_应报错",
@@ -103,9 +123,10 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "仅提供PGURL_其余取默认值",
-			args: []string{"--pg-url=postgres://u:p@localhost:5432/iip"},
-			env:  map[string]string{},
+			name:            "仅提供PGURL_其余取默认值",
+			args:            []string{"--pg-url=postgres://u:p@localhost:5432/iip"},
+			env:             map[string]string{},
+			wantHTTPTimeout: true,
 			want: Config{
 				HTTPAddr:           DefaultHTTPAddr,
 				PGURL:              "postgres://u:p@localhost:5432/iip",
@@ -118,7 +139,8 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			},
 		},
 		{
-			name: "flag覆盖默认值",
+			name:            "flag覆盖默认值",
+			wantHTTPTimeout: true,
 			args: []string{
 				"--pg-url=postgres://u:p@localhost:5432/iip",
 				"--http-addr=:9999",
@@ -142,9 +164,10 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			},
 		},
 		{
-			name: "环境变量提供PGURL",
-			args: nil,
-			env:  map[string]string{"IIP_PG_URL": "postgres://env@localhost:5432/iip"},
+			name:            "环境变量提供PGURL",
+			wantHTTPTimeout: true,
+			args:            nil,
+			env:             map[string]string{"IIP_PG_URL": "postgres://env@localhost:5432/iip"},
 			want: Config{
 				HTTPAddr:           DefaultHTTPAddr,
 				PGURL:              "postgres://env@localhost:5432/iip",
@@ -157,8 +180,9 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			},
 		},
 		{
-			name: "环境变量提供webhook上限",
-			args: nil,
+			name:            "环境变量提供webhook上限",
+			wantHTTPTimeout: true,
+			args:            nil,
 			env: map[string]string{
 				"IIP_PG_URL":            "postgres://env@localhost:5432/iip",
 				"IIP_WEBHOOK_MAX_BYTES": "4096",
@@ -175,8 +199,9 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			},
 		},
 		{
-			name: "flag优先于环境变量",
-			args: []string{"--log-level=warn"},
+			name:            "flag优先于环境变量",
+			wantHTTPTimeout: true,
+			args:            []string{"--log-level=warn"},
 			env: map[string]string{
 				"IIP_PG_URL":    "postgres://env@localhost:5432/iip",
 				"IIP_LOG_LEVEL": "debug",
@@ -246,6 +271,11 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			if want.UIPrometheusURL == "" {
 				want = mergeM5(want)
 			}
+			// S5 同理：HTTPTimeout 默认 15s，非零值，漏合并必然让
+			// 「期望全默认」的用例变红。
+			if tc.wantHTTPTimeout {
+				want = mergeHTTPTimeout(want)
+			}
 			if *got != want {
 				t.Fatalf("配置不匹配\n got=%+v\nwant=%+v", *got, want)
 			}
@@ -281,6 +311,11 @@ func TestValidate(t *testing.T) {
 		c.WorkerPoll = d
 		return c
 	}
+	withTimeout := func(d time.Duration) Config {
+		c := base
+		c.HTTPTimeout = d
+		return c
+	}
 
 	cases := []struct {
 		name    string
@@ -291,6 +326,12 @@ func TestValidate(t *testing.T) {
 		{"空白PGURL_报错", withPG("   "), true},
 		{"空HTTPAddr_报错", withAddr(""), true},
 		{"非正轮询间隔_报错", withPoll(0), true},
+		// S5：零值会让中间件对**所有**请求立刻超时，负值在 Go 里
+		// 直接被 context 当作已过期 —— 两者都是「配错→服务全挂」，
+		// 因此都必须在启动期拦下。
+		{"请求超时为零_报错", withTimeout(0), true},
+		{"请求超时为负_报错", withTimeout(-time.Second), true},
+		{"请求超时为正_通过", withTimeout(time.Millisecond), false},
 		{"webhook上限为零_报错", withWebhook(0), true},
 		{"webhook上限为负_报错", withWebhook(-1024), true},
 		{"webhook上限为正_通过", withWebhook(1), false},
@@ -383,6 +424,49 @@ func TestK8sDefaultOffDoesNotRequireNamespace(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Errorf("K8s 默认关闭时不应要求任何 K8s 配置项: %v", err)
 	}
+}
+
+// TestHTTPTimeoutSources 钉住 HTTPTimeout 的三条来源都真的生效：
+// 默认值、flag 覆盖、环境变量覆盖。
+//
+// **三条必须分别验**：koanf 的posflag provider 与 env provider 是两条独立
+// 代码路径，只验其中一条时，另一条挂掉（比如新文件漏调 readHTTPTimeout
+// 只接上flag、或env 键名映射写错）会全绿。而这类漏接的症状是
+// 「配了超时但服务仍按默认跑」或「配了环境变量不生效」，极难排查。
+func TestHTTPTimeoutSources(t *testing.T) {
+	t.Run("默认15s", func(t *testing.T) {
+		c, err := Load([]string{"--pg-url=postgres://u:p@localhost:5432/iip"})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.HTTPTimeout != DefaultHTTPTimeout {
+			t.Errorf("默认 HTTPTimeout = %s，want %s", c.HTTPTimeout, DefaultHTTPTimeout)
+		}
+	})
+
+	t.Run("flag覆盖", func(t *testing.T) {
+		c, err := Load([]string{
+			"--pg-url=postgres://u:p@localhost:5432/iip",
+			"--http-timeout=42s",
+		})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.HTTPTimeout != 42*time.Second {
+			t.Errorf("flag 覆盖后 HTTPTimeout = %s，want 42s", c.HTTPTimeout)
+		}
+	})
+
+	t.Run("环境变量覆盖", func(t *testing.T) {
+		t.Setenv("IIP_HTTP_TIMEOUT", "7s")
+		c, err := Load([]string{"--pg-url=postgres://u:p@localhost:5432/iip"})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.HTTPTimeout != 7*time.Second {
+			t.Errorf("环境变量覆盖后 HTTPTimeout = %s，want 7s", c.HTTPTimeout)
+		}
+	})
 }
 
 // TestExplicitPromEnabledRequiresURL 覆盖 §4.6 的 2026-10-03 修订：
