@@ -30,6 +30,13 @@ jobs:
   backend:
     name: backend (go)
     runs-on: ubuntu-latest
+    # **job 级超时（2026-10-12 随 golangci-lint v2 迁移新增）**：
+    # v2 移除了 `--timeout`（见下方 lint 步骤注释），原先由它兜底的
+    # 「lint 异常慢」场景改由这里承担。本机基线：lint ~20s、build ~15s、
+    # test ~14s；CI 额外加 -race 与 coverage，约 3-5 分钟。
+    # 20 分钟是余量，不是预期耗时——超了通常意味着真有问题，
+    # 让它红比让它慢慢挂着更有信息量。
+    timeout-minutes: 20
     # **真库集成测试要真 PG**（2026-10-09 静态审查补，硬伤④）：
     # 之前 backend job 既无 services.postgres 也没设 IIP_TEST_PG_URL，
     # internal/testsupport/pg.go:51-57 的 SkipIfNoPG 会 t.Skipf →
@@ -83,27 +90,62 @@ jobs:
       - name: Download modules
         run: go mod download
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+      - name: golangci-lint (linters)
+        uses: golangci/golangci-lint-action@v9
         with:
-          # **版本与 action 的兼容矩阵（2026-10-09 联网核实 action README）**：
-          #   v4.0.0+ 要求前面已有 actions/setup-go（本文件已满足）
-          #   v6.0.0+ 移除 annotations 与默认输出格式，**仍支持 golangci-lint v1.x**
-          #   v7.0.0 才是 v2 only
-          # ⇒ `@v6` + v1.x 是可用组合，**不要因为「v6 配 v1 很怪」就升到 @v7**
-          #（升了必须同时把 .golangci.yml 迁成 `version: "2"` 格式）。
+          # ── 版本组合的依据（2026-10-12 联网核实 action README + 本机实测）──
           #
-          # `version` 是**必填项**（action README 标 required），不存在「默认安装」。
+          # `golangci-lint` 必须 ≥ v2：go.mod 已是 `go 1.26` / `toolchain go1.26.9`，
+          # 而 v1.61.0（构建于 go1.23.8）加载配置时直接报
+          #   can't load config: the Go language version (go1.23) used to build
+          #   golangci-lint is lower than the targeted Go version (1.26.0)
+          # 退出码 3 —— 与代码质量无关，纯属工具链代际不兼容。
           #
-          # ⚠️ **已知风险（本地无法验证，首次 CI 实跑才能确认）**：
-          # v1.61.0 是 2024-09 的版本，构建它的 Go 版本低于 go.mod 声明的
-          # `go 1.23` 时，golangci-lint 会直接报
-          #「the Go language version used to build golangci-lint is lower than
-          # the targeted Go version」并退出。**真出现时的修法是升 v1.x 最新版
-          # （如 v1.64.x，仍是 v1 配置格式），不是改 go.mod 降版本。**
-          version: v1.61.0
-          args: --config=./.golangci.yml --timeout=5m
+          # **处置是升 lint，绝不降 go.mod**：降 go.mod 会把 govulncheck
+          # 刚清掉的 40+ 条标准库 CVE 放回来（升 Go 1.23.8 → 1.26.9 才消掉）。
+          #
+          # action 必须 ≥ v7：官方兼容表写明「v7.0.0 supports golangci-lint
+          # v2 only」「v8.0.0 works with >= v2.1.0」。取最新的 v9.3.0。
+          # v9 要求 Node 24 —— GitHub 托管 runner 已满足（自建runner 才需留意）。
+          #
+          # version 在 v9 文档里标 (optional)，但默认 install-mode=binary 下
+          # 期望 v2.x 版本串，**仍须显式写**，不写没有可靠默认。
+          version: v2.14.0
+          # **`--timeout` 必须删**：golangci-lint v2 已移除该配置项，
+          # `migrate` 时会警告 "The configuration `run.timeout` is ignored.
+          # By default, in v2, the timeout is disabled."。
+          # 超时兜底改由本 job 的 `timeout-minutes` 承担（下方已设 20 分钟：
+          # 本机基线 lint ~20s + build ~15s + test ~14s，CI 加race+coverage
+          # 约 3-5 分钟，20 分钟留足余量且不会让挂死的 job 占额度）。
+          #
+          # **附带好处**：action v9 的 `verify` 输入默认 true，会在 lint 前先跑
+          # 一次 `golangci-lint config verify` —— 配置写错时立刻报出，
+          # 而不是混在一堆 issue 里看不出是配置问题。
+          #
+          # `--config=` 的等号写法是必需的：action 按空格切分参数，
+          # 写成 `--config .golangci.yml` 会被当成两个参数。
+          args: --config=./.golangci.yml
           # 只在 Go 代码变更时跑由 action 自行判断，这里保持默认
+
+      - name: gofmt / goimports check
+        # **v2 把 gofmt 与 goimports 从 linters 移到了 formatters**
+        # （本仓库 .golangci.yml 已随之迁移）。
+        # 后果：`golangci-lint run` **不再检查格式** —— 若只留上面那一步，
+        # 格式检查会**静默失效**（job 绿，但没人管 gofmt）。
+        # ⇒ 必须单独跑 `fmt --diff`：只检查不改文件，有差异即退出非 0。
+        #
+        # 用 --diff 而非直接 `fmt`：CI 里绝不自动改文件，
+        # 否则「本该失败的格式」变成「被悄悄改绿」，掩盖真实问题。
+        #
+        # **为什么这一步能直接调 `golangci-lint` 裸命令**（2026-10-12 查
+        # action v9.3.0 源码 src/run.ts 确认，非推测）：
+        #   const binPath = await install().then(plugins.install)
+        #   core.addPath(path.dirname(binPath))
+        # 该addPath 在 installOnly 提前return **之前**执行，
+        # 所以同一 job 里后续 `run:` 步骤的 PATH 已含安装目录。
+        # 若哪天 action 改了这一点，本步会 command not found（显式失败，
+        # 不是静默跳过 —— 这是刻意的）。
+        run: golangci-lint fmt --diff
 
       - name: Build
         run: go build ./...

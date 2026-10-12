@@ -2,79 +2,125 @@
 # 规格依据：docs/IIP-M0详细开发计划.md §T0.7
 # 要求：errcheck / govet / staticcheck / gocritic 四个 linter 必开。
 #
-# 版本约定：CI 使用 golangci-lint-action@v6，其默认安装的 golangci-lint 为 v1.x（>=1.60）。
-# 本文件采用 **golangci-lint v1 配置格式**（非 v2）。若升级到 golangci-lint v2，
-# 需迁移为 `version: "2"` 格式并改用 linters.settings。
+# ── 版本：v2 格式（2026-10-12 由 v1 迁移而来）────────────────────────
+# 迁移原因不是追新，而是**硬约束**：go.mod 已升到 go 1.26 / toolchain go1.26.9，
+# 而 golangci-lint v1.61.0（构建于 go1.23.8）在加载配置时直接报
+#   can't load config: the Go language version (go1.23) used to build
+#   golangci-lint is lower than the targeted Go version (1.26.0)
+# 并退出码 3 —— 即 CI 首跑必红，且**与代码质量无关**。
+#
+# 处置是升 golangci-lint 到 v2.14.0（构建于 go1.27.0），**不是降 go.mod**：
+# 降 go.mod 会把 govulncheck 刚清掉的 40+ 条标准库 CVE 全部放回来。
+#
+# 迁移由 `golangci-lint migrate` 完成（**未手写**，手写必漏字段）。
+# 该工具明确警告「The configuration comments are not migrated」——
+# 本文件下方的注释即为迁移后人工补回的决策依据，**改配置前先读注释**。
+#
 # 本地验证：
-#   golangci-lint run ./...
-#   golangci-lint config verify   # 校验本文件语法（v1.55+ 可用）
-
+#   golangci-lint config verify   # 校验配置语法（v2 必需，v1 时期不存在）
+#   golangci-lint run              # 只跑 linters
+#   golangci-lint fmt --diff       # **v2 起格式化检查独立于此，见下**
+#
+# ── v2 最大的行为差异：格式化检查被移出 linters ─────────────────────
+# v1：gofmt / goimports 是 linter，`golangci-lint run` 一并检查。
+# v2：它们归入 `formatters`，**`run` 不再检查格式**，必须另跑
+#     `golangci-lint fmt --diff`（或 `fmt` 就地修）。
+# ⇒ CI 必须两步都跑，否则格式检查**静默失效**（run 绿了但格式没人管）。
+#    本仓库 .github/workflows/ci.yml 已按此改。
+#
+# ── exclusions 的语义核对（2026-10-12 查官方 migration-guide）────────
+# v1 的 `issues.exclude-use-default: false` 在 v2 中由 `linters.exclusions.presets`
+# 取代。本文件**不写 presets 键** = 不用任何默认预设 = 与 v1 的 false 等价
+# （迁移工具的自动转换结果正确，此处仅补注释说明，防后人误加）。
+#
+# 下方 `paths`（third_party$ / builtin$ / examples$）是 migrate 自动补上的
+# v1 默认排除目录，用于等价于 v1 未显式关闭 `exclude-dirs-use-default` 的行为。
+# `generated: lax` 对应 v1 `issues.exclude-generated` 的旧默认（lax）；
+# v2 默认已改为 strict，迁移工具显式写 lax 以**保持原行为**——是有意为之。
+version: "2"
 run:
-  # 与 CI 保持一致的超时，避免本地/CI 行为漂移
-  timeout: 5m
-  # 只分析有变动的包可选；M0 保持全量，简单可预期
   tests: true
-
+  # 注意：v1 的 `run.timeout: 5m` 被 migrate 移除，v2 默认不限时
+  #（golangci-lint migrate 会警告 "The configuration `run.timeout` is ignored.
+  #   By default, in v2, the timeout is disabled."）。
+  # 不补回来的理由：v2 单次 run 本机实测 ~20s，超时保护是给异常慢场景兜底；
+  # 真要兜底应在 CI 的 job 级 `timeout-minutes`（backend job 已有 20 分钟上限），
+  # 而不是把框架固有开销写进lint 阈值。
 linters:
-  disable-all: true
+  # default: none = v1 的 disable-all: true（全关后白名单 enable）
+  default: none
   enable:
     # —— T0.7 明确要求必开的四个 ——
     - errcheck      # 未处理的 error 返回值
     - govet         # go vet 官方检查集
-    - staticcheck   # 静态分析（含 gosimple/stylecheck 在 v1 中合并）
+    - staticcheck   # 静态分析（含 gosimple/stylecheck，v2 起独立默认开启）
     - gocritic      # 代码质量与风格
-    # —— 工程必备补充（M0 起就纳入，成本低） ——
+    # —— 工程必备补充（M0 起就纳入，成本低）——
     - ineffassign   # 无效赋值
     - unused        # 未使用的代码
-    - gofmt         # 格式检查（与 gofumpt 互补，保证 CI 不依赖本地工具）
-    - goimports     # import 分组与排序
-
-linters-settings:
-  errcheck:
-    # 检查未处理的类型断言（类型断言失败会 panic，必须处理）
-    check-type-assertions: true
-    # 不检查 `_ =` 空标识符赋值：`_ = x.Close()` 是 Go 官方推荐的「显式声明忽略」
-    # 写法，语义上已经表达了「我知道有返回值且不关心」。若开启 check-blank，
-    # 会把这种正确写法也判为违规，迫使代码改成隐式忽略（反而更差）。
-    check-blank: false
-    # 允许显式忽略的常见无害返回值：只读关闭与 HTTP 响应写出
-    exclude-functions:
-      - (io.Closer).Close
-      - (io.ReadCloser).Close
-      - (*os.File).Close
-      - (net/http.ResponseWriter).Write
-  govet:
-    enable-all: true
-    disable:
-      # fieldalignment 对 M0 的 struct 过度苛刻，且会与后续手写的配置结构冲突
-      - fieldalignment
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-    disabled-checks:
-      # 允许 package comment 与文件头注释合并写法（避免与 gofumpt 冲突）
-      - commentFormatting
-    settings:
-      # hugeParam 默认阈值 80 字节；本项目显式上调到 128，理由见 ADR-012：
-      # AlertView（112 B）是关联引擎刻意设计的**值语义**对象——纯函数、不可变、
-      # 无别名风险，按值传递是 Go 的常规写法；而真正偏重的 StoredAlert（184 B）
-      # 仍高于本阈值、必须改指针（否则本项配置等于把检查关掉）。
-      # 注意：这是"阈值收敛"而非"排除规则"——不 exclude 任何文件，不写 nolint。
-      hugeParam:
-        sizeThreshold: 128
-  goimports:
-    local-prefixes: github.com/yu/iip
-
+    # 注意：gofmt / goimports 不在此列表 —— v2 已把二者移入 formatters。
+  settings:                          # v1 的 linters-settings 在 v2 改名到此
+    errcheck:
+      # 检查未处理的类型断言（类型断言失败会 panic，必须处理）
+      check-type-assertions: true
+      # 不检查 `_ =` 空标识符赋值：`_ = x.Close()` 是 Go 官方推荐的「显式声明忽略」
+      # 写法，语义上已经表达了「我知道有返回值且不关心」。若开启 check-blank，
+      # 会把这种正确写法也判为违规，迫使代码改成隐式忽略（反而更差）。
+      check-blank: false
+      # 允许显式忽略的常见无害返回值：只读关闭与 HTTP 响应写出
+      exclude-functions:
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (*os.File).Close
+        - (net/http.ResponseWriter).Write
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        # 允许 package comment 与文件头注释合并写法（避免与 gofumpt 冲突）
+        - commentFormatting
+      settings:
+        # hugeParam 默认阈值 80 字节；本项目显式上调到 128，理由见 ADR-012：
+        # AlertView（112 B）是关联引擎刻意设计的**值语义**对象——纯函数、不可变、
+        # 无别名风险，按值传递是 Go 的常规写法；而真正偏重的 StoredAlert（184 B）
+        # 仍高于本阈值、必须改指针（否则本项配置等于把检查关掉）。
+        # 注意：这是"阈值收敛"而非"排除规则"——不 exclude 任何文件，不写 nolint。
+        hugeParam:
+          sizeThreshold: 128
+    govet:
+      enable-all: true
+      disable:
+        # fieldalignment 对 M0 的 struct 过度苛刻，且会与后续手写的配置结构冲突
+        - fieldalignment
+  exclusions:
+    generated: lax                  # 见文件头说明：等价 v1 旧默认，非 v2 新默认
+    rules:                          # v1 的 issues.exclude-rules 在 v2 移到这里
+      # 测试文件中允许更宽松（表驱动测试常有未检查的 error）
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocritic
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
 issues:
   # 不因单条问题数量限制而漏报
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-use-default: false
-  exclude-rules:
-    # 测试文件中允许更宽松（表驱动测试常有未检查的 error）
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gocritic
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/yu/iip
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
