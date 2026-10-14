@@ -1,0 +1,122 @@
+# IIP 简化版 Helm chart 默认值。
+#
+# 定位说明（为什么是"简化版"）：本 chart 覆盖「单集群内网部署」这一种
+# 场景，刻意不做：多副本 server 选主、PG 高可用/备份策略、Ingress/TLS
+# 终止、HPA。这些要么需要真实集群才能验，要么属于「部署侧自有设施」——
+# 写一个跑不起来的模板比不写更危险（详见仓库对各默认关闭项的一贯理由）。
+
+# ---------------------------------------------------------------- 镜像
+image:
+  server: iip-server
+  worker: iip-worker
+  # 与 deploy/docker-compose.yml 的标签、scripts/verify-images.py 的
+  # IIP_TAG 默认值三处联动。T7.6 发 v0.1.0 时一并修改。
+  tag: "0.0-m2"
+  pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------- 副本
+replicaCount:
+  server: 1
+  # worker >1 时任务由 WorkerTaskStaleAfter 竞争领取，天然不会双采；
+  # 但默认 1：单集群内网场景一个 worker 足够，多副本放大的是日志噪音。
+  worker: 1
+
+# ---------------------------------------------------------------- 数据库
+database:
+  # embedded=true：chart 内置一个单实例 PG（StatefulSet + PVC）。
+  # embedded=false：连外部 PG，填 external.*。
+  embedded: true
+  embeddedOpts:
+    image: postgres:16-alpine
+    password: dev
+    # 与 compose 相同的取舍：默认 dev 只为零配置跑通。
+    # 任何非本机等价环境必须改掉它。
+    storage: 1Gi
+    # 留空 = 用集群默认 StorageClass。没有默认 SC 的集群需显式指定，
+    # 否则 PVC 会 Pending 而 PG  Pod 起不来。
+    storageClassName: ""
+  external:
+    host: ""
+    port: 5432
+    user: postgres
+    password: ""
+    name: iip
+    # 内网明文传输可用 disable；跨网段务必改 require 以上。
+    sslmode: disable
+
+# ---------------------------------------------------------------- 采集器（worker）
+evidence:
+  # 地址留空 = 跳过注册该采集器（与 buildRegistry 的运行时语义一致：
+  # 打 Info 日志而非拒绝启动）。默认不填：chart 不假设集群里有 Prom/Loki。
+  promURL: ""
+  lokiURL: ""
+  # 开关默认与代码一致（Prom/Loki true，K8s/trace false）。
+  # 注意「开关开 + 无地址」时采集器不注册——这是刻意行为，不是故障。
+  promEnabled: true
+  lokiEnabled: true
+  k8sEnabled: false
+  k8sURL: ""
+  k8sNamespace: ""
+  traceEnabled: false
+  traceURL: ""
+  timeout: 5s
+  maxPerIncident: 50
+  window: 1h
+  # T7.5：采集目标 TLS。默认关闭=系统根证书校验。
+  # 内网自签场景二选一：给 caFile（推荐）或临时开 insecure（启动打 WARN）。
+  tlsInsecure: false
+  tlsCAFile: ""
+
+# ---------------------------------------------------------------- 拓扑（M2）
+topology:
+  # 非空时生成 ConfigMap 并挂给 server（IIP_TOPOLOGY_FILE）。
+  # 留空 = 不挂：依赖相似度退化为恒 0，与代码注释一致，不影响其余维度。
+  content: ""
+
+# ---------------------------------------------------------------- 鉴权（M6 S4）
+# 空 = 不开鉴权（/api/v1/* 全放行）。仅建议内网部署时开启。
+authToken: ""
+
+# ---------------------------------------------------------------- 前端静态托管（M5 S3）
+# webRoot 非空 = 启用静态托管。简化版要求「产物已打进镜像或挂载到该路径」，
+# chart 不负责构建前端（与 compose 不替你 build dist 同一立场）。
+webRoot: ""
+webDist:
+  # 挂载方式：image（含 dist 的 sidecar/initImage，二选一与 webRoot 配合）
+  # 或 persistentVolumeClaim。留空 = 不挂载，webRoot 需在镜像里已有。
+  image: ""
+  claimName: ""
+
+# ---------------------------------------------------------------- UI 侧面板地址
+# 这些地址会内联进 index.html 给**浏览器**点，必须是集群外可达的地址
+# （NodePort/Ingress/端口转发），填 service 名用户点不开。
+ui:
+  prometheusURL: http://localhost:9090
+  grafanaURL: http://localhost:3000
+  lokiURL: http://localhost:3100
+
+# ---------------------------------------------------------------- 资源
+# 与 docker-compose.yml 的 deploy.resources 对齐（同量级、同理由：
+# 只限 memory 不限 cpu）。
+resources:
+  server:
+    limits:
+      memory: 256Mi
+  worker:
+    limits:
+      memory: 256Mi
+  postgres:
+    limits:
+      memory: 512Mi
+
+# ---------------------------------------------------------------- 服务暴露
+service:
+  type: ClusterIP
+  port: 8080
+  # NodePort 模式下的固定端口（type=NodePort 时生效；留空=自动分配）
+  nodePort: ""
+
+logLevel: info
+
+# ---------------------------------------------------------------- 镜像拉取密钥
+imagePullSecrets: []

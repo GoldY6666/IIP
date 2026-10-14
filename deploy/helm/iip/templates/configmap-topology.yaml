@@ -1,0 +1,12 @@
+{{- if .Values.topology.content }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "iip.name" . }}-topology
+  labels:
+    {{- include "iip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+data:
+  topology.yaml: |
+    {{- .Values.topology.content | nindent 4 }}
+{{- end }}

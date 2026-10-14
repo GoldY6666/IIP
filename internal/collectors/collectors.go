@@ -10,6 +10,7 @@ package collectors
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,6 +56,14 @@ type options struct {
 	// 但不同集群一个服务能刷出上万种错误消息，
 	// 条数该由部署方按自己的日志基数调，而不是改代码。
 	topN int
+
+	// tlsConfig 是采集目标的 TLS 配置（T7.5），nil = 系统默认信任链。
+	//
+	// 存「已构造好的 *tls.Config」而不是「CA 文件路径」：读文件是会失败的动作，
+	// 而采集器构造器（NewPrometheusCollector 等）不返回 error、也不该为
+	// 读个文件就 panic。构造动作放在 BuildTLSConfig（见 tls.go），
+	// 由部署侧在装配期调用并处理错误 —— 启动期失败，不静默降级。
+	tlsConfig *tls.Config
 }
 
 // Option 是采集器构造选项。
@@ -82,6 +91,17 @@ func WithTopN(n int) Option {
 	}
 }
 
+// WithTLSConfig 设置采集目标的 TLS 配置（T7.5）。
+//
+// 传 nil 等于不设置（保持系统默认信任链）。
+// 配置的构造见 BuildTLSConfig —— 读 CA 文件失败必须在启动期变成错误，
+// 不能在这里被吞掉，所以本 Option 只接收「已构造好」的配置。
+func WithTLSConfig(cfg *tls.Config) Option {
+	return func(o *options) {
+		o.tlsConfig = cfg
+	}
+}
+
 // resolveOptions 归一化选项。
 func resolveOptions(opts []Option) options {
 	o := options{timeout: defaultCollectorTimeout, topN: 10}
@@ -91,6 +111,19 @@ func resolveOptions(opts []Option) options {
 		}
 	}
 	return o
+}
+
+// newHTTPClient 按选项构造 HTTP 客户端（T7.5：四个采集器各写一遍的
+// `&http.Client{Timeout: o.timeout}` 收敛到此，加 TLS 只改一处）。
+//
+// 无 TLS 配置时与旧行为逐字节一致：不套 Transport，继续走 DefaultTransport；
+// 有配置时才包一层 —— 零配置路径不发生任何行为变化。
+func newHTTPClient(o options) *http.Client {
+	c := &http.Client{Timeout: o.timeout}
+	if o.tlsConfig != nil {
+		c.Transport = &http.Transport{TLSClientConfig: o.tlsConfig}
+	}
+	return c
 }
 
 // httpGetJSON 发起一次 GET 并把响应体解析成out。

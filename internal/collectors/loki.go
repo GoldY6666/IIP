@@ -78,7 +78,7 @@ func NewLokiCollector(baseURL string, opts ...Option) *LokiCollector {
 	o := resolveOptions(opts)
 	return &LokiCollector{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		client:  &http.Client{Timeout: o.timeout},
+		client:  newHTTPClient(o),
 		topN:    o.topN,
 	}
 }

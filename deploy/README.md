@@ -117,6 +117,75 @@ make image-build
 运行层是 `gcr.io/distroless/static-debian12:nonroot`：`CGO_ENABLED=0` 静态编译后
 无动态库依赖，镜像内没有 shell / 包管理器，以非 root（UID 65532）运行。
 
+## 资源限制与日志轮转（T7.5）
+
+七个服务全部带 `deploy.resources.limits.memory` 与 json-file 日志轮转
+（`max-size: 10m` × `max-file: 3`）。两个默认值都有来历：
+
+- **只限 memory 不限 cpu**：cpu 限额在共享内核的开发机上容易把健康检查
+  拖到超时（表现为随机 unhealthy，排查方向全错）；内存上限防的是
+  「一个容器 OOM 拖垮整机」这个真会发生的事故。
+- **日志必须轮转**：json-file 驱动默认永不删旧文件，联调实测 loki
+  单日能写 1.2G。默认值只兜底；需要更长追溯的部署应改
+  `deploy/docker-compose.yml` 的 `x-logging` 锚点，或换 journald / fluentd。
+
+限量分布（与 `deploy/helm/iip` 的 `values.yaml` 同量级）：
+
+| 档 | 服务 | memory |
+|----|------|--------|
+| 数据面 | postgres / prometheus / loki | 512M |
+| 控制面 | redis / alertmanager / iip-server / iip-worker | 128–256M |
+
+## 采集目标 TLS（T7.5）
+
+worker 的四个采集器（prom / loki / k8s / trace）默认走系统根证书校验。
+内网数据源用自签证书时二选一（都通过环境变量配给 worker）：
+
+| 方式 | 变量 | 适用 |
+|------|------|------|
+| 提供 CA（推荐） | `IIP_EVIDENCE_TLS_CA_FILE=/path/ca.pem` | 自签 CA 可导出的一切场景 |
+| 跳过校验（过渡） | `IIP_EVIDENCE_TLS_INSECURE=true` | 来不及铺 CA 的内网过渡期 |
+
+行为边界（三条都不是默认值抄来的）：
+
+1. **不给任何变量** = 与 T7.5 之前逐字节一致（系统根证书校验）；
+2. **CA 文件给了却读不到 / 不是 PEM** = worker **启动即失败**，日志指明
+   是哪个文件。刻意不静默降级——「配了 CA 却悄悄不校验」比启动失败
+   危险得多；
+3. **insecure 开启时** worker 启动日志打 WARN，且 insecure 优先于 CA
+   （两个都配时先保连通）。
+
+CA 文件要能被 worker 容器读到：compose 部署把它挂进容器目录
+（如 `- ./tls/ca.pem:/config/tls/ca.pem:ro`）后设上面的路径。
+
+## Helm chart（T7.5，简化版）
+
+`deploy/helm/iip` 提供单集群内网部署路径，与 compose 同一套取舍：
+默认值可跑、显式配置才启用。
+
+```bash
+helm lint deploy/helm/iip
+helm template test deploy/helm/iip     # 只看渲染结果，不安装
+helm install iip deploy/helm/iip       # 默认：内置单实例 PG
+```
+
+两条部署轨道：
+
+- **内置 PG**（默认）：chart 生成单实例 StatefulSet + PVC。没有默认
+  StorageClass 的集群必须显式设 `database.embeddedOpts.storageClassName`，
+  否则 PVC 一直 Pending、PG Pod 起不来；
+- **外置 PG**：`database.embedded=false` + 填 `database.external.*`。
+  注意 external.password 是明文 values，会出现在 `helm template` 输出与
+  Release 记录里，别提交进版本库。
+
+采集器地址（`evidence.promURL` / `evidence.lokiURL`）**留空即不注册**，
+与 worker 的运行时语义一致：chart 不假设你的集群里有 Prom / Loki。
+K8s / trace 开关打开时地址必填，`helm install` 直接报错（把失败从
+worker 启动期提前到安装期）。
+
+刻意不做（写了跑不起来比不写更危险）：多副本 server 选主、PG 高可用、
+Ingress/TLS 终止、HPA——这些属于集群层设施，理由见 values.yaml 顶部注释。
+
 ## 常用命令
 
 ```bash

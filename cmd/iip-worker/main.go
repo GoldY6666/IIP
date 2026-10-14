@@ -63,7 +63,10 @@ func run() error {
 	defer pool.Close()
 	logger.Info("worker 已连接 PostgreSQL", slog.Duration("poll_interval", cfg.WorkerPoll))
 
-	registry := buildRegistry(cfg, logger)
+	registry, err := buildRegistry(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("装配采集器失败: %w", err)
+	}
 	proc := worker.NewProcessor(
 		repository.NewTasks(pool),
 		repository.NewEvidence(pool),
@@ -91,8 +94,37 @@ func run() error {
 // 默认部署没有 Prometheus / Loki 地址，若因此拒绝启动，
 // 就等于「为了让默认值好看而让默认部署不可用」。
 // 采集器缺席时日志明确说明，运维一眼能看出「为什么没有证据」。
-func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
+func buildRegistry(cfg *config.Config, logger *slog.Logger) (*evidence.Registry, error) {
 	reg := evidence.NewRegistry()
+
+	// T7.5：采集目标 TLS 配置。
+	//
+	// 与「采集器缺席打 INFO」是有意的不对称：缺席是默认部署的常态，
+	// 而 TLS 配置错误是**显式配置写错**。放过它只剩两条路 ——
+	// 不注册 TLS（配了白配）或静默用无校验客户端（信任模型降级），
+	// 都比「worker 起不来、启动日志说清哪个文件哪一行写错」更糟。
+	tlsCfg, err := collectors.BuildTLSConfig(cfg.EvidenceTLSInsecure, cfg.EvidenceTLSCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("采集目标 TLS 配置不可用: %w", err)
+	}
+	var tlsOpts []collectors.Option
+	if tlsCfg != nil {
+		tlsOpts = append(tlsOpts, collectors.WithTLSConfig(tlsCfg))
+		if cfg.EvidenceTLSInsecure {
+			// 必须留痕：insecure 把中间人攻击的面重新打开，
+			// 事后排查「证书明明不对、采集却没报错」时这是唯一线索。
+			logger.Warn("已跳过采集目标 TLS 证书校验（IIP_EVIDENCE_TLS_INSECURE=true），"+
+				"仅限内网自签证书的过渡场景；生产环境应改用 IIP_EVIDENCE_TLS_CA_FILE 提供 CA",
+				slog.String("env", "IIP_EVIDENCE_TLS_INSECURE"))
+		} else {
+			logger.Info("采集目标将使用自定义 CA 校验服务器证书",
+				slog.String("ca_file", cfg.EvidenceTLSCAFile))
+		}
+	}
+	// withTLS 把全局 TLS 选项附加到各采集器自己的选项后面。
+	withTLS := func(extra ...collectors.Option) []collectors.Option {
+		return append(append([]collectors.Option{}, extra...), tlsOpts...)
+	}
 
 	// Prometheus：开关默认 true，但没配地址就不注册（见函数头说明）。
 	if cfg.EvidencePromEnabled {
@@ -101,7 +133,7 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 				slog.String("env", "IIP_PROM_URL"))
 		} else {
 			reg.MustRegister(collectors.NewPrometheusCollector(
-				cfg.PromURL, collectors.WithTimeout(cfg.EvidenceTimeout)))
+				cfg.PromURL, withTLS(collectors.WithTimeout(cfg.EvidenceTimeout))...))
 		}
 	} else {
 		logger.Info("prometheus 采集器已禁用", slog.String("env", "IIP_EVIDENCE_PROM_ENABLED"))
@@ -113,7 +145,7 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 				slog.String("env", "IIP_LOKI_URL"))
 		} else {
 			reg.MustRegister(collectors.NewLokiCollector(
-				cfg.LokiURL, collectors.WithTimeout(cfg.EvidenceTimeout)))
+				cfg.LokiURL, withTLS(collectors.WithTimeout(cfg.EvidenceTimeout))...))
 		}
 	} else {
 		logger.Info("loki 采集器已禁用", slog.String("env", "IIP_EVIDENCE_LOKI_ENABLED"))
@@ -134,8 +166,8 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 		// 那两个默认就是 true（不配属常态），K8s 默认 false（开了必是有意）。
 		reg.MustRegister(collectors.NewK8sCollector(
 			cfg.K8sURL, cfg.K8sNamespace,
-			collectors.WithTimeout(cfg.EvidenceTimeout),
-			collectors.WithTopN(cfg.EvidenceMaxPerIncident)))
+			withTLS(collectors.WithTimeout(cfg.EvidenceTimeout),
+				collectors.WithTopN(cfg.EvidenceMaxPerIncident))...))
 		logger.Info("k8s 采集器已注册（接的是用户自带集群，本仓库不提供）",
 			slog.String("namespace", cfg.K8sNamespace))
 	}
@@ -157,8 +189,8 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 		// config.Validate 已放行，TraceURL 必非空。
 		reg.MustRegister(collectors.NewTraceCollector(
 			cfg.TraceURL,
-			collectors.WithTimeout(cfg.EvidenceTimeout),
-			collectors.WithTopN(cfg.EvidenceMaxPerIncident)))
+			withTLS(collectors.WithTimeout(cfg.EvidenceTimeout),
+				collectors.WithTopN(cfg.EvidenceMaxPerIncident))...))
 		logger.Info("trace 采集器已注册（后端由部署侧提供，本仓库不附带）",
 			slog.String("url", cfg.TraceURL))
 	}
@@ -174,7 +206,7 @@ func buildRegistry(cfg *config.Config, logger *slog.Logger) *evidence.Registry {
 	} else {
 		logger.Info("证据采集器已注册", slog.Any("sources", reg.Sources()))
 	}
-	return reg
+	return reg, nil
 }
 
 // instanceID 生成本 worker 实例标识，落在 tasks.claimed_by 上。

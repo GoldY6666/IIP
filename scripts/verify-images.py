@@ -371,6 +371,115 @@ def png_color_count(path: str, cap: int = 4096) -> int:
     return len(seen)
 
 
+def t75_static_checks() -> None:
+    """T7.5 静态判据：不触达 docker daemon，纯文件与源码。
+
+    放在 main() 最前面调用：daemon 不可用时（本机没跑 Docker Desktop）
+    这几条仍能跑并落盘 —— 静态回归不该被「环境阻塞」整段掩埋，
+    否则「真栈回归后补」会连带把「静态也回归了」这件事悄悄跳过。
+
+    覆盖两类改动：
+      A. compose 生产化：7 服务全有 resources + logging 轮转 + restart 非 no；
+      B. 采集器 TLS 接线：config flag、装配调用、实现文件三处对得上。
+    """
+    w("### [0.0] T7.5 静态判据（compose 生产化 + 采集器 TLS 接线）")
+
+    # --- A. compose 生产化 ---
+    #
+    # 判据形态说明：读 compose 文件本身（不跑 docker compose config ——
+    # 那个需要 compose 插件且对 deploy.resources 语义不校验）。
+    # 用 PyYAML 解析；**ImportError 时判 FAIL 而非 SKIP**：
+    # 静默跳过会让「环境缺库」伪装成「判据通过」，
+    # 而本文件其它段早已依赖 docker，多个软依赖没有好处。
+    try:
+        import yaml
+    except ImportError:
+        check("PyYAML 可用（compose 静态判据的前置）", False,
+              "import yaml 失败；pip install pyyaml 后重跑")
+        w()
+        return
+
+    with open(COMPOSE_FILE, encoding="utf-8") as f:
+        compose_doc = yaml.safe_load(f)
+
+    svcs = (compose_doc or {}).get("services") or {}
+    expected = {"postgres", "redis", "prometheus", "alertmanager", "loki",
+                "iip-server", "iip-worker"}
+    check("compose 七服务齐全", expected <= set(svcs),
+          "实际: %s" % sorted(svcs))
+
+    no_limits, no_logging, bad_restart = [], [], []
+    for name, svc in sorted(svcs.items()):
+        if not isinstance(svc, dict):
+            continue
+        mem = (((svc.get("deploy") or {}).get("resources") or {})
+               .get("limits") or {}).get("memory")
+        if not mem:
+            no_limits.append(name)
+        logging = svc.get("logging") or {}
+        if logging.get("driver") != "json-file" or \
+                "max-size" not in (logging.get("options") or {}):
+            no_logging.append(name)
+        if svc.get("restart") in (None, "no"):
+            bad_restart.append(name)
+
+    check("compose 七服务全部有 deploy.resources.limits.memory（T7.5）",
+          not no_limits, "缺: %s" % (no_limits if no_limits else "无"))
+    check("compose 七服务全部有 json-file 日志轮转（T7.5）",
+          not no_logging, "缺: %s" % (no_logging if no_logging else "无"))
+    check("compose 七服务 restart 策略均显式且非 no",
+          not bad_restart, "缺: %s" % (bad_restart if bad_restart else "无"))
+
+    # --- B. 采集器 TLS 接线（T7.5）---
+    #
+    # 三处必须同时成立，缺一处就是「半接线」：
+    #   config 注册 flag（用户能配）→ 装配读取并构造（配了能用）→
+    #   实现文件存在（构造真有逻辑）。只 grep 其中一处会发现不了
+    # 「flag 在、装配忘了传」这类真实缺陷。
+    cfg_go = os.path.join(PROJ, "internal", "config", "config.go")
+    main_go = os.path.join(PROJ, "cmd", "iip-worker", "main.go")
+    tls_go = os.path.join(PROJ, "internal", "collectors", "tls.go")
+    collectors_go = os.path.join(PROJ, "internal", "collectors", "collectors.go")
+
+    def _read(p: str) -> str:
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+
+    cfg_src, main_src = _read(cfg_go), _read(main_go)
+    check("config 注册 evidence-tls-insecure flag（T7.5）",
+          '"evidence-tls-insecure"' in cfg_src)
+    check("config 注册 evidence-tls-ca-file flag（T7.5）",
+          '"evidence-tls-ca-file"' in cfg_src)
+    check("worker 装配调用 BuildTLSConfig（T7.5）",
+          "collectors.BuildTLSConfig(" in main_src)
+    check("worker 装配把 TLS 选项传给采集器（WithTLSConfig，T7.5）",
+          "collectors.WithTLSConfig(" in main_src)
+    check("internal/collectors/tls.go 存在（BuildTLSConfig 实现，T7.5）",
+          os.path.isfile(tls_go))
+    if os.path.isfile(tls_go):
+        tls_src = _read(tls_go)
+        check("BuildTLSConfig 实现含 CA 解析与 insecure 分支（T7.5）",
+              "AppendCertsFromPEM" in tls_src and "InsecureSkipVerify" in tls_src)
+    if os.path.isfile(collectors_go):
+        col_src = _read(collectors_go)
+        check("collectors.go 定义 newHTTPClient（T7.5 收敛点）",
+              "func newHTTPClient(o options) *http.Client" in col_src)
+        # 收敛判据：四个采集器不再各自 `&http.Client{Timeout: ...}`，
+        # 全部走 newHTTPClient —— 否则「加 TLS 只改了三个采集器」
+        # 这种漏改在静态上看不出来，只在运行时暴露（第四个采集中途
+        # 才以 x509 失败的形式出现）。
+        # 注意判据必须落在四个采集器文件上：调用在它们那里，
+        # collectors.go 自身只有定义（早第一版就把文件读错了，
+        # 判据恒假——写判据前先确认字面量会出现在哪）。
+        client_files = ["prometheus.go", "loki.go", "trace.go", "k8s.go"]
+        missed = [fn for fn in client_files
+                  if "newHTTPClient(o)" not in
+                  _read(os.path.join(PROJ, "internal", "collectors", fn))]
+        check("四个采集器的 client 构造已收敛到 newHTTPClient（T7.5）",
+              not missed, "未收敛: %s" % (missed if missed else "无"))
+    w()
+
+
 def main() -> int:
     w("=" * 70)
     w(" IIP v1 镜像与容器验证   " + time.strftime("%Y-%m-%d %H:%M:%S"))
@@ -378,6 +487,8 @@ def main() -> int:
     w()
 
     # ---------------------------------------------------------- 0. 前置
+    # T7.5 静态判据放最前：daemon 不在时它照样能跑（见函数注释）。
+    t75_static_checks()
     w("### [0] 前置检查")
     if not DOCKER:
         w("  FATAL: 找不到 docker 可执行文件")
@@ -1013,6 +1124,25 @@ def main() -> int:
           else "实际注册日志: %s" % (_trace_reg[:2]))
     if _trace_reg:
         w("  !! compose 下不该有 trace 注册日志，实际有：%s" % _trace_reg[:2])
+
+    # 4.7.4d T7.5：**镜像里的 worker 二进制**真的暴露 TLS flag。
+    #
+    # 与 0.0 段的源码 grep 分工：那条证明「装配接线在源码里」，
+    # 这条证明「打进取证镜像的二进制认得这两个 flag」——
+    # 容器链路验的正是镜像内二进制，而 flag 注册在 config.Load 里，
+    # 漏注册（比如只改了 config 结构体忘了 fs.Bool）时源码 grep 全绿
+    # 而二进制压根不认这两个环境变量。
+    #
+    # 探针形态：docker exec 跑 `--help`（distroless 无 shell，
+    # exec 直接指定二进制路径即可，不需要 sh -c）。
+    _wc = svc_container("iip-worker")
+    rc_h, out_h = docker("exec", _wc, "/usr/local/bin/iip-worker",
+                         "--help", timeout=60)
+    _tls_flags = [ln.strip() for ln in out_h.splitlines()
+                  if "evidence-tls" in ln]
+    check("worker 二进制 --help 暴露 evidence-tls-insecure / evidence-tls-ca-file（T7.5）",
+          rc_h == 0 and len(_tls_flags) >= 2,
+          "匹配到 %d 条 evidence-tls flag 行" % len(_tls_flags))
 
 
     # 4.7.4c M6：**开关打开时真二进制会注册**（验「启用路径」而非只验禁用路径）。

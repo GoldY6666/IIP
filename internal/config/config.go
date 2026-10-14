@@ -116,6 +116,19 @@ type Config struct {
 	// EvidenceTimeout 是单个采集器的超时上限（手册 §4.5：三类均为 5s）。
 	EvidenceTimeout time.Duration // IIP_EVIDENCE_TIMEOUT，默认 5s
 
+	// EvidenceTLSInsecure 跳过采集目标的服务器证书校验（T7.5）。
+	//
+	// 默认 false。仅在「内网自签证书、来不及铺 CA」的过渡场景打开，
+	// 打开时 worker 启动日志必须打 WARN——它把中间人攻击的面重新打开，
+	// 与「采集器只为内网服务」的定位绑定，不是生产默认形态。
+	EvidenceTLSInsecure bool // IIP_EVIDENCE_TLS_INSECURE，默认 false
+	// EvidenceTLSCAFile 是校验采集目标服务器证书用的 CA 证书文件（PEM，T7.5）。
+	//
+	// 空 = 用操作系统根证书池。给了路径就必须可读：读不了却在启动时
+	// 静默降级成「不校验」，等于把「配了 CA」的部署悄悄变成裸 HTTP 信任模型，
+	// 因此 Load/Validate 阶段对「非空但读不到」直接报错，不留给运行时。
+	EvidenceTLSCAFile string // IIP_EVIDENCE_TLS_CA_FILE，默认空
+
 	// --- M5：前端静态托管（手册 §4.3，实现见 m5.go）---
 
 	// WebRoot 是前端产物（vite build 的输出目录）路径。
@@ -179,6 +192,11 @@ const (
 	DefaultEvidenceMaxPerIncident = 50
 	DefaultEvidenceWindow         = time.Hour
 	DefaultEvidenceTimeout        = 5 * time.Second
+
+	// --- T7.5：采集目标 TLS 默认值 ---
+
+	DefaultEvidenceTLSInsecure = false
+	DefaultEvidenceTLSCAFile   = ""
 )
 
 // Load 按优先级加载配置。
@@ -209,6 +227,12 @@ func Load(args []string) (*Config, error) {
 	fs.Int("evidence-max-per-incident", DefaultEvidenceMaxPerIncident, "单事件证据上限，超限截断并标记")
 	fs.Duration("evidence-window", DefaultEvidenceWindow, "证据采集时间窗口")
 	fs.Duration("evidence-timeout", DefaultEvidenceTimeout, "单个采集器超时上限")
+	// T7.5：采集目标 TLS。两个都不改默认行为：默认仍走系统根证书校验，
+	// 显式开了 insecure 只是放宽校验，不改变默认部署的任何链路。
+	fs.Bool("evidence-tls-insecure", DefaultEvidenceTLSInsecure,
+		"跳过采集目标 TLS 证书校验（仅限内网自签证书，默认关闭；开启时启动日志打 WARN）")
+	fs.String("evidence-tls-ca-file", DefaultEvidenceTLSCAFile,
+		"校验采集目标服务器证书的 CA 文件路径（PEM），留空=用系统根证书池")
 	fs.String("prom-url", "", "Prometheus 查询端点根地址（启用该采集器时必填）")
 	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
 	// 空串 = 不开鉴权，故help 里明写这一点，避免「设了变量但没配值」
@@ -280,6 +304,9 @@ func Load(args []string) (*Config, error) {
 		EvidenceWindow:         k.Duration("evidence-window"),
 		EvidenceTimeout:        k.Duration("evidence-timeout"),
 
+		EvidenceTLSInsecure: k.Bool("evidence-tls-insecure"),
+		EvidenceTLSCAFile:   k.String("evidence-tls-ca-file"),
+
 		PromURL:  k.String("prom-url"),
 		LokiURL:  k.String("loki-url"),
 		K8sURL:   k.String("k8s-url"),
@@ -338,6 +365,34 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateM4(); err != nil {
 		return err
+	}
+	if err := c.validateEvidenceTLS(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateEvidenceTLS 校验采集目标 TLS 配置（T7.5）。
+//
+// 只拦「CA 文件给了却读不到」这一种：insecure 单独开、两个都开
+// （此时 insecure 优先）、都不开都是合法形态，语义在采集器构造时落实。
+// 「读不到」必须在启动期拦下——若静默降级为不校验，
+// 用户会以为 CA 已生效，实际信任模型已退回「谁来都认」。
+func (c *Config) validateEvidenceTLS() error {
+	path := strings.TrimSpace(c.EvidenceTLSCAFile)
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("EvidenceTLSCAFile 不存在：%s"+
+				"（请修正 %sEVIDENCE_TLS_CA_FILE，或删掉该配置改用系统根证书池）", path, envPrefix)
+		}
+		return fmt.Errorf("读取 EvidenceTLSCAFile 失败：%s: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("EvidenceTLSCAFile 是目录而非文件：%s（需要 PEM 证书文件）", path)
 	}
 	return nil
 }

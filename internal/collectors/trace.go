@@ -57,7 +57,7 @@ func NewTraceCollector(baseURL string, opts ...Option) *TraceCollector {
 	o := resolveOptions(opts)
 	return &TraceCollector{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		client:  &http.Client{Timeout: o.timeout},
+		client:  newHTTPClient(o),
 		topN:    o.topN,
 	}
 }

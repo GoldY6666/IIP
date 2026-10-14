@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "iip.name" . }}-server
+  labels:
+    {{- include "iip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  # server 无状态（迁移幂等、无本地写），但它同时是「启动时跑迁移」的角色：
+  # 多副本并发迁移由代码侧保证（迁移加锁），简化版仍默认 1 副本 ——
+  # 单集群内网场景 1 个 server 足够，多副本要的是 HA，那属于集群层设施。
+  replicas: {{ .Values.replicaCount.server }}
+  selector:
+    matchLabels:
+      {{- include "iip.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "iip.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: "{{ .Values.image.server }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            {{- if .Values.database.embedded }}
+            # 密码经 Secret 注入，连接串用 $(IIP_PG_PASSWORD) 引用
+            # （kubelet 展开依赖环境变量）——密码不以明文出现在
+            # deployment spec 里。
+            - name: IIP_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "iip.name" . }}-pg
+                  key: password
+            - name: IIP_PG_URL
+              value: "postgres://postgres:$(IIP_PG_PASSWORD)@{{ include "iip.pgHost" . }}:5432/iip?sslmode=disable"
+            {{- else }}
+            - name: IIP_PG_URL
+              value: "postgres://{{ .Values.database.external.user }}:{{ .Values.database.external.password }}@{{ include "iip.pgHost" . }}:{{ .Values.database.external.port }}/{{ .Values.database.external.name }}?sslmode={{ .Values.database.external.sslmode }}"
+            {{- end }}
+            - name: IIP_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            {{- if .Values.authToken }}
+            - name: IIP_AUTH_TOKEN
+              value: {{ .Values.authToken | quote }}
+            {{- end }}
+            {{- if .Values.topology.content }}
+            - name: IIP_TOPOLOGY_FILE
+              value: /config/topology.yaml
+            {{- end }}
+            {{- if .Values.webRoot }}
+            - name: IIP_WEB_ROOT
+              value: {{ .Values.webRoot | quote }}
+            {{- end }}
+            # UI 侧面板地址：内联进 index.html 给浏览器点，必须是集群外可达地址。
+            - name: IIP_UI_PROMETHEUS_URL
+              value: {{ .Values.ui.prometheusURL | quote }}
+            - name: IIP_UI_GRAFANA_URL
+              value: {{ .Values.ui.grafanaURL | quote }}
+            - name: IIP_UI_LOKI_URL
+              value: {{ .Values.ui.lokiURL | quote }}
+          {{- if .Values.topology.content }}
+          volumeMounts:
+            - name: topology
+              mountPath: /config
+              readOnly: true
+          {{- end }}
+          {{- if and .Values.webRoot .Values.webDist.claimName }}
+          volumeMounts:
+            - name: webdist
+              mountPath: {{ .Values.webRoot | quote }}
+              readOnly: true
+          {{- end }}
+          readinessProbe:
+            # /healthz 不带鉴权（RequireToken 只护 /api/v1/*），探针可直连。
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- .Values.resources.server | toYaml | nindent 12 }}
+      volumes:
+        {{- if .Values.topology.content }}
+        - name: topology
+          configMap:
+            name: {{ include "iip.name" . }}-topology
+        {{- end }}
+        {{- if and .Values.webRoot .Values.webDist.claimName }}
+        - name: webdist
+          persistentVolumeClaim:
+            claimName: {{ .Values.webDist.claimName | quote }}
+        {{- end }}

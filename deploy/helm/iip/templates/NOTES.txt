@@ -1,0 +1,49 @@
+IIP 已部署到 Release「{{ .Release.Name }}」（namespace {{ .Release.Namespace }}）。
+
+组件状态：
+  kubectl get pods -l "app.kubernetes.io/instance={{ .Release.Name }}"
+
+{{- if .Values.database.embedded }}
+
+内置 PostgreSQL（单实例 StatefulSet）：
+  kubectl get pvc -l "app.kubernetes.io/instance={{ .Release.Name }}"
+  注意：若 PVC 长期 Pending，多半是集群没有默认 StorageClass ——
+  给 database.embeddedOpts.storageClassName 显式指定一个再 upgrade。
+{{- else }}
+
+外置 PostgreSQL：{{ include "iip.pgHost" . }}:{{ .Values.database.external.port }}
+  提醒：database.external.password 是明文 values，会出现在 helm template
+  输出与 Release 记录里。生产环境请改用 ExternalSecret / sealed-secrets
+  等方案管理，不要把它提交进版本库。
+{{- end }}
+
+访问 UI：
+{{- if eq .Values.service.type "NodePort" }}
+  http://<任意节点IP>:{{ .Values.service.nodePort | default "<自动分配，见 Service>" }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+  kubectl get svc {{ include "iip.name" . }}-server -w   # 等 EXTERNAL-IP
+{{- else }}
+  kubectl port-forward svc/{{ include "iip.name" . }}-server 8080:{{ .Values.service.port }}
+  然后访问 http://localhost:8080
+{{- end }}
+
+{{- if .Values.authToken }}
+鉴权已开启：浏览器首次打开会要求输入 token（值在你设置的 authToken）。
+{{- else }}
+鉴权**未开启**（authToken 为空）：任何能访问到该 Service 的人都能调 /api/v1/*。
+仅建议保持在内网；要开启设 values.authToken 后 upgrade。
+{{- end }}
+
+{{- if not .Values.evidence.promURL }}
+Prometheus 采集器**未注册**（evidence.promURL 为空）：worker 启动日志会有
+一条 Info 说明跳过原因，证据表里不会有 metric 类证据。这是刻意行为，
+不是故障；接上后端后设 evidence.promURL 再 upgrade 即可。
+{{- end }}
+{{- if not .Values.evidence.lokiURL }}
+Loki 采集器**未注册**（evidence.lokiURL 为空）：同上，log 类证据会缺席。
+{{- end }}
+{{- if .Values.evidence.tlsInsecure }}
+⚠️ 已开启「跳过采集目标证书校验」（evidence.tlsInsecure=true）：
+   仅限内网自签证书过渡场景，worker 启动日志会打 WARN。请尽快改用
+   evidence.tlsCAFile 提供 CA。
+{{- end }}

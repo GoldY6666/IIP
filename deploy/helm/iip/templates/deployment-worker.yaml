@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "iip.name" . }}-worker
+  labels:
+    {{- include "iip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.replicaCount.worker }}
+  selector:
+    matchLabels:
+      {{- include "iip.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "iip.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: "{{ .Values.image.worker }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            {{- if .Values.database.embedded }}
+            - name: IIP_PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "iip.name" . }}-pg
+                  key: password
+            - name: IIP_PG_URL
+              value: "postgres://postgres:$(IIP_PG_PASSWORD)@{{ include "iip.pgHost" . }}:5432/iip?sslmode=disable"
+            {{- else }}
+            - name: IIP_PG_URL
+              value: "postgres://{{ .Values.database.external.user }}:{{ .Values.database.external.password }}@{{ include "iip.pgHost" . }}:{{ .Values.database.external.port }}/{{ .Values.database.external.name }}?sslmode={{ .Values.database.external.sslmode }}"
+            {{- end }}
+            - name: IIP_LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            # 采集器地址：留空 = 跳过注册（打 Info 日志而非拒绝启动）。
+            # 这与 buildRegistry 的运行时语义一致——chart 不假设集群里
+            # 有 Prom/Loki，也不制造「开关开着却连不上」的死配置。
+            {{- if .Values.evidence.promURL }}
+            - name: IIP_PROM_URL
+              value: {{ .Values.evidence.promURL | quote }}
+            {{- end }}
+            {{- if .Values.evidence.lokiURL }}
+            - name: IIP_LOKI_URL
+              value: {{ .Values.evidence.lokiURL | quote }}
+            {{- end }}
+            - name: IIP_EVIDENCE_PROM_ENABLED
+              value: {{ .Values.evidence.promEnabled | quote }}
+            - name: IIP_EVIDENCE_LOKI_ENABLED
+              value: {{ .Values.evidence.lokiEnabled | quote }}
+            - name: IIP_EVIDENCE_K8S_ENABLED
+              value: {{ .Values.evidence.k8sEnabled | quote }}
+            - name: IIP_EVIDENCE_TRACE_ENABLED
+              value: {{ .Values.evidence.traceEnabled | quote }}
+            {{- if .Values.evidence.k8sEnabled }}
+            # K8s/trace 打开时地址必填（config.Validate 会在启动期拦下漏配，
+            # 这里 required 把拦截提前到 helm install —— 更早失败更好排查）。
+            - name: IIP_K8S_URL
+              value: {{ required "evidence.k8sEnabled=true 时必须提供 evidence.k8sURL" .Values.evidence.k8sURL | quote }}
+            - name: IIP_K8S_NAMESPACE
+              value: {{ required "evidence.k8sEnabled=true 时必须提供 evidence.k8sNamespace" .Values.evidence.k8sNamespace | quote }}
+            {{- end }}
+            {{- if .Values.evidence.traceEnabled }}
+            - name: IIP_TRACE_URL
+              value: {{ required "evidence.traceEnabled=true 时必须提供 evidence.traceURL" .Values.evidence.traceURL | quote }}
+            {{- end }}
+            - name: IIP_EVIDENCE_TIMEOUT
+              value: {{ .Values.evidence.timeout | quote }}
+            - name: IIP_EVIDENCE_MAX_PER_INCIDENT
+              value: {{ .Values.evidence.maxPerIncident | quote }}
+            - name: IIP_EVIDENCE_WINDOW
+              value: {{ .Values.evidence.window | quote }}
+            {{- if .Values.evidence.tlsInsecure }}
+            # 跳过证书校验：仅限内网自签过渡场景。worker 启动日志会打 WARN。
+            - name: IIP_EVIDENCE_TLS_INSECURE
+              value: "true"
+            {{- end }}
+            {{- if .Values.evidence.tlsCAFile }}
+            - name: IIP_EVIDENCE_TLS_CA_FILE
+              value: {{ .Values.evidence.tlsCAFile | quote }}
+            {{- end }}
+          # 刻意不配探针：worker 无监听端口，「进程活着」就是健康态。
+          # 与 compose 的同一取舍——配一个假探针只会制造误报。
+          resources:
+            {{- .Values.resources.worker | toYaml | nindent 12 }}

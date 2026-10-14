@@ -51,8 +51,30 @@ x-app-env: &app-env
   IIP_PG_URL: "postgres://postgres:${IIP_PG_PASSWORD:-dev}@postgres:5432/iip?sslmode=disable"
   IIP_LOG_LEVEL: "info"
 
+# ---------------------------------------------------------------- T7.5：日志轮转
+# json-file 驱动默认不轮转：一个刷日志的服务能把宿主磁盘慢慢吃满
+# （联调实测 loki 单日 1.2G，而默认策略下它永不删旧文件）。
+# 3 个文件 x 10m 是「够留现场、又不吃盘」的折中；需要更长追溯的部署
+# 应改这里或换 journald/fluentd，而不是把 max-size 调大后忘记回来。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# ---------------------------------------------------------------- T7.5：资源上限
+# 只限 memory、不限 cpu：cpu 限额在共享内核的开发机上容易把健康检查
+# 拖到超时（表现为随机 unhealthy，排查方向全错），而内存上限防的是
+# 「一个容器 OOM 拖垮整机」这个真会发生的事故。
+# 两档量级：数据面（PG/Prom/Loki）512M，控制面（redis/alertmanager/应用组）128-256M。
+
 services:
   postgres:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
     image: postgres:16-alpine
     container_name: iip-postgres
     restart: unless-stopped
@@ -76,6 +98,11 @@ services:
       start_period: 15s
 
   redis:
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging: *default-logging
     image: redis:7-alpine
     container_name: iip-redis
     restart: unless-stopped
@@ -91,6 +118,11 @@ services:
       start_period: 5s
 
   prometheus:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
     image: prom/prometheus:v2.54.0
     container_name: iip-prometheus
     restart: unless-stopped
@@ -115,6 +147,11 @@ services:
       start_period: 15s
 
   alertmanager:
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging: *default-logging
     image: prom/alertmanager:v0.27.0
     container_name: iip-alertmanager
     restart: unless-stopped
@@ -140,6 +177,11 @@ services:
       start_period: 15s
 
   loki:
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    logging: *default-logging
     image: grafana/loki:3.1.0
     container_name: iip-loki
     restart: unless-stopped
@@ -159,6 +201,11 @@ services:
 
   # ------------------------------------------------------------- 应用组
   iip-server:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *default-logging
     image: *app-image
     container_name: iip-server
     profiles: ["app"]
@@ -235,6 +282,11 @@ services:
       start_period: 10s
 
   iip-worker:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    logging: *default-logging
     image: iip-worker:0.0-m2
     container_name: iip-worker
     profiles: ["app"]

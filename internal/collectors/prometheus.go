@@ -49,7 +49,7 @@ func NewPrometheusCollector(baseURL string, opts ...Option) *PrometheusCollector
 	o := resolveOptions(opts)
 	return &PrometheusCollector{
 		baseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		client:  &http.Client{Timeout: o.timeout},
+		client:  newHTTPClient(o),
 	}
 }
 

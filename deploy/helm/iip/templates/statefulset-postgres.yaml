@@ -1,0 +1,72 @@
+{{- if .Values.database.embedded }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "iip.name" . }}-postgres
+  labels:
+    {{- include "iip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  serviceName: {{ include "iip.name" . }}-postgres
+  # 单实例：简化版不做 PG 高可用。要多副本请把 database.embedded 关掉、
+  # 连集群自管的 PG（云 RDS / Patroni / CNPG），那个层面的 HA
+  # 不该由应用 chart 承担。
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "iip.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        {{- include "iip.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.database.embeddedOpts.image | quote }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "iip.name" . }}-pg
+                  key: password
+            - name: POSTGRES_DB
+              value: iip
+            # 子目录挂载：volumeClaimTemplates 的卷挂在 /var/lib/postgresql/data，
+            # 而 postgres 官方镜像要求挂载点是空目录——PGDATA 指到子目录
+            # 既满足镜像要求，又避免 lost+found 之类的东西被当成数据目录。
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            # pg 官方镜像自带 pg_isready；与 compose 的 healthcheck 同参。
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "iip"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            {{- .Values.resources.postgres | toYaml | nindent 12 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "iip.labels" . | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # 空串 = 集群默认 StorageClass。没有默认 SC 的集群
+        # 必须显式设 database.embeddedOpts.storageClassName，否则 PVC 一直 Pending。
+        storageClassName: {{ .Values.database.embeddedOpts.storageClassName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.database.embeddedOpts.storage }}
+{{- end }}

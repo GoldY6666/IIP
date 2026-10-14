@@ -204,7 +204,10 @@ func TestBuildRegistry_DefaultHasNoK8s(t *testing.T) {
 	if c.EvidenceK8sEnabled {
 		t.Fatal("前提失效：K8s 默认应为关闭（B1 偏差）")
 	}
-	reg := buildRegistry(c, testLogger())
+	reg, err := buildRegistry(c, testLogger())
+	if err != nil {
+		t.Fatalf("buildRegistry 不应报错: %v", err)
+	}
 
 	if hasSource(reg, collectors.SourceK8s) {
 		t.Error("默认配置下不应注册 K8s 采集器（偏差 B1 要求默认关闭）")
@@ -234,7 +237,10 @@ func TestBuildRegistry_K8sRegistersWhenEnabled(t *testing.T) {
 		t.Fatalf("前提失效：开关+地址+命名空间的组合应通过配置校验: %v", err)
 	}
 
-	reg := buildRegistry(c, testLogger())
+	reg, err := buildRegistry(c, testLogger())
+	if err != nil {
+		t.Fatalf("buildRegistry 不应报错: %v", err)
+	}
 	if !hasSource(reg, collectors.SourceK8s) {
 		t.Fatalf("开关已开且配置齐备，K8s 采集器必须注册；实际注册表=%v",
 			reg.Sources())
@@ -258,7 +264,10 @@ func TestBuildRegistry_PromLokiSkippedWithoutURL(t *testing.T) {
 	c := registryCfg(t)
 	c.PromURL = ""
 	c.LokiURL = ""
-	reg := buildRegistry(c, testLogger())
+	reg, err := buildRegistry(c, testLogger())
+	if err != nil {
+		t.Fatalf("buildRegistry 不应报错: %v", err)
+	}
 
 	for _, src := range []string{collectors.SourcePrometheus, collectors.SourceLoki} {
 		if hasSource(reg, src) {
@@ -285,7 +294,10 @@ func TestBuildRegistry_DefaultHasNoTrace(t *testing.T) {
 	if c.EvidenceTraceEnabled {
 		t.Fatal("前提失效：trace 默认应为关闭（M6 §5 降级裁定）")
 	}
-	reg := buildRegistry(c, testLogger())
+	reg, err := buildRegistry(c, testLogger())
+	if err != nil {
+		t.Fatalf("buildRegistry 不应报错: %v", err)
+	}
 	if hasSource(reg, collectors.SourceTrace) {
 		t.Errorf("默认配置下不应注册 trace 采集器，实际注册表=%v", reg.Sources())
 	}
@@ -306,7 +318,10 @@ func TestBuildRegistry_TraceRegistersWhenEnabled(t *testing.T) {
 		t.Fatalf("前提失效：开关+地址的组合应通过配置校验: %v", err)
 	}
 
-	reg := buildRegistry(c, testLogger())
+	reg, err := buildRegistry(c, testLogger())
+	if err != nil {
+		t.Fatalf("buildRegistry 不应报错: %v", err)
+	}
 	if !hasSource(reg, collectors.SourceTrace) {
 		t.Fatalf("开关已开且给了地址，trace 采集器必须注册；实际注册表=%v",
 			reg.Sources())

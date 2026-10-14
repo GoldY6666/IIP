@@ -1,0 +1,7 @@
+# helm package / lint 时忽略的文件
+.git/
+.gitignore
+*.tmpl
+*.orig
+*.swp
+.DS_Store

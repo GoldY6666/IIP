@@ -1,0 +1,20 @@
+{{- if .Values.database.embedded }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "iip.name" . }}-postgres
+  labels:
+    {{- include "iip.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  # 无头服务：StatefulSet 的 DNS 直接解析到 Pod，
+  # server/worker 用 {{ include "iip.name" . }}-postgres 这个名字连库。
+  clusterIP: None
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  selector:
+    {{- include "iip.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+{{- end }}

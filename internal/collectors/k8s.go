@@ -42,7 +42,7 @@ func NewK8sCollector(baseURL, namespace string, opts ...Option) *K8sCollector {
 	return &K8sCollector{
 		baseURL:   strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		namespace: strings.TrimSpace(namespace),
-		client:    &http.Client{Timeout: o.timeout},
+		client:    newHTTPClient(o),
 		topN:      o.topN,
 	}
 }
