@@ -325,15 +325,22 @@ type Querier interface {
 	// 每行是「一条已关联告警」；调用方按 incident_id 聚合。
 	// ends_at 可能为 NULL（仍 firing），由 Go 侧按当前时刻兜底。
 	//
-	// **每个 incident 只返回最近 limit_per_incident 条**（R7，2026-10-12 实测加）：
+	// **每个 incident 只返回最近 limit_per_incident 条 + 该事件的种子告警**（R7，2026-10-12 实测加）：
 	// 旧版无上限 ⇒ 候选集 = 全部 open incident 的成员总数，且随告警量只增不减。
 	// 实测 1 万条告警（8 个 incident）时候选集 7555 条：本查询单次 11ms、
 	// correlateOne 每条新告警评分 7555 次 ⇒ 吞吐从 1785 条/s 崩到 ~4.5 条/s。
-	// 限额后候选集 ≤ incident 数 × K，把 O(成员总数) 降为 O(incident 数 × K)。
+	// 限额后候选集 ≤ incident 数 × (K+1)，把 O(成员总数) 降为 O(incident 数 × K)。
 	//
 	// 取「最近」而非「最早」：ROW_NUMBER 按 a.id 降序，而 id 自增 ⇒ 留下的是
 	// 最新加入的告警，它们最能代表该事件当前的形态（时间窗、服务、标签）。
 	// limit_per_incident <= 0 视为不限额（保持旧行为，便于对比与回归）。
+	//
+	// **种子锚定（R7 收口，2026-10-12 补）**：只取最近 K 条会漏合并——新告警的最佳匹配
+	// 若是 K 条以前的老成员，裁掉后 max 得分可能跌破阈值（异质探针实证：不限额 1 组 /
+	// 限额 2 组，见 internal/correlation/replay_realtime_test.go）。种子 = 该事件的
+	// 首条告警（min(a.id)，即 NEW 档建事件时 link 的那条），事件的标题/severity 都由
+	// 它派生，是事件身份的来源。候选集恒含种子 ⇒「与事件同根因的新告警」绝不漏合并，
+	// 成本是每事件仅多 1 条候选（WHERE 过滤不产生重复行）。
 	ListOpenIncidentsWithAlerts(ctx context.Context, limitPerIncident int32) ([]ListOpenIncidentsWithAlertsRow, error)
 	// 待确认队列：needs_review 为真的关联边（0003 已建部分索引，直接可用）。
 	// 与列表接口同样用 limit+1 探测分页，故 limit 由调用方按 limit+1 传入。
