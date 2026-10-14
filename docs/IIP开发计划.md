@@ -291,7 +291,12 @@ iip/
   - **压测复跑结果（2026-10-12，M2 关联开启，锚定前）**：**6/6 判据 PASS**——1 万条、b=1、c=8、wall=54.8s、吞吐 **182 条/s**（修复前 ~4.5 条/s，提升约 40 倍）、折算单条 **p95=76.3ms < 200ms**、零丢失（10000=10000）、rejected=0、指纹互异。报告见 `scripts/_verify_bench.txt`；以 `python scripts/ingest_bench.py -n 10000 -b 1 -c 8` 实际输出为准。
   - **种子锚定后压测复跑（2026-10-14）**：**6/6 判据 PASS**——同参 1 万条、b=1、c=8、wall=28.9s、吞吐 **346 条/s**、折算单条 **p95=45.6ms < 200ms**、零丢失、rejected=0、指纹互异。锚定每事件仅 +1 条候选，对吞吐无感（数值优于上轮主要来自机器状态更热，非锚定本身提速；结论以判据全过 + 无量级劣化为准）。
   - 仍存在的差距：开关联 1785 条/s vs 开关联 182~346 条/s（约 5~10 倍）——剩余成本是每条告警与 ≤(incident 数×21) 个候选评分 + 2~3 次写库往返，**不再是候选集爆炸**。若未来要更高吞吐，R7 应对③「关联异步化」是兜底。
-- [ ] T7.4 故障演练：kill worker → 重启恢复任务、PG 断连 30s → 自动重连补采、Redis 缺席 → DB polling 兜底（1d）
+- [x] T7.4 故障演练：kill worker → 重启恢复任务、PG 断连 → 自动重连补采、Redis 缺席 → DB polling 兜底（1d）
+  - 2026-10-14 实测：**33/33 判据 PASS（FAIL=0、SKIP=0，总耗时 70.3s）**。一键脚本 `python scripts/fault_drill.py`——真实进程级故障注入（真 kill / 真停库），端口 PG 5436 + HTTP 8083 + 独立 PGDATA，与其余四条验证链路错开；报告逐行落盘 `scripts/_fault_drill.txt`（gitignore 覆盖，同 `_verify_*.txt` 惯例）。
+  - **D1 worker 崩溃与任务回收**（崩溃现场真杀出来，非 SQL 预置）：假采集器挂起 60s 把任务按在 in_flight → 硬杀 worker1（claimed_by 后缀与 pid 对得上）→ 任务停在 in_flight（持有者已消失）→ 起 worker2（stale_after 注入 10s）→ **ReclaimStale 回收**（worker2 日志实证）→ 重领重采 → done。**attempts=2**（崩溃者领 1 次 + 新 worker 领 1 次；回收不 +1、领取才 +1）⇒ 队列不僵死；证据 5 条 + 游标 window_end 回填 + 零死信（崩溃一次不耗尽 3 次尝试）。
+  - **D2 PG 断连与自动重连**（真停库 25s）：断连期 webhook **13/13 全 503**（存储不可用可重试语义）+ healthz 503 + server/worker 进程全存活 + worker 日志有逐轮重试记录（非静默停摆）；重启 PG 后**不重启 server**，healthz 自动回 200 ⇒ **pgxpool 自动重连实证**；恢复后新告警入队→采集→证据落库；断连期直插的任务（SQL 注入，payload 带游标；「断连期无法走 webhook 入队」已在判据 detail 标注）恢复后照常处理完 ⇒ **队列不丢**；全程零死信；基线事件证据 5→10（增量补采，不重采覆写）。
+  - **D3 Redis 缺席**：`go list -deps ./cmd/iip-worker` 依赖闭包**零 Redis 客户端**（275 个包无命中）+ go.mod 无 redis require ⇒ 结构上不存在 Redis 代码路径；运行时本演练全程无 Redis 进程/环境变量而轮询采集闭环成立（D1/D2 的 PASS 即证据）；外部佐证：verify-func 的 M4 采集闭环 89 PASS 同样运行在默认 DB polling 配置（IIP_REDIS_DISABLED 默认 true）下。
+  - 诚实声明：① D1 注入 `--evidence-timeout=30s`（生产默认 5s）只为拉宽崩溃观察窗，判据 detail 有标注；② D2 停库用 `pg_ctl stop -m fast`（计划性停库）模拟断连，不模拟磁盘损坏/脑裂等更深故障（属 PG 自身领域）；③ 三场景的恢复行为全部由产品自身完成，脚本只观测不干预。
 - [ ] T7.5 Docker Compose 生产化：健康检查、重启策略、资源限制、外部数据源 TLS 配置；Helm Chart 简化版（1d）
 - [ ] T7.6 README（Quickstart/架构图/API 摘要）+ CHANGELOG + v0.1.0 发布流程（1d）
 - [ ] T7.7 完整 E2E 回归（M1-M6 验收项一键脚本化）（1d）
