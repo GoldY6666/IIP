@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：M3（事件生命周期）S1 + S2 已交付，S3 前端未开工**——M0 交付可运行的地基；M1 接入告警接收与落库（含 ADR-007 修复）；M2 实现五维加权评分 + 三档决策的关联引擎，把同根因告警自动聚合为 Incident；M3 在其上实现事件状态机（6 态 / 36 格转换矩阵）、乐观并发控制、状态与留痕同事务、待确认队列与人工判定、关联抑制，并新增 6 个 HTTP 端点（详见下文「M3 验收状态」）。**验证链路共四条**：`verify-runtime.py`（宿主机全栈）、`verify-images.py`（容器链路，**41 项断言 0 失败**）、`verify-func.py`（业务闭环 **48 项断言**）、`check-binaries.py`（镜像内容物）；真库门禁 **PASS=250 FAIL=0 SKIP=0**，`golangci-lint` v1.61.0 rc=0，容器内 `-race` rc=0。**尚未交付**：前端（路由/布局壳/事件列表/详情双 Tab/处置交互）按 ADR-016 留待 S3 一次性交付，前端自动化测试延至 M5——两项均如实标注 NOT DONE，未修饰为通过。
+> **当前阶段：v0.1.0 发布中（T7.6）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化中 T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）已收口。**如实标注的未交付项**：开发计划 §10 的 M6（Slack 通知 + `/metrics`，T6.1–T6.5）**未开工**；T7.1（告警分区）/ T7.2（JSONB 索引调优）/ T7.7（E2E 一键化）未做；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）。真库门禁最近一轮 **939 PASS / 1 SKIP / 0 FAIL**（SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -96,8 +96,8 @@ make verify-images
 等价的原始命令：
 
 ```bash
-docker build --target server -t iip-server:0.0-m0 .
-docker build --target worker -t iip-worker:0.0-m0 .
+docker build --target server -t iip-server:0.1.0 .
+docker build --target worker -t iip-worker:0.1.0 .
 docker compose -f deploy/docker-compose.yml --profile app up -d
 ```
 
@@ -251,6 +251,83 @@ iip/
 
 ---
 
+## 系统架构
+
+```mermaid
+flowchart LR
+    subgraph EXT["外部数据源（部署侧提供）"]
+        AM["Alertmanager :9093"]
+        PROM["Prometheus :9090"]
+        LOKI["Loki :3100"]
+        K8S["K8s API（可选·默认关）"]
+        TRACE["链路后端（可选·默认关）"]
+    end
+
+    subgraph IIP["IIP（本仓库）"]
+        WEB["Web UI<br/>Vite/React，server 静态托管"]
+        SRV["iip-server :8080<br/>chi API + 五维关联引擎"]
+        WRK["iip-worker<br/>轮询领任务 + 四类采集器"]
+        PG[("PostgreSQL 16<br/>9 张表 + 0001-0007 迁移")]
+    end
+
+    BROWSER["浏览器"] --> WEB
+    WEB -->|"同源 /api/v1"| SRV
+    AM -->|"POST /api/v1/alerts/webhook"| SRV
+    SRV -->|"落库 → 关联 → 入队（同事务外 best-effort）"| PG
+    SRV -->|"启动时自动执行内嵌迁移"| PG
+    WRK -->|"领取任务 / 回写游标 / 写证据"| PG
+    WRK -->|"PromQL / LogQL / K8s API / Jaeger Query"| PROM
+    WRK --> LOKI
+    WRK --> K8S
+    WRK --> TRACE
+    BROWSER -.->|"UI 面板深链（浏览器侧直连）"| PROM
+```
+
+三条设计主线（对应代码里的硬约束）：
+
+1. **采集不在告警接入路径上**。webhook 只做「落库 → 关联 → 入队」，
+   证据采集由 worker 异步完成——数据源宕机时 webhook 延迟不变（实测 31ms → 61ms），
+   Alertmanager 不会因 IIP 采不到证据而重投放大风暴。
+2. **V1.0 无 Redis**。`IIP_REDIS_DISABLED` 默认 `true`，任务队列就是 PG 表
+   （`FOR UPDATE SKIP LOCKED` 领取、`stale_after` 回收）。D3 场景用依赖闭包
+   静态证明了 worker 零 Redis 代码路径（T7.4）。
+3. **server 无状态、迁移幂等**。启动时自动跑内嵌迁移（加锁），
+   多副本并发启动不会互相踩；关联配置（权重/阈值）存 `correlation_rules` 单行，
+   改后免重启即对下一条告警生效。
+
+---
+
+## API 摘要
+
+全部路由注册在 `cmd/iip-server/main.go`（单一装配点，无分散注册）。
+**鉴权列**指 `IIP_AUTH_TOKEN` 启用时的行为：未启用时全部放行（内网默认形态）。
+
+| 方法 | 路径 | 里程碑 | 说明 | 鉴权 |
+|------|------|--------|------|------|
+| GET | `/healthz` | M0 | 真查库（`SELECT 1`）：200 `ok` / 503 `unavailable` | 否 |
+| GET | `/api/v1/auth/session` | M6 S4 | 前端凭据来源；无凭据返回 200 + `auth_required=false` | 否 |
+| POST | `/api/v1/alerts/webhook` | M1 | Alertmanager 接入；请求体上限 1 MiB（超限 413） | 是 |
+| GET | `/api/v1/alerts` | M1 | 告警列表，默认最新 100 条，`?limit=&offset=` 自动夹紧 | 是 |
+| GET | `/api/v1/correlation/config` | M2 | 读关联权重/阈值（单行配置） | 是 |
+| PUT | `/api/v1/correlation/config` | M2 | 改配置，免重启生效；非法值 422 / 不成形 400 | 是 |
+| GET | `/api/v1/incidents` | M3 | 事件列表，过滤/排序/分页/聚合计数 | 是 |
+| GET | `/api/v1/incidents/{id}` | M3 | 事件详情（关联告警超 200 条时 `truncated=true`，计数走 `count(*)` 真值） | 是 |
+| POST | `/api/v1/incidents/{id}/transition` | M3 | 状态流转；乐观并发冲突 409，留痕与状态同事务 | 是 |
+| POST | `/api/v1/incidents/{id}/comments` | M3 | 追加评论（timeline） | 是 |
+| GET | `/api/v1/reviews` | M3 | 待确认队列（`needs_review`） | 是 |
+| POST | `/api/v1/reviews/{incidentID}/{alertID}` | M3 | 人工判定（确认并入 / 抑制）；抑制可幂等 | 是 |
+| GET | `/api/v1/incidents/{id}/evidence` | M4 | 事件证据列表；超 50 条截断并给 `truncated`/`total` | 是 |
+
+错误码可判别性约定（各 handler 一致）：请求不成形 → **400**；体量超限 → **413**；
+语义非法 → **422**；乐观并发冲突 → **409**；存储不可用 → **503**。
+契约测试见 `internal/api/*_test.go` 与 `scripts/verify-func.py`。
+
+> 静态托管（M5 S3）由 `internal/webui` 注册在**路由表末尾**：非 `/api/*` 且
+> 非 `/healthz` 的 GET 回落 `index.html`（SPA 深链接可刷新打开），
+> `/api` 前缀永不吞。目录穿越一律 400。
+
+---
+
 ## 常用任务
 
 Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ Makefile ↔ tasks.ps1 目标名一致）：
@@ -275,7 +352,7 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 
 查看全部任务：`make help` 或 `pwsh -File scripts/tasks.ps1 list`。
 
-### 验证脚本：四条链路，别混用
+### 验证脚本：五条链路，别混用
 
 | 脚本 | 链路 | 前置 | 报告 |
 |------|------|------|------|
@@ -283,9 +360,10 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | `scripts/verify-runtime.py` | 宿主机全栈（偏 M1/M2 单点校验） | 宿主 PostgreSQL | `_verify_runtime.txt` |
 | `scripts/verify-images.py` | 容器链路（偏部署形态与镜像内容物） | Docker daemon | `_verify_images.txt` |
 | `scripts/check-binaries.py` | 镜像内容物（交叉编译 + ELF 解析） | 无 | 控制台 |
+| `scripts/fault_drill.py` | **故障演练**（T7.4）：真 kill worker / 真停 PG / Redis 缺席，验恢复行为 | Go 工具链 + 绿色版 PostgreSQL + 5436/8083 空闲 | `_fault_drill.txt` |
 
-`verify-func.py` 默认用 **5434 / 8082**，与 `verify-runtime.py` 错开，
-两条链路可并存而不互相抢占。
+`verify-func.py` 默认用 **5434 / 8082**，`fault_drill.py` 用 **5436 / 8083**（独立 PGDATA），
+与 `verify-runtime.py` 错开，几条链路可并存而不互相抢占。
 
 > **自己写端到端验证时注意三条**（2026-10-03 各踩一次，详见 M3 报告 §14.7）：
 > 1. 告警的 `startsAt` / `endsAt` **必须固定** —— firing 的 `endsAt` 落库为 NULL，
@@ -638,3 +716,68 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 
 > **复现方式**（`verify-func.py` / `verify-runtime.py` / `verify-images.py` / 静态门禁
 > 四条链路互不重叠，缺一条就有一类缺陷漏网；详见 `docs/M5-交付详细报告.md` §7）
+
+---
+
+## M6 验收状态（如实标注）
+
+**阶段**：M6（证据深化与遗留缺口收口）——注意与开发计划 §10 的 M6（通知与基础指标）
+**不是同一件事**：手册 M6 已交付（下表），计划 M6 **未开工**（见「T7 与后续」）。
+详细报告见 `docs/M6-交付详细报告.md`；决策记录见 `docs/decisions.md`。
+
+### 已完成并实测
+
+| 项 | 状态 | 实测 |
+|---|------|------|
+| S1 confidence / RCA | **达成** | `internal/rca/` 三态判据（Unassessable / Weak / Medium / Strong）+ 覆盖度 `Assign` + 档位表 `Compose`；宿主链路 10 条断言全绿（`1.0 倍→0.50` / `10.0 倍→0.65`、覆盖度 `2/6`）；覆盖率 93.6%，变异测试 8/8 证明判据非恒真。**「给不出依据必须留空」约束仍在**：容器链路实测 `total=7 assigned=0 unassessable=7` 是判据起作用，不是缺陷 |
+| S2 trace 采集器 | **达成** | `internal/collectors/trace.go` + worker 条件注册，零迁移（`trace` 早在 0001 的 CHECK 内）；容器链路 3 条断言（禁用 ×2 + 启用 ×1）全绿；变异测试（摘 `MustRegister` 后如期变红）证明判据有鉴别力 |
+| S3 容器截图（DoD 3） | **已闭环**（2026-10-12） | `verify-images.py` 整体 **87 PASS / 0 FAIL**；「列表 → 详情 → 处置」10 PASS；三张截图非空白；处置真落库（`status=investigating`、`timeline 2→3`）。此前判据写完从未真跑（Docker 引擎不可用），已如实登记后补跑 |
+| S4 UI 鉴权 | **达成** | `IIP_AUTH_TOKEN` 静态 token 护 `/api/v1/*`；`/healthz` 与 `/auth/session` 放行；token 不回显日志；容器链路 401/200 双断言 |
+| S5 账目归零 | **达成** | M4/M5 期只写在报告正文未进登记册的 OPEN 已全部补登 `decisions.md`，并就地关闭已关闭项 |
+| 真库门禁 | **达成（环境限定）** | 宿主 **PASS=912 / FAIL=0 / SKIP=1**；**Linux 容器侧 SKIP=0**（`TestHandlerAllowsSymlinkedRoot` 真 PASS）。宿主那条 SKIP 是 Windows 无 `SeCreateSymbolicLink` 权限，与真库无关，属可接受项——引用时**必须写清是哪个环境** |
+
+### 未达成 / 取舍（如实标注，不得记为通过）
+
+| 项 | 状态 | 原因 |
+|----|------|------|
+| `v0.0-m6` tag | **未打** | 报告明示「不宣布 M6 全部完成」：宿主侧 SKIP=1 + 4 条 OPEN。功能已随 v0.1.0 发布（见 CHANGELOG） |
+| K8s / trace 证据恒「无法评估」 | **OPEN**（OPEN-M6-2） | 采集器写不出 `change_ratio`（K8s API 不保留历史副本数、trace 无比字段）。**保持现状**：不为凑覆盖率硬编强度值；k8s Warning 事件侧已补可信 `change_ratio`，但 rollout 侧仍给不出 |
+| K8s 采集器默认不注册 | **OPEN**（OPEN-M6-3） | 偏差 B1：仓库零 K8s 依赖，无 kubeconfig / RBAC。接入是部署侧的事，**不为验收打开开关**；现有证据只有 mock 单测 + 变异测试 |
+| `Assign` 跨轮不重算 | **OPEN**（OPEN-M6-4） | 幂等是故意的（避免后批证据悄悄改掉前批结论）。覆盖度偏低属已知取舍，非缺陷 |
+| `main.go` / `config.go` 超 300 行 | **OPEN**（OPEN-M6-1） | 340 / 410 行，自 M2 起存在且随里程碑加剧。按既有做法只拆本里程碑新增部分 |
+| CI 在 GitHub 上执行 | **无法验证** | 仓库无 git remote，`ci.yml` 从未在 GitHub 跑过（本地等价复现：`-race` 容器内 PASS、lint rc=0） |
+
+---
+
+## T7 与后续（加固线，如实标注）
+
+| 项 | 状态 | 说明 |
+|----|------|------|
+| T7.1 告警按月分区 + retention | **未做** | `pg_partman` 或定时任务方案未实施 |
+| T7.2 JSONB 索引调优 | **未做** | Replay 慢查询采样未跑 |
+| T7.3 压测（1 万条） | **已收口** | **6/6 判据 PASS**：吞吐 346 条/s、折算单条 p95=45.6ms < 200ms、零丢失、rejected=0；M2 Replay 指标无退化（1.0000/1.0000）。残留边界：候选限额下「新告警最佳匹配为非种子老成员」仍可能漏合并（窄，待 V1.1 复查） |
+| T7.4 故障演练 | **已收口** | `scripts/fault_drill.py` **33/33 PASS**：真 kill worker → ReclaimStale 回收（attempts=2）；真停 PG 25s → 不重启进程自动重连 + 队列不丢；Redis 缺席 = 默认形态（依赖闭包静态证明） |
+| T7.5 compose 生产化 + Helm | **已收口** | 7 服务 resources + 日志轮转；采集器 TLS（CA / insecure 双模式，读不到 CA 启动即失败）；`deploy/helm/iip` 简化版 chart（内置/外置 PG 双轨）。真栈容器链路段待 Docker daemon 恢复后补跑（T7.5 收口报告已如实标注） |
+| T7.6 README + CHANGELOG + v0.1.0 | **本轮** | 即本文档重构 + `CHANGELOG.md` + 标签四联动 |
+| T7.7 E2E 一键脚本 | **未做** | M1–M6 验收项一键化 |
+| 开发计划 §10 M6（Slack 通知 + `/metrics`） | **未开工** | T6.1–T6.5 全部 `[ ]`：无 Slack adapter、无通知去风暴、无 `/metrics` 端点、无抓取示例、无操作者文档。**v0.1.0 不含通知与自监控指标** |
+
+---
+
+## 发布（v0.1.0）
+
+版本形态：git tag `v0.1.0` + 镜像 `iip-server:0.1.0` / `iip-worker:0.1.0` +
+Helm chart `appVersion: 0.1.0`。四处标签（compose / Makefile `IMAGE_TAG` /
+`verify-images.py` 的 `IIP_TAG` / chart）**必须同步**——这是 M2 起就有的纪律，
+本次发布已由脚本判据锁定（见「T7.6 收口记录」）。
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0：首个公开发布版"   # 指向 T7.6 提交
+git push origin v0.1.0                            # 需先有 remote（本仓库当前没有）
+make image-build                                  # 本机构建 0.1.0 镜像
+```
+
+**如实声明**：本仓库当前**无 git remote**，`git push` 与 GitHub Release
+尚未执行；CI（`.github/workflows/ci.yml`）因此从未在 GitHub 上跑过，
+「CI 绿」目前只有本地等价复现证据。完整变更与已知限制见
+[`CHANGELOG.md`](CHANGELOG.md)。

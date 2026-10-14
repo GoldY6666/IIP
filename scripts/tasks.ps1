@@ -18,7 +18,12 @@ param(
     # 本地 PG 连接串，覆盖默认值即可连别的库
     [string]$PgUrl = 'postgres://postgres:dev@localhost:5432/iip?sslmode=disable',
 
-    [string]$PgContainer = 'iip-pg'
+    [string]$PgContainer = 'iip-pg',
+
+    # 镜像标签：与 Makefile 的 IMAGE_TAG、deploy/docker-compose.yml、
+    # scripts/verify-images.py 的 IIP_TAG、Helm chart 的 appVersion 四处联动。
+    # 2026-10-14 T7.6 起随发版切到 0.1.0（此前 Makefile 侧曾停滞在 0.0-m1）。
+    [string]$ImageTag = '0.1.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,12 +107,58 @@ function Invoke-PgDown {
     docker rm -f $PgContainer
 }
 
+# ---- 以下 8 个于 2026-10-14 T7.6 补齐：Makefile 早有同名目标，
+# ---- 本文件却缺失，导致 README「Makefile ↔ tasks.ps1 同名任务」的合约名不副实。
+
+function Invoke-ImageBuild {
+    Write-Host "[tasks] image-build (tag=$ImageTag)" -ForegroundColor Cyan
+    docker build --target server -t "iip-server:$ImageTag" .
+    docker build --target worker -t "iip-worker:$ImageTag" .
+}
+
+function Invoke-ImageLs {
+    Write-Host '[tasks] image-ls' -ForegroundColor Cyan
+    docker images iip-server
+    docker images iip-worker
+}
+
+function Invoke-AppUp {
+    Write-Host '[tasks] app-up' -ForegroundColor Cyan
+    Invoke-ImageBuild
+    docker compose -f $ComposeFile --profile app up -d
+}
+
+function Invoke-AppDown {
+    Write-Host '[tasks] app-down' -ForegroundColor Cyan
+    docker compose -f $ComposeFile --profile app down
+}
+
+function Invoke-VerifyImages {
+    Write-Host '[tasks] verify-images' -ForegroundColor Cyan
+    python scripts/verify-images.py
+}
+
+function Invoke-VerifyRuntime {
+    Write-Host '[tasks] verify-runtime' -ForegroundColor Cyan
+    python scripts/verify-runtime.py
+}
+
+function Invoke-CheckBinaries {
+    Write-Host '[tasks] check-binaries' -ForegroundColor Cyan
+    python scripts/check-binaries.py
+}
+
+function Invoke-RunLocal {
+    Write-Host '[tasks] run-local' -ForegroundColor Cyan
+    python scripts/run-local-nodocker.py
+}
+
 function Invoke-List {
     Write-Host 'IIP 本地任务（PowerShell 等价物）：' -ForegroundColor Green
     @(
         '  deps          拉取全部依赖（Go modules + 前端 pnpm）',
-        '  compose-up    起 deploy/docker-compose.yml 五服务',
-        '  compose-down  停止并移除五服务（保留 named volume）',
+        '  compose-up    起 deploy/docker-compose.yml 七服务',
+        '  compose-down  停止并移除七服务（保留 named volume）',
         '  run-server    运行 iip-server',
         '  run-worker    运行 iip-worker',
         '  test          运行全部单测（-race）',
@@ -118,7 +169,15 @@ function Invoke-List {
         '  build         编译二进制到 bin/',
         '  tidy          整理 go.mod / go.sum',
         '  pg-up         起本地 PG 容器',
-        '  pg-down       删除本地 PG 容器'
+        '  pg-down       删除本地 PG 容器',
+        '  image-build   构建 iip-server / iip-worker 镜像（多阶段，需 Docker daemon）',
+        '  image-ls      列出本项目镜像',
+        '  app-up        构建镜像并起全部七个服务（含应用组）',
+        '  app-down      停止并移除全部服务（保留 named volume）',
+        '  verify-images 容器链路验证：构建 + 起服务 + 逐项断言 + 出报告 + 清理',
+        '  verify-runtime 应用链路验证：真实 PG 从零建库 -> 迁移 -> 探活 -> 心跳 -> 退出',
+        '  check-binaries 交叉编译 linux/amd64 并校验真静态链接（distroless 前提）',
+        '  run-local     无 Docker 的本地全栈启动（绿色版 PG + server + Vite）'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -137,9 +196,17 @@ switch ($Task.ToLowerInvariant()) {
     'tidy'         { Invoke-Tidy }
     'pg-up'        { Invoke-PgUp }
     'pg-down'      { Invoke-PgDown }
+    'image-build'  { Invoke-ImageBuild }
+    'image-ls'     { Invoke-ImageLs }
+    'app-up'       { Invoke-AppUp }
+    'app-down'     { Invoke-AppDown }
+    'verify-images'  { Invoke-VerifyImages }
+    'verify-runtime' { Invoke-VerifyRuntime }
+    'check-binaries' { Invoke-CheckBinaries }
+    'run-local'    { Invoke-RunLocal }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local）"
         exit 1
     }
 }

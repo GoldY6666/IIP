@@ -305,7 +305,13 @@ iip/
   - **判据**：① 静态 12/12 PASS（verify-images.py 新增 `[0.0]` 段：compose 七服务 resources+logging+restart、TLS 三处接线、四采集器收敛——**放 daemon 检查之前，daemon 不在也能跑**）；② `helm lint` + 3 组 `helm template`（默认/外置+全采集器/漏配）全过，3 类 required 均 rc=1 且错误可读；③ TLS 单测：BuildTLSConfig 5 条 + httptest 自签三态 + 错 CA 被拒 + 零配置路径锁定；④ **变异验证两轮**：WithTLSConfig 改 no-op → 端到端三态两条红（判据有鉴别力）；prometheus.go 退回旧构造 → 收敛判据精确变红；⑤ 全量真库回归 `go test -p 1` exit=0（106.7s，repository 57s/migrations 16s = 真库真跑）；gofmt/vet/golangci-lint(0 issues) 全过。
   - **踩坑记录**：WrongCARejected 用例第一版**恒绿**——httptest 复用包级同一张内置证书，「另一把 CA」其实是同一把；改本地 ecdsa 自签生成异质证书后才真被拒（判据自证失效的又一实例：前提指错对象比断言写错更隐蔽）。
   - **后补门禁（环境阻塞，不冒充）**：**真栈 up + verify-images.py 全链路**——本机 docker daemon 不在跑（Docker Desktop 未启动），compose 仅验到 `config --quiet` rc=0 + python-yaml 静态断言；容器链路段（含 4.7.4d worker 二进制 --help 暴露 TLS flag 的 exec 判据）待 daemon 恢复后补跑。CI ci.yml 仍因 remote 空从未真正跑过。
-- [ ] T7.6 README（Quickstart/架构图/API 摘要）+ CHANGELOG + v0.1.0 发布流程（1d）
+- [x] T7.6 README（Quickstart/架构图/API 摘要）+ CHANGELOG + v0.1.0 发布流程（1d）
+  - 2026-10-14 实施完成。**镜像标签四联动（比 T7.5 预留的三处更广）**：Makefile `IMAGE_TAG`（自查发现自 M2 起停滞在 `0.0-m1`，落后两代漂移，补漂移原因注释）、compose `x-app-image` 锚点 + 注释、Chart.yaml `version`+`appVersion`、values.yaml `tag`、verify-images.py `IIP_TAG` 默认值、check-binaries.py `VERSION`、tasks.ps1 `ImageTag` 参数默认值、deploy/README.md 原始构建示例——全部对齐 `0.1.0`；双向 grep 验证 `0.0-m*` 残留仅剩 docs/ 历史验收表格（按方案不动）+ Makefile 漂移注释 + 两处 `-ldflags version` 注释（代码注入约定说明，非标签值）。
+  - **README 重构**：开头状态行从停更的「M3」改为 v0.1.0 实况（M0–M5 收口、手册 M6 S1–S5 收口、T7.3/4/5 收口），未交付项如实标注（计划 §10 的 M6 五项未开工、T7.1-2-7 未做、K8s/trace 未接真实后端、CI 因 remote 空从未跑过）；验证链路四条→五条（补 fault_drill.py + 5436/8083 端口说明）；新增「系统架构」mermaid 图 + 「API 摘要」表（14 路由从 `cmd/iip-server/main.go` 逐一提取，非手写）；末尾追加「M6 验收状态」「T7 与后续」「发布（v0.1.0）」三节。
+  - **CHANGELOG.md 新建**（Keep a Changelog 格式，英文节标题 + 中文正文）：`## [0.1.0] - 2026-10-14` 聚合 M0–M6 + T7.3–T7.5 全部变更，Fixed 收录 R7 两轮（批量预取实证否决 + 候选限额/种子锚定），Known limitations 如实列出 11 项未交付/已知边界（含 §10 M6 未开工与 R7 残留边界），不粉饰。
+  - **tasks.ps1 补齐**：此前只有 13 个基础函数，T7.3–T7.5 新增的验证能力在 PowerShell 侧完全缺失——补 `ImageTag` 参数 + 8 个函数（Invoke-ImageBuild/ImageLs/AppUp/AppDown/VerifyImages/VerifyRuntime/CheckBinaries/RunLocal）+ list 展示 + switch 分发 + default 错误提示；顺手修正 compose-up/down「五服务」→「七服务」陈旧描述（compose 自 M6 期就是 7 服务，描述漂移）。
+  - **判据**：① `helm lint` rc=0（仅 icon INFO）；② `helm template` 默认组 6 文档 rc=0、外置 PG 组 3 文档 rc=0（外置组少 3 文档 = 内置 PG StatefulSet/PVC/Service 正确消失）；③ `go build ./...` rc=0；④ `tasks.ps1 list` 21 个任务全部正常列出（8 个新函数接线验证）；⑤ 标签一致性双向 grep（见上）。
+  - **诚实声明**：① 本机 docker daemon 不在跑，镜像构建 / verify-images 全链路与 T7.5 一样只到静态校验，tag 未经过容器链路实证；② 仓库无 git remote，`git tag v0.1.0` 仅本地打好，push 与 GitHub Release 待禹本机执行；③ README 的「五服务」类描述漂移说明文档与代码的同步只能靠人肉 grep，已修的这处之外不担保全仓库无同类陈旧数字。
 - [ ] T7.7 完整 E2E 回归（M1-M6 验收项一键脚本化）（1d）
 
 **验收标准（= MVP 总验收）**：

@@ -9,9 +9,10 @@
 image:
   server: iip-server
   worker: iip-worker
-  # 与 deploy/docker-compose.yml 的标签、scripts/verify-images.py 的
-  # IIP_TAG 默认值三处联动。T7.6 发 v0.1.0 时一并修改。
-  tag: "0.0-m2"
+  # 与 deploy/docker-compose.yml 的标签、Makefile 的 IMAGE_TAG、
+  # scripts/verify-images.py 的 IIP_TAG 默认值四处联动。
+  # T7.6（2026-10-14）发 v0.1.0 时一并修改。
+  tag: "0.1.0"
   pullPolicy: IfNotPresent
 
 # ---------------------------------------------------------------- 副本

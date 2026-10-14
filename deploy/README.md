@@ -106,11 +106,11 @@ docker compose -f deploy/docker-compose.yml --profile app up -d
 同一个 Dockerfile 用 `--target` 区分两个镜像，builder 阶段共享 Go 模块缓存。
 
 ```bash
-# 在仓库根执行
-docker build --target server -t iip-server:0.0-m0 .
-docker build --target worker -t iip-worker:0.0-m0 .
+# 在仓库根执行（标签与 Makefile IMAGE_TAG / compose x-app-image / Chart appVersion 四处联动）
+docker build --target server -t iip-server:0.1.0 .
+docker build --target worker -t iip-worker:0.1.0 .
 
-# 等价的一键方式
+# 等价的一键方式（IMAGE_TAG 默认即 0.1.0）
 make image-build
 ```
 

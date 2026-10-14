@@ -7,12 +7,13 @@
 #   应用组（本项目构建）：iip-server / iip-worker
 #
 # 镜像构建（在仓库根执行，先 build 再 up）：
-#   docker build --target server -t iip-server:0.0-m2 .
-#   docker build --target worker -t iip-worker:0.0-m2 .
+#   docker build --target server -t iip-server:0.1.0 .
+#   docker build --target worker -t iip-worker:0.1.0 .
 #   # 或一次性：make image-build
 #
-# 标签随里程碑前移：M0 → 0.0-m0，M1 → 0.0-m1，M2 → 0.0-m2。
-# 改本文件的应用组标签时，务必与 scripts/verify-images.py 的 IIP_TAG 默认值同步，
+# 标签历史：M0~M5 用 0.0-m<n>；T7.6（2026-10-14）起切到 semver 0.1.0。
+# 改本文件的应用组标签时，务必与 scripts/verify-images.py 的 IIP_TAG 默认值、
+# Makefile 的 IMAGE_TAG、deploy/helm/iip 的 appVersion/tag 同步，
 # 否则 compose 会去找一个并未构建的标签，表现为 up 直接失败。
 #
 # 起停：
@@ -45,7 +46,7 @@ x-pg-password: &pg-password "${IIP_PG_PASSWORD:-dev}"
 
 # ---------------------------------------------------------------- 公共锚点
 # 应用组的镜像与连接串在此集中定义，避免两处漂移。
-x-app-image: &app-image iip-server:0.0-m2
+x-app-image: &app-image iip-server:0.1.0
 # 容器内连库走 compose 服务名 postgres:5432（不是宿主机的 5433）。
 x-app-env: &app-env
   IIP_PG_URL: "postgres://postgres:${IIP_PG_PASSWORD:-dev}@postgres:5432/iip?sslmode=disable"
@@ -287,7 +288,7 @@ services:
         limits:
           memory: 256M
     logging: *default-logging
-    image: iip-worker:0.0-m2
+    image: iip-worker:0.1.0
     container_name: iip-worker
     profiles: ["app"]
     restart: unless-stopped
