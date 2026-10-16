@@ -25,6 +25,8 @@ web/dist/
 web/.vite/
 web/node_modules/
 *.local
+# vitest 运行期生成的临时 config（web/vitest.config.ts.timestamp-*.mjs）
+web/*.timestamp-*.mjs
 
 # --- Python（临时辅助脚本遗留） ---
 __pycache__/
@@ -37,6 +39,8 @@ _tree.txt
 _*.txt
 # 验证脚本的服务日志（scripts/verify-*.py 会落 _verify_*_srv.log）
 _*.log
+# E2E 编排器的阶段 JSON 与日志（scripts/verify-e2e.py 落 scripts/_e2e/）
+scripts/_e2e/
 
 # --- 编辑器 / 系统 ---
 .idea/

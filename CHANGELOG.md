@@ -9,7 +9,36 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ## [Unreleased]
 
-（空）
+### Added
+
+- **E2E 一键回归（T7.7，`scripts/verify-e2e.py`）**：把各验证链路 + 真库测试 +
+  UI + 压测编排为 S0–S7 八个阶段，按开发计划的 M1–M6 验收项与 MVP 总验收逐项
+  出状态。特性：阶段结果独立落 `scripts/_e2e/<id>.json`（支持分多批跑完再
+  `--summary` 汇总）；端口开跑前探测（5434 被三条链复用，占位即可读 FAIL）；
+  标签四联动守卫判据（Makefile / compose×3 / deploy README×2 / Chart×2 /
+  values / verify-images / check-binaries / tasks.ps1 + git tag 对齐，治 T7.6
+  发现的「标签停两代没人发现」病）；干净克隆构建检查（MVP 总验收「干净机器
+  clone 后可构建」的直接实证，GOPROXY=off + 冷 GOCACHE）；BLOCKED 语义
+  （daemon 缺席等环境问题不判红但大字警告，`--strict` 下判红，供 CI）；
+  `--dry-run` / `--no-bench` / `--stages` 子集。
+- `scripts/tasks.ps1` 新增 `verify-e2e` 任务（透传 `--stages`/`--summary`/
+  `--strict`），参数块加 `$TaskArgs` 剩余参数口。
+- README 任务表补 `verify-runtime`/`check-binaries`/`verify-e2e` 三行，
+  修正 compose「五服务」→「七服务」陈旧描述。
+
+### Changed
+
+- S1 静态段新增判据：helm lint + 两组 template、`compose config --quiet`
+  由 T7.5/T7.6 的临时命令固化为 E2E 阶段。
+
+### Known limitations
+
+- E2E 的 S7 容器链路需要 Docker daemon：本机 daemon 未启动时记 BLOCKED，
+  MVP 总验收第一项（干净机器 clone + compose up ≤15 分钟）只实证了
+  clone + 构建部分，compose up 计时待 daemon 恢复后补跑
+  （`python scripts/verify-e2e.py --stages s7`）。
+- E2E 汇总的判据计数取自各阶段自己的报告文件，阶段超时/崩溃时计数可能
+  是上一轮的旧值——以阶段状态（FAIL/BLOCKED）为准，计数仅作参考。
 
 ## [0.1.0] - 2026-10-14
 

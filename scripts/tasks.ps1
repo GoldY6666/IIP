@@ -23,7 +23,12 @@ param(
     # 镜像标签：与 Makefile 的 IMAGE_TAG、deploy/docker-compose.yml、
     # scripts/verify-images.py 的 IIP_TAG、Helm chart 的 appVersion 四处联动。
     # 2026-10-14 T7.6 起随发版切到 0.1.0（此前 Makefile 侧曾停滞在 0.0-m1）。
-    [string]$ImageTag = '0.1.0'
+    [string]$ImageTag = '0.1.0',
+
+    # 任务自有参数的透传口：verify-e2e 需要 --stages/--summary/--strict 等，
+    # 而 $Task 是位置参数，额外开关走这里（pwsh -File scripts/tasks.ps1 verify-e2e --stages s2,s3）。
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$TaskArgs = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -153,6 +158,17 @@ function Invoke-RunLocal {
     python scripts/run-local-nodocker.py
 }
 
+function Invoke-VerifyE2E {
+    <#
+    T7.7 E2E 一键回归：编排 S0-S7 八个阶段，按 M1-M6 验收项与 MVP
+    总验收逐项出状态。$TaskArgs 透传（--stages s2,s3 / --summary /
+    --no-bench / --strict / --dry-run）。
+    分批跑的由来回：阶段 JSON 落 scripts/_e2e/，最后 --summary 汇总。
+    #>
+    Write-Host '[tasks] verify-e2e' -ForegroundColor Cyan
+    python scripts/verify-e2e.py @TaskArgs
+}
+
 function Invoke-List {
     Write-Host 'IIP 本地任务（PowerShell 等价物）：' -ForegroundColor Green
     @(
@@ -177,7 +193,8 @@ function Invoke-List {
         '  verify-images 容器链路验证：构建 + 起服务 + 逐项断言 + 出报告 + 清理',
         '  verify-runtime 应用链路验证：真实 PG 从零建库 -> 迁移 -> 探活 -> 心跳 -> 退出',
         '  check-binaries 交叉编译 linux/amd64 并校验真静态链接（distroless 前提）',
-        '  run-local     无 Docker 的本地全栈启动（绿色版 PG + server + Vite）'
+        '  run-local     无 Docker 的本地全栈启动（绿色版 PG + server + Vite）',
+        '  verify-e2e    E2E 一键回归（M1-M6 验收 + MVP 总验收；可透传 --stages s2,s3 / --summary / --strict）'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -204,9 +221,10 @@ switch ($Task.ToLowerInvariant()) {
     'verify-runtime' { Invoke-VerifyRuntime }
     'check-binaries' { Invoke-CheckBinaries }
     'run-local'    { Invoke-RunLocal }
+    'verify-e2e'   { Invoke-VerifyE2E }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e）"
         exit 1
     }
 }

@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：v0.1.0 发布中（T7.6）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化中 T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）已收口。**如实标注的未交付项**：开发计划 §10 的 M6（Slack 通知 + `/metrics`，T6.1–T6.5）**未开工**；T7.1（告警分区）/ T7.2（JSONB 索引调优）/ T7.7（E2E 一键化）未做；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）。真库门禁最近一轮 **939 PASS / 1 SKIP / 0 FAIL**（SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
+> **当前阶段：v0.1.0 已发布（T7.3–T7.7 收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化中 T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）已收口。**如实标注的未交付项**：开发计划 §10 的 M6（Slack 通知 + `/metrics`，T6.1–T6.5）**未开工**；T7.1（告警分区）/ T7.2（JSONB 索引调优）未做；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测编排成一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（最近一轮：7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED）。真库门禁最近一轮 **939 PASS / 1 SKIP / 0 FAIL**（SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -335,7 +335,7 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | 任务 | 作用 |
 |------|------|
 | `deps` | 拉取 Go modules + 前端 pnpm 依赖 |
-| `compose-up` / `compose-down` | 起 / 停 `deploy/docker-compose.yml` 五服务 |
+| `compose-up` / `compose-down` | 起 / 停 `deploy/docker-compose.yml` 七服务 |
 | `run-server` / `run-worker` | 运行 iip-server / iip-worker |
 | `test` | `go test -race -coverprofile=coverage.out ./...` |
 | `lint` | `golangci-lint run ./...` |
@@ -347,12 +347,15 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | `image-build` | 构建 `iip-server` / `iip-worker` 两个镜像 |
 | `image-ls` | 列出本项目镜像 |
 | `app-up` / `app-down` | 构建镜像并起 / 停全部七个服务（含应用组） |
-| `verify-images` | 端到端验证：构建 + 起服务 + 逐项断言 + 出报告 + 清理 |
+| `verify-images` | 容器链路验证：构建 + 起服务 + 逐项断言 + 出报告 + 清理 |
+| `verify-runtime` | 宿主机全栈验证：真实 PG 从零建库 → 迁移 → 探活 → 心跳 → 退出 |
+| `check-binaries` | 交叉编译 linux/amd64 并校验真静态链接（distroless 前提） |
 | `run-local` | 无 Docker 的本地全栈启动（绿色版 PG + server + Vite） |
+| `verify-e2e` | **E2E 一键回归**（T7.7）：编排 S0–S7，按 M1–M6 验收项 + MVP 总验收出总报告；透传 `--stages s2,s3` / `--summary` / `--strict` |
 
 查看全部任务：`make help` 或 `pwsh -File scripts/tasks.ps1 list`。
 
-### 验证脚本：五条链路，别混用
+### 验证脚本：五条链路 + 一个一键编排，别混用
 
 | 脚本 | 链路 | 前置 | 报告 |
 |------|------|------|------|
@@ -361,9 +364,27 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | `scripts/verify-images.py` | 容器链路（偏部署形态与镜像内容物） | Docker daemon | `_verify_images.txt` |
 | `scripts/check-binaries.py` | 镜像内容物（交叉编译 + ELF 解析） | 无 | 控制台 |
 | `scripts/fault_drill.py` | **故障演练**（T7.4）：真 kill worker / 真停 PG / Redis 缺席，验恢复行为 | Go 工具链 + 绿色版 PostgreSQL + 5436/8083 空闲 | `_fault_drill.txt` |
+| `scripts/verify-e2e.py` | **一键回归**（T7.7）：把上面各链路 + 真库测试 + UI + 压测编排成 S0–S7，按 M1–M6 验收项与 MVP 总验收逐项出状态 | 见各阶段（S7 需 Docker daemon，缺席记 BLOCKED 不判红） | `_verify_e2e.txt` + `scripts/_e2e/*.json` |
 
 `verify-func.py` 默认用 **5434 / 8082**，`fault_drill.py` 用 **5436 / 8083**（独立 PGDATA），
 与 `verify-runtime.py` 错开，几条链路可并存而不互相抢占。
+
+**E2E 一键回归**（T7.7）把回归变成一条命令，并按开发计划的验收项出总账：
+
+```bash
+python scripts/verify-e2e.py                 # 一把跑完 S0-S7 并汇总（完整环境）
+python scripts/verify-e2e.py --stages s2,s3  # 只跑真库测试 + 业务闭环（分批）
+python scripts/verify-e2e.py --summary       # 汇总已有阶段结果，不出总报告
+python scripts/verify-e2e.py --dry-run       # 只看阶段计划与端口，不执行
+```
+
+八个阶段：S0 前置（工具链/端口/仓库状态）→ S1 静态（二进制 + 标签四联动 +
+helm + compose config + 干净克隆构建）→ S2 真库全量测试（含 M2 Replay）→
+S3 业务闭环 → S4 UI（vitest + playwright）→ S5 故障演练 → S6 压测 →
+S7 容器链路。汇总报告逐项标注 **M1–M6 验收项**与 **MVP 总验收三项**的状态；
+环境缺条件（如 Docker daemon 不在）的阶段记 BLOCKED 并给出补救命令，
+`--strict` 下 BLOCKED 也判红（CI 用）。每阶段结果独立落
+`scripts/_e2e/<id>.json`，支持分多次调用跑完再 `--summary`。
 
 > **自己写端到端验证时注意三条**（2026-10-03 各踩一次，详见 M3 报告 §14.7）：
 > 1. 告警的 `startsAt` / `endsAt` **必须固定** —— firing 的 `endsAt` 落库为 NULL，
