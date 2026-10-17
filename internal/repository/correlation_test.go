@@ -32,6 +32,14 @@ var corrBase = time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
 // 借道 M1 的 Insert 会引入额外的去重语义，让"插不进去"这类失败难以归因。
 func insertAlertRow(t *testing.T, pool *pgxpool.Pool, fingerprint, status, labels string, startsAt time.Time, endsAt *time.Time) int64 {
 	t.Helper()
+	// T7.1 起 alerts 按 starts_at 月度分区，迁移只预建 [当月, 当月+2]：
+	// corrBase（2026-09）等历史月份不在范围内，裸插会以 23514 失败。
+	// 先补建再插——本文件测的是 M2/M3 仓储语义，「分区缺失」不是它们的
+	// 职责（补建路径由 internal/partition 维护 tick 负责，另有真库用例覆盖）。
+	if _, err := pool.Exec(context.Background(),
+		`SELECT iip_ensure_alert_partitions($1, 2)`, startsAt); err != nil {
+		t.Fatalf("补建 %s 所在月分区失败: %v", startsAt.Format("2006-01"), err)
+	}
 	var id int64
 	err := pool.QueryRow(context.Background(), `
 INSERT INTO alerts (fingerprint, source, severity, status, labels, annotations, raw_payload, starts_at, ends_at)
@@ -198,11 +206,11 @@ func TestCorrelationConfigCoOccurrence(t *testing.T) {
 		t.Fatalf("建事件 Y 失败: %v", err)
 	}
 	for _, id := range alertsX {
-		if err := incidents.LinkAlertToIncident(ctx, incX.ID, id, nil, false); err != nil {
+		if err := incidents.LinkAlertToIncident(ctx, incX.ID, id, corrBase, nil, false); err != nil {
 			t.Fatalf("关联到 X 失败: %v", err)
 		}
 	}
-	if err := incidents.LinkAlertToIncident(ctx, incY.ID, alertD, nil, false); err != nil {
+	if err := incidents.LinkAlertToIncident(ctx, incY.ID, alertD, corrBase, nil, false); err != nil {
 		t.Fatalf("关联到 Y 失败: %v", err)
 	}
 
@@ -313,7 +321,7 @@ func TestListOpenIncidentAlertsProjectsFields(t *testing.T) {
 	for _, id := range []int64{firingID, resolvedID} {
 		// 内层变量改名避免遮蔽外层的 err（govet shadow）：遮蔽虽不影响本用例
 		// 结果，但会让后续新增断言时误用外层 err，属真实的隐患。
-		if errLink := store.LinkAlertToIncident(ctx, inc.ID, id, nil, false); errLink != nil {
+		if errLink := store.LinkAlertToIncident(ctx, inc.ID, id, corrBase, nil, false); errLink != nil {
 			t.Fatalf("关联告警 %d 失败: %v", id, errLink)
 		}
 	}
@@ -399,7 +407,7 @@ func TestListOpenIncidentAlertsExcludesClosedIncidents(t *testing.T) {
 
 	link := func(incidentID int64, fp string) {
 		alertID := insertAlertRow(t, pool, fp, alert.StatusFiring, `{"service":"checkout"}`, corrBase, nil)
-		if err := store.LinkAlertToIncident(ctx, incidentID, alertID, nil, false); err != nil {
+		if err := store.LinkAlertToIncident(ctx, incidentID, alertID, corrBase, nil, false); err != nil {
 			t.Fatalf("关联失败: %v", err)
 		}
 	}
@@ -440,11 +448,11 @@ func TestLinkAlertToIncidentIsIdempotentFirstWins(t *testing.T) {
 	alertID := insertAlertRow(t, pool, "fp-idem", alert.StatusFiring, `{"service":"checkout"}`, corrBase, nil)
 
 	first := 0.85
-	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, &first, false); err != nil {
+	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, corrBase, &first, false); err != nil {
 		t.Fatalf("首次关联失败: %v", err)
 	}
 	second := 0.60
-	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, &second, true); err != nil {
+	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, corrBase, &second, true); err != nil {
 		t.Fatalf("二次关联应静默跳过而非报错，实得: %v", err)
 	}
 
@@ -483,7 +491,7 @@ func TestLinkAlertToIncidentNullScoreForNewTier(t *testing.T) {
 	}
 	alertID := insertAlertRow(t, pool, "fp-new-tier", alert.StatusFiring, `{"service":"checkout"}`, corrBase, nil)
 
-	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, nil, false); err != nil {
+	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, corrBase, nil, false); err != nil {
 		t.Fatalf("NEW 档关联失败: %v", err)
 	}
 	if n := countRows(t, pool,
@@ -509,7 +517,7 @@ func TestLinkAlertToIncidentReviewTierPersistsScoreAndFlag(t *testing.T) {
 	alertID := insertAlertRow(t, pool, "fp-review-tier", alert.StatusFiring, `{"service":"payment"}`, corrBase, nil)
 
 	score := 0.655
-	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, &score, true); err != nil {
+	if err := store.LinkAlertToIncident(ctx, inc.ID, alertID, corrBase, &score, true); err != nil {
 		t.Fatalf("REVIEW 档关联失败: %v", err)
 	}
 
@@ -817,7 +825,7 @@ func TestListOpenIncidentAlertsPerIncidentLimit(t *testing.T) {
 	for i := int32(0); i < limit+5; i++ {
 		id := insertAlertRow(t, pool, fmt.Sprintf("fp-limit-big-%02d", i), alert.StatusFiring,
 			`{"service":"checkout"}`, corrBase, nil)
-		if errLink := store.LinkAlertToIncident(ctx, big.ID, id, nil, false); errLink != nil {
+		if errLink := store.LinkAlertToIncident(ctx, big.ID, id, corrBase, nil, false); errLink != nil {
 			t.Fatalf("关联到大事件失败: %v", errLink)
 		}
 		if i == 0 {
@@ -831,7 +839,7 @@ func TestListOpenIncidentAlertsPerIncidentLimit(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		id := insertAlertRow(t, pool, fmt.Sprintf("fp-limit-small-%02d", i), alert.StatusFiring,
 			`{"service":"payment"}`, corrBase, nil)
-		if errLink := store.LinkAlertToIncident(ctx, small.ID, id, nil, false); errLink != nil {
+		if errLink := store.LinkAlertToIncident(ctx, small.ID, id, corrBase, nil, false); errLink != nil {
 			t.Fatalf("关联到小事件失败: %v", errLink)
 		}
 		smallIDs[id] = true

@@ -112,7 +112,7 @@ INSERT INTO alerts (
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 )
-ON CONFLICT (fingerprint) WHERE status = 'firing' DO NOTHING
+ON CONFLICT (fingerprint, starts_at) WHERE status = 'firing' DO NOTHING
 RETURNING id, fingerprint, source, severity, status, labels, annotations, starts_at, ends_at, raw_payload, incident_id, created_at, updated_at
 `
 
@@ -136,6 +136,12 @@ type InsertAlertParams struct {
 // 「谓词必须重复写一遍」—— 部分唯一索引作为冲突目标时的硬性要求。
 // 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
 // （而不是错误），详见 internal/repository/alerts.go。
+//
+// **T7.1（ADR-022）**：alerts 按 starts_at 月度分区后，唯一索引必须含分区键，
+// 冲突目标从 (fingerprint) 扩为 (fingerprint, starts_at) —— 语义收敛为
+// 「同指纹 + 同 starts_at 最多一条 firing」。Alertmanager 重发不重置 startsAt，
+// 故「并发投递同一条告警」仍被兜底拦截；「同指纹不同 startsAt 的重火并存」
+// 成为已知缺口，由 ScanFiringDuplicates 查询定期曝光（见 partition.sql）。
 func (q *Queries) InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert, error) {
 	row := q.db.QueryRow(ctx, insertAlert,
 		arg.Fingerprint,

@@ -22,8 +22,10 @@ import (
 
 	"github.com/yu/iip/internal/collectors"
 	"github.com/yu/iip/internal/config"
+	"github.com/yu/iip/internal/db"
 	"github.com/yu/iip/internal/evidence"
 	"github.com/yu/iip/internal/logging"
+	"github.com/yu/iip/internal/partition"
 	"github.com/yu/iip/internal/repository"
 	"github.com/yu/iip/internal/store"
 	"github.com/yu/iip/internal/worker"
@@ -84,7 +86,28 @@ func run() error {
 		logger,
 	)
 
-	p := newPoller(logger, proc)
+	// T7.1（ADR-022）：分区维护器。挂在 worker 而不是 server：server 是
+	// 请求路径（webhook 插入有 23514 重试兜底），补建/清理这类周期性
+	// 旁路职责应由后台进程承担。三个参数全部来自配置，默认值见 config。
+	maint, err := partition.NewMaintainer(
+		db.New(pool), logger,
+		cfg.PartitionAheadMonths, cfg.AlertRetentionDays)
+	if err != nil {
+		return fmt.Errorf("装配分区维护器失败: %w", err)
+	}
+
+	// 启动即补建一次分区：server 是独立进程、不依赖 worker 也可能已在插入，
+	// 不能等第一个维护 tick（默认 1h 后）。失败不致命——插入路径有 23514
+	// 重试兜底——但必须留痕：「知道维护没成」与「以为维护成了」
+	// 在日志里是唯一可区分的线索。
+	if created, err := maint.Ensure(ctx); err != nil {
+		logger.Error("启动时补建 alerts 分区失败（插入路径有 23514 重试兜底，维护 tick 会重试）",
+			slog.String("error", err.Error()))
+	} else if len(created) > 0 {
+		logger.Info("启动时已补建 alerts 分区", slog.Any("partitions", created))
+	}
+
+	p := newPoller(logger, proc, maint, cfg.PartitionMaintenanceInterval)
 	return p.loop(ctx, cfg.WorkerPoll)
 }
 
@@ -234,6 +257,17 @@ type taskRunner interface {
 	RunOnce(ctx context.Context) (int, error)
 }
 
+// maintainRunner 是 poller 对分区维护层的最小依赖（T7.1）。
+//
+// 与 taskRunner 同思路：维护 tick 的用例能用假实现精确控制
+// 「维护成功 / 失败 / 补建了几个分区」，不必连真库。
+type maintainRunner interface {
+	// RunMaintenance 执行一轮完整维护（补建分区 + 过期清理 + 重复扫描）。
+	RunMaintenance(ctx context.Context) error
+	// Ensure 只补建分区（worker 启动时调用，保证插入路径不撞 23514）。
+	Ensure(ctx context.Context) ([]string, error)
+}
+
 // poller 持有 polling 循环的运行态。
 //
 // 命名说明：M0 时本类型叫 worker，与 M4 新增的 internal/worker 包同名冲突。
@@ -247,12 +281,18 @@ type poller struct {
 	logger *slog.Logger
 	proc   taskRunner
 
+	// maint 为 nil 或 maintInterval <= 0 时不跑分区维护 tick
+	// （配置校验已拦 <=0；判 nil 是为了让「不传维护器」的用法——
+	// 如只测循环机制的用例——不必伪造间隔）。
+	maint         maintainRunner
+	maintInterval time.Duration
+
 	pollCount int64        // 已完成的轮询次数（原子）
 	inFlight  atomic.Int64 // 当前 in-flight 任务数
 }
 
-func newPoller(logger *slog.Logger, proc taskRunner) *poller {
-	return &poller{logger: logger, proc: proc}
+func newPoller(logger *slog.Logger, proc taskRunner, maint maintainRunner, maintInterval time.Duration) *poller {
+	return &poller{logger: logger, proc: proc, maint: maint, maintInterval: maintInterval}
 }
 
 // loop 是 polling 主循环。ctx 取消后进入 drain 并返回。
@@ -266,6 +306,16 @@ func (p *poller) loop(ctx context.Context, poll time.Duration) error {
 	beat := time.NewTicker(heartbeatInterval)
 	defer beat.Stop()
 
+	// 分区维护 tick（T7.1）：与任务轮询不同频率（默认 1h vs 2s），故独立
+	// ticker。nil channel 在 select 里恒不触发——这是「不配维护器就
+	// 永远不进该分支」的最直白实现，不需要额外的 if 包裹每个 case。
+	var maintTicks <-chan time.Time
+	if p.maint != nil && p.maintInterval > 0 {
+		mt := time.NewTicker(p.maintInterval)
+		defer mt.Stop()
+		maintTicks = mt.C
+	}
+
 	p.logger.Info("worker 启动", slog.Duration("poll_interval", poll))
 
 	// 用 WaitGroup 等待所有已派发的任务 goroutine，供 drain 使用。
@@ -278,6 +328,8 @@ func (p *poller) loop(ctx context.Context, poll time.Duration) error {
 			return nil
 		case <-beat.C:
 			p.heartbeat()
+		case <-maintTicks:
+			p.runMaintenance(ctx)
 		case <-ticks.C:
 			// 每次 tick 派发一个任务 goroutine，递增 in-flight。
 			//
@@ -330,6 +382,29 @@ func (p *poller) runOnce(ctx context.Context) {
 	if n > 0 {
 		p.logger.Info("本轮处理任务数", slog.Int("count", n))
 	}
+}
+
+// runMaintenance 派发一轮分区维护（T7.1），自带 panic recovery。
+//
+// 与 runOnce 的三点同构，理由也同构：
+//   - 独立 goroutine：维护（DELETE 大批过期行）不得阻塞任务轮询主循环；
+//   - panic recovery：维护逻辑的 bug 不得带崩 worker；
+//   - WithoutCancel：SIGTERM 时在跑的维护不被打断——它幂等且周期重来，
+//     真正兜住时长的是 Maintainer 内部各查询自身的超时。
+//
+// 失败只记 Error 不退出：维护是旁路职责。但绝不静默——
+// 补建失败会让插入路径持续撞 23514，日志是唯一线索。
+func (p *poller) runMaintenance(ctx context.Context) {
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				p.logger.Error("runMaintenance panic 已恢复", slog.Any("panic", rec))
+			}
+		}()
+		if err := p.maint.RunMaintenance(context.WithoutCancel(ctx)); err != nil {
+			p.logger.Error("分区维护失败", slog.String("error", err.Error()))
+		}
+	}()
 }
 
 // drain 停止接新任务，等待 in-flight 完成，上限 drainTimeout。

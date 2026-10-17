@@ -200,6 +200,46 @@ func TestConcurrentInsertKeepsSingleFiringRow(t *testing.T) {
 	}
 }
 
+// I-05（T7.1 / ADR-022）：目标月分区不存在时，Insert 必须补建分区后重试成功，
+// 而不是把 SQLSTATE 23514 原样抛给调用方。
+//
+// 这条钉的是「插入路径兜底」：worker 维护 tick 理论上会预建未来分区，
+// 但时钟漂移 / 手工 DROP / 跨月重火都可能让某个告警的 starts_at 落在
+// 预建范围之外。没有重试时，那些告警会永久插不进去，而错误信息只说
+// 「没有为行找到关系的分区」——排查时看不出是分区没建。
+func TestInsertRetriesAfterEnsuringPartition(t *testing.T) {
+	pool := testsupport.NewDB(t)
+	repo := NewAlerts(pool)
+	ctx := context.Background()
+
+	// +6 个月：超出迁移预建的 [当月, 当月+2]，必然无分区。
+	// 截到微秒：PG timestamptz 精度就是微秒，Go 的纳秒尾巴过不了
+	// 往返比较（Equal 比的是时刻，不是墙上显示）。
+	future := time.Now().UTC().AddDate(0, 6, 0).Truncate(time.Microsecond)
+	a := newAlert("fp-i-05-retry", alert.StatusFiring)
+	a.StartsAt = future
+
+	row, inserted, err := repo.Insert(ctx, a)
+	if err != nil {
+		t.Fatalf("目标月无分区时应补建并重试成功，实际报错: %v", err)
+	}
+	if !inserted {
+		t.Fatal("重试后应真正插入")
+	}
+
+	// 分区必须真的被补建：行读得回，且 starts_at 与入参一致。
+	got, err := repo.LatestByFingerprint(ctx, "fp-i-05-retry")
+	if err != nil {
+		t.Fatalf("读回失败: %v", err)
+	}
+	if !got.StartsAt.Equal(future) {
+		t.Errorf("starts_at = %v，期望 %v", got.StartsAt, future)
+	}
+	if got.ID != row.ID {
+		t.Errorf("读回 id = %d，期望 %d", got.ID, row.ID)
+	}
+}
+
 // TestServiceIngestPipeline 用**真实仓储**跑通 Service 的全部去重分支。
 //
 // 走 ParsePayload（而非直接构造结构体），顺便覆盖线上真实的解码路径。

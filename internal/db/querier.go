@@ -109,6 +109,10 @@ type Querier interface {
 	CreateIncident(ctx context.Context, arg CreateIncidentParams) (Incident, error)
 	// 拒绝合并：删除该关联边。
 	DeleteIncidentAlert(ctx context.Context, arg DeleteIncidentAlertParams) (int64, error)
+	// 删除 starts_at 早于 retention_days 的告警行，返回删除行数。
+	// 行级 DELETE + ON DELETE CASCADE 会连带清掉 incident_alerts 的过期链接
+	// （复合 FK (alert_id, alert_starts_at) 见 0008 步骤 9）。
+	DropExpiredAlertPartitions(ctx context.Context, retentionDays int32) (int64, error)
 	// ============================================================================
 	// IIP M4 · tasks 表查询（任务队列）
 	// 规格来源：docs/IIP-M4详细开发手册.md §4.1
@@ -143,6 +147,25 @@ type Querier interface {
 	// 整条查询用不了。凡「同一参数在多处出现且上下文类型可能不同」，
 	// 全部显式 Cast，别指望推断一致。
 	EnqueueTaskIfAbsent(ctx context.Context, arg EnqueueTaskIfAbsentParams) (Task, error)
+	// ============================================================================
+	// IIP T7.1 · 分区维护函数查询封装
+	// 规格来源：migrations/0008_alerts_partition.up.sql 步骤 10 的三个维护函数。
+	//
+	// 这些查询**只封装函数调用**，业务逻辑全在数据库侧（与全项目「SQL 走 sqlc」
+	// 的纪律一致）；Go 侧只做编排与错误分类（见 internal/partition）。
+	//
+	// 消费方：
+	//   * EnsureAlertPartitions      —— worker 维护 tick（from_ts=NULL）+ 插入路径
+	//                                   23514 重试（from_ts=告警 starts_at）
+	//   * DropExpiredAlertPartitions —— worker 维护 tick（retention_days 来自配置）
+	//   * ScanFiringDuplicates       —— worker 维护 tick（曝光跨 starts_at 重火）
+	// ============================================================================
+	// 补建 alerts 月度分区，返回本次新建的分区名（空结果 = 无需补建）。
+	//
+	// from_ts 传 NULL = 只保未来（维护 tick 形态）；传告警自身 starts_at =
+	// 保证目标月必被覆盖（插入路径 23514 重试形态）。覆盖范围是
+	// [min(from_ts 月, 当月), max(from_ts 月, 当月 + ahead_months)]，幂等。
+	EnsureAlertPartitions(ctx context.Context, arg EnsureAlertPartitionsParams) ([]string, error)
 	// 任务失败：重试或进死信。
 	//
 	// 用 SQL 表达式而不是在 Go 里算延迟，原因有二：
@@ -215,6 +238,12 @@ type Querier interface {
 	// 「谓词必须重复写一遍」—— 部分唯一索引作为冲突目标时的硬性要求。
 	// 命中冲突时本语句不返回任何行，调用方须把 pgx.ErrNoRows 解释为「已存在，跳过」
 	// （而不是错误），详见 internal/repository/alerts.go。
+	//
+	// **T7.1（ADR-022）**：alerts 按 starts_at 月度分区后，唯一索引必须含分区键，
+	// 冲突目标从 (fingerprint) 扩为 (fingerprint, starts_at) —— 语义收敛为
+	// 「同指纹 + 同 starts_at 最多一条 firing」。Alertmanager 重发不重置 startsAt，
+	// 故「并发投递同一条告警」仍被兜底拦截；「同指纹不同 startsAt 的重火并存」
+	// 成为已知缺口，由 ScanFiringDuplicates 查询定期曝光（见 partition.sql）。
 	InsertAlert(ctx context.Context, arg InsertAlertParams) (Alert, error)
 	// ============================================================================
 	// IIP M4 · evidence 表查询（证据落库与读取）
@@ -275,6 +304,14 @@ type Querier interface {
 	// 关联一条告警到 Incident。(incident_id, alert_id) 为主键，重复链接静默跳过（幂等）。
 	// correlation_score 为 0.0000-1.0000；NEW 档传 NULL（无关联对象）。
 	// needs_review = true 表示 REVIEW 档，待人工确认。
+	//
+	// **T7.1（ADR-022）**：alert_starts_at 是分区键。0008 起 alerts 按 starts_at
+	// 月度 RANGE 分区，incident_alerts 对 alerts 的外键必须是
+	// (alert_id, alert_starts_at) → alerts(id, starts_at) 复合 FK
+	// （单列 FK 会把每个旧分区都变成 DROP/DETACH 不可达，连保留期 DELETE 都被
+	// 对象级依赖挡死 —— 2026-10-17 实证，见 0008 头部注释）。
+	// 调用方传告警自身的 starts_at（correlation.AlertView.StartsAt），
+	// 与 alerts 行精确匹配才满足外键；传错值 = 外键违反（23503），不会静默错链。
 	LinkAlertToIncident(ctx context.Context, arg LinkAlertToIncidentParams) error
 	// M1 告警列表查询（手册 §3.1 P1 / §4.6）。
 	// 返回**最新 N 条、不做 status 过滤**——状态筛选交给前端；后端只保证稳定且与应用层
@@ -366,6 +403,18 @@ type Querier interface {
 	//
 	// 注意：updated_at 在 0001 中没有触发器，必须显式 NOW()，否则永远停在插入时刻。
 	ResolveAlert(ctx context.Context, arg ResolveAlertParams) error
+	// 列出同一 fingerprint 存在多条 firing 的分组（ADR-022 唯一性收敛后的残余缺口）。
+	//
+	// 为什么是纯 SQL 而不是库函数：sqlc 不展开 RETURNS TABLE 函数的列
+	// （SELECT * FROM func() 会退化成 []interface{}，无类型安全），
+	// 读路径按项目纪律住在 queries/ 里由 sqlc 生成结构体；
+	// 运维要手工看时执行同一段 SQL 即可（与 generated 代码零漂移）。
+	//
+	// 全表扫 firing 行，维护 tick 月级频次下可接受；量级上来后需改窄窗口
+	// （如只扫最近 N 天，或由应用层 LatestByFingerprint 顺带记录）。
+	// 显式 CAST 不可省：sqlc 推不出 array_agg / min / max 的返回类型
+	// （会退化成 interface{}，Scan 时直接报错），聚合表达式的类型必须写死。
+	ScanFiringDuplicates(ctx context.Context) ([]ScanFiringDuplicatesRow, error)
 	// 回写 alerts.incident_id（反规范化指针），便于后续按 incident 直查告警。
 	SetAlertIncident(ctx context.Context, arg SetAlertIncidentParams) error
 	// M3 状态流转的唯一写入点（手册 §4.1 / §4.7）。

@@ -38,7 +38,12 @@ type IncidentStore interface {
 	ListOpenIncidentAlerts(ctx context.Context, perIncidentLimit int32) ([]CandidateAlert, error)
 	// LinkAlertToIncident 关联告警到 Incident（幂等）。
 	// score 为 nil 表示无关联对象（NEW 档）；needsReview=true 表示 REVIEW 档。
-	LinkAlertToIncident(ctx context.Context, incidentID, alertID int64, score *float64, needsReview bool) error
+	//
+	// alertStartsAt 是分区键（T7.1 / ADR-022）：incident_alerts 对 alerts 的
+	// 外键是复合 FK (alert_id, alert_starts_at) → alerts(id, starts_at)，
+	// 传值必须与 alerts 行精确匹配（传错 = 外键违反 23503）。
+	// 调用方传 AlertView.StartsAt——它来自刚落库的告警行本身。
+	LinkAlertToIncident(ctx context.Context, incidentID, alertID int64, alertStartsAt time.Time, score *float64, needsReview bool) error
 	// SetAlertIncident 回写 alerts.incident_id（反规范化指针）。
 	SetAlertIncident(ctx context.Context, alertID, incidentID int64) error
 }

@@ -231,40 +231,62 @@ func TestIncidentLifecycleM3Migration(t *testing.T) {
 	})
 }
 
-// TestFingerprintFiringUniqueness 验证 0002 的部分唯一索引在**数据库层**真的拦得住
-// 重复的 firing，同时不阻断 resolved 的历史行（部分索引的关键语义）。
+// TestFingerprintFiringUniqueness 验证 firing 唯一性在**数据库层**真的拦得住
+// 重复投递，同时不阻断 resolved 的历史行（部分索引的关键语义）。
+//
+// **T7.1（ADR-022）起语义收敛**：alerts 按 starts_at 月度分区，唯一索引从
+// (fingerprint) 扩为 (fingerprint, starts_at) —— 「同指纹同时最多一条 firing」
+// 收敛为「同指纹 + 同 starts_at 最多一条 firing」。Alertmanager 重发不重置
+// startsAt，故「并发投递同一条告警」仍被兜底拦截；「同指纹不同 startsAt 的
+// 重火并存」成为已知缺口（由 ScanFiringDuplicates 曝光），本用例把该边界
+// 如实钉住 —— 写它不是为「允许」它，而是让「有人无意中改窄/改宽索引」时
+// 有断言可依（改回单列 fingerprint 会让下面的边界用例以唯一冲突失败）。
+//
+// starts_at 必须在**运行当月**内取值：分区只覆盖迁移预建的 [当月, 当月+2]，
+// 写死历史月份会让插入以 23514 失败——那是分区缺失，不是唯一性失效。
 func TestFingerprintFiringUniqueness(t *testing.T) {
 	pool := testsupport.NewDB(t)
 	ctx := context.Background()
 
+	// 当月 10 号 12:00：固定值（同指纹两条必须 starts_at 完全相同才冲突），
+	// 又必定落在当月分区内（10 号不跨月，与运行日期无关）。
+	now := time.Now().UTC()
+	sameMonth := time.Date(now.Year(), now.Month(), 10, 12, 0, 0, 0, time.UTC)
+	nextMonth := sameMonth.AddDate(0, 1, 0)
+
 	const insertPlain = `
 INSERT INTO alerts (fingerprint, source, severity, status, labels, raw_payload, starts_at)
-VALUES ($1, 'alertmanager', 'warning', $2, '{}'::jsonb, '{}'::jsonb, NOW())`
+VALUES ($1, 'alertmanager', 'warning', $2, '{}'::jsonb, '{}'::jsonb, $3)`
 
 	const fingerprint = "fp-test-firing-unique"
 
 	// 第一条 firing：应当成功。
-	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "firing"); err != nil {
+	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "firing", sameMonth); err != nil {
 		t.Fatalf("首条 firing 插入失败: %v", err)
 	}
 
-	// 第二条同指纹 firing：必须被唯一索引拒绝（SQLSTATE 23505）。
-	_, err := pool.Exec(ctx, insertPlain, fingerprint, "firing")
+	// 第二条同指纹 firing（starts_at 相同）：必须被唯一索引拒绝（SQLSTATE 23505）。
+	_, err := pool.Exec(ctx, insertPlain, fingerprint, "firing", sameMonth)
 	if err == nil {
-		t.Fatal("同指纹的第二条 firing 应被唯一索引拒绝，实际插入成功")
+		t.Fatal("同指纹同 starts_at 的第二条 firing 应被唯一索引拒绝，实际插入成功")
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "23505" {
 		t.Fatalf("期望 SQLSTATE 23505（唯一性冲突），实际: %v", err)
 	}
 
-	// 生产代码走的是 ON CONFLICT DO NOTHING：应当静默跳过，影响 0 行。
+	// 生产代码走的是 ON CONFLICT (fingerprint, starts_at) DO NOTHING：
+	// 应当静默跳过，影响 0 行。
+	// 注意参数序号：status 是字面量 'firing'（不再占一个参数位），starts_at
+	// 因此是 $2 而不是 $3 —— 曾写成 $3 配 2 个实参，pgx 重编号后 PostgreSQL
+	// 报 42P18「无法确定参数 $2 的数据类型」。显式 ::varchar / ::timestamptz
+	// 让推断与序号脱钩，防同一类坑复发。
 	const insertConflict = `
 INSERT INTO alerts (fingerprint, source, severity, status, labels, raw_payload, starts_at)
-VALUES ($1, 'alertmanager', 'warning', 'firing', '{}'::jsonb, '{}'::jsonb, NOW())
-ON CONFLICT (fingerprint) WHERE status = 'firing' DO NOTHING`
+VALUES ($1::varchar, 'alertmanager', 'warning', 'firing', '{}'::jsonb, '{}'::jsonb, $2::timestamptz)
+ON CONFLICT (fingerprint, starts_at) WHERE status = 'firing' DO NOTHING`
 
-	tag, err := pool.Exec(ctx, insertConflict, fingerprint)
+	tag, err := pool.Exec(ctx, insertConflict, fingerprint, sameMonth)
 	if err != nil {
 		t.Fatalf("ON CONFLICT DO NOTHING 不应报错: %v", err)
 	}
@@ -274,13 +296,14 @@ ON CONFLICT (fingerprint) WHERE status = 'firing' DO NOTHING`
 
 	// resolved 行不受该索引约束 —— 必须能有多条历史，否则「起火→恢复→再起火」会被卡死。
 	if _, err := pool.Exec(ctx,
-		`UPDATE alerts SET status='resolved', ends_at=NOW() WHERE fingerprint=$1`, fingerprint); err != nil {
+		`UPDATE alerts SET status='resolved', ends_at=NOW() WHERE fingerprint=$1 AND starts_at=$2`,
+		fingerprint, sameMonth); err != nil {
 		t.Fatalf("置为 resolved 失败: %v", err)
 	}
-	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "resolved"); err != nil {
+	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "resolved", sameMonth); err != nil {
 		t.Fatalf("resolved 行不应受 firing 唯一索引约束，插入失败: %v", err)
 	}
-	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "firing"); err != nil {
+	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "firing", sameMonth); err != nil {
 		t.Fatalf("原 firing 行已转 resolved，新的 firing 应可插入，失败: %v", err)
 	}
 
@@ -292,6 +315,163 @@ ON CONFLICT (fingerprint) WHERE status = 'firing' DO NOTHING`
 	if total != 3 {
 		t.Errorf("期望 3 条历史行（firing → resolved → resolved/firing），实际 %d 条", total)
 	}
+
+	// **T7.1 新边界（ADR-022 的已知缺口）**：同指纹、不同 starts_at 的 firing
+	// 可以并存 —— 分区键加入唯一索引后的语义收敛，配套缓解是应用层
+	// LatestByFingerprint 去重 + ScanFiringDuplicates 定期曝光。
+	if _, err := pool.Exec(ctx, insertPlain, fingerprint, "firing", nextMonth); err != nil {
+		t.Fatalf("同指纹次月 starts_at 的 firing 应可并存（分区后语义收敛），失败: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM alerts WHERE fingerprint=$1 AND status='firing'`, fingerprint).Scan(&total); err != nil {
+		t.Fatalf("统计 firing 行数失败: %v", err)
+	}
+	if total != 2 {
+		t.Errorf("同指纹跨 starts_at 应并存 2 条 firing（ADR-022 收敛后语义），实际 %d 条", total)
+	}
+}
+
+// migrationAlertsPartition 是 0008（alerts 月度分区，T7.1 / ADR-022）。
+//
+// 「回滚到 0008 之后」= 版本 7，因为 migrate 的版本号是**已应用的最大编号**。
+// 写成 7 而不是 8 是这一行的全部含义（理由同 migrationIncidentLifecycle）。
+const migrationAlertsPartition = 7
+
+// TestAlertsPartitionMigration 覆盖 0008 的五项改动在**数据库层**确实生效
+// 且可单步回滚：分区表形态、复合 PK、alert_starts_at 列 + 复合 FK、
+// 两个维护函数、当月分区。
+//
+// 与 0003 / 0004 的单步回滚用例同理：刻意只回滚 0008 —— 全量回滚会把
+// 0001 建的表一并删掉，届时「列不存在」是必然的，根本测不出 0008 的 down
+// 是否真的把分区形态还原了。隔离到单步才有判别力。
+func TestAlertsPartitionMigration(t *testing.T) {
+	dsn := testsupport.NewEmptyDB(t)
+	m := newMigrator(t, dsn)
+	defer closeMigrator(t, m)
+
+	// 1) 全量 up
+	mustUp(t, m)
+	if v, dirty := currentVersion(t, m); v != latestVersion(t) || dirty {
+		t.Fatalf("up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion(t), v, dirty)
+	}
+	assertAlertsPartitioned(t, dsn, true)
+
+	// 2) 只回滚 0008：0001-0007 保持不动，alerts 回到单表形态。
+	mustDownTo(t, m, migrationAlertsPartition)
+	assertAlertsPartitioned(t, dsn, false)
+
+	// 3) 重新 up：证明可重复执行（幂等）。
+	mustUp(t, m)
+	if v, dirty := currentVersion(t, m); v != latestVersion(t) || dirty {
+		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion(t), v, dirty)
+	}
+	assertAlertsPartitioned(t, dsn, true)
+}
+
+// assertAlertsPartitioned 断言 0008 的分区形态（want=true）或回滚后的单表形态。
+//
+// 六项逐一断言而非只查「表在不在」：0008 的 down 任何一项漏还原
+// （函数没删、列没删、FK 没退回）都会让后续 up 撞「已存在」错误，
+// 而那在「只断言表存在」的用例里全是绿的。
+func assertAlertsPartitioned(t *testing.T, dsn string, want bool) {
+	t.Helper()
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		// ① alerts 表形态：分区父表 relkind='p'，普通表 relkind='r'。
+		var relkind string
+		if err := pool.QueryRow(ctx,
+			`SELECT relkind::text FROM pg_class WHERE oid = 'alerts'::regclass`).Scan(&relkind); err != nil {
+			t.Fatalf("查询 alerts 表形态失败: %v", err)
+		}
+		if want && relkind != "p" {
+			t.Errorf("up 后 alerts 应为分区父表（relkind=p），实际 %q", relkind)
+		}
+		if !want && relkind != "r" {
+			t.Errorf("回滚后 alerts 应为普通表（relkind=r），实际 %q", relkind)
+		}
+
+		// ② 分区键 starts_at 在 PK 里（分区表硬性要求；回滚后 PK 退回单列 id）。
+		var pkHasPartitionKey int
+		if err := pool.QueryRow(ctx, `
+SELECT count(*)
+FROM pg_index i
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+WHERE i.indrelid = 'alerts'::regclass AND i.indisprimary AND a.attname = 'starts_at'`,
+		).Scan(&pkHasPartitionKey); err != nil {
+			t.Fatalf("查询 alerts 主键列失败: %v", err)
+		}
+		if want && pkHasPartitionKey != 1 {
+			t.Error("up 后 alerts 主键应含分区键 starts_at")
+		}
+		if !want && pkHasPartitionKey != 0 {
+			t.Error("回滚后 alerts 主键不应再含 starts_at")
+		}
+
+		// ③ incident_alerts.alert_starts_at 列存在性 + NOT NULL。
+		var isNullable string
+		err := pool.QueryRow(ctx, `
+SELECT is_nullable FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'incident_alerts' AND column_name = 'alert_starts_at'`,
+		).Scan(&isNullable)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if want {
+				t.Error("up 后 incident_alerts.alert_starts_at 列应存在")
+			}
+		} else if err != nil {
+			t.Fatalf("查询 alert_starts_at 列失败: %v", err)
+		} else if !want {
+			t.Error("回滚后 alert_starts_at 列应被删除")
+		} else if isNullable != "NO" {
+			t.Errorf("alert_starts_at 应为 NOT NULL，实际 is_nullable=%s", isNullable)
+		}
+
+		// ④ incident_alerts → alerts 的外键列数：复合 FK 两列，回滚后单列。
+		var fkCols int
+		if err := pool.QueryRow(ctx, `
+SELECT COALESCE(array_length(conkey, 1), 0)
+FROM pg_constraint
+WHERE conrelid = 'incident_alerts'::regclass AND contype = 'f'
+  AND confrelid = 'alerts'::regclass`).Scan(&fkCols); err != nil {
+			t.Fatalf("查询 incident_alerts 外键失败: %v", err)
+		}
+		if want && fkCols != 2 {
+			t.Errorf("up 后 incident_alerts 对 alerts 应为两列复合 FK，实际 %d 列", fkCols)
+		}
+		if !want && fkCols != 1 {
+			t.Errorf("回滚后应退回单列 FK，实际 %d 列", fkCols)
+		}
+
+		// ⑤ 两个维护函数存在性（补建 / 过期清理）。
+		for _, fn := range []string{"iip_ensure_alert_partitions", "iip_drop_expired_alert_partitions"} {
+			var exists bool
+			if err := pool.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = $1)`, fn).Scan(&exists); err != nil {
+				t.Fatalf("查询函数 %s 存在性失败: %v", fn, err)
+			}
+			if want && !exists {
+				t.Errorf("up 后函数 %s 应存在", fn)
+			}
+			if !want && exists {
+				t.Errorf("回滚后函数 %s 应被删除", fn)
+			}
+		}
+
+		// ⑥ 当月分区存在性（仅 up 后断言；回滚后无分区可言）。
+		if want {
+			var partExists bool
+			if err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+    SELECT 1 FROM pg_inherits i
+    JOIN pg_class c ON c.oid = i.inhrelid
+    WHERE i.inhparent = 'alerts'::regclass
+      AND c.relname = 'alerts_' || to_char(date_trunc('month', NOW() AT TIME ZONE 'UTC'), 'YYYY_MM')
+)`).Scan(&partExists); err != nil {
+				t.Fatalf("查询当月分区存在性失败: %v", err)
+			}
+			if !partExists {
+				t.Error("up 后当月分区应存在")
+			}
+		}
+	})
 }
 
 // 被单步回滚用例引用的迁移版本号。
@@ -309,6 +489,143 @@ const (
 	// 而断言仍可能通过——测的就已经不是 0004 的 down 了。
 	migrationIncidentLifecycle = 3
 )
+
+// migrationIndexTuning 是 0009（T7.2 索引调优：tasks 表达式索引 + 删 labels GIN）。
+// 「回滚到 0009 之后」= 版本 8，理由同 migrationIncidentLifecycle。
+const migrationIndexTuning = 8
+
+// tasksPayloadIncidentIndex / alertsLabelsGINIndex 是 0009 直接操作的两个索引名。
+const (
+	tasksPayloadIncidentIndex = "idx_tasks_payload_incident"
+	alertsLabelsGINIndex      = "idx_alerts_labels"
+)
+
+// TestIndexTuningMigration 覆盖 0009 的两项改动在**数据库层**确实生效且可单步回滚：
+// 建 tasks 的部分表达式索引、删 alerts labels 的 GIN（父表 + 全部分区副本）。
+//
+// 与 0003 / 0004 / 0008 的单步回滚用例同理：刻意只回滚 0009 —— 全量回滚会把
+// 0001 建的表一并删掉，届时「索引不在」是必然的，测不出 0009 的 down 是否真的
+// 把 GIN 还原了。隔离到单步才有判别力。
+func TestIndexTuningMigration(t *testing.T) {
+	dsn := testsupport.NewEmptyDB(t)
+	m := newMigrator(t, dsn)
+	defer closeMigrator(t, m)
+
+	// 1) 全量 up：新表达式索引在、GIN 没（父表与分区副本都没）。
+	mustUp(t, m)
+	if v, dirty := currentVersion(t, m); v != latestVersion(t) || dirty {
+		t.Fatalf("up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion(t), v, dirty)
+	}
+	assertTasksPayloadIncidentIndex(t, dsn, true)
+	assertLabelsGIN(t, dsn, false)
+
+	// 2) 只回滚 0009：0001-0008 保持不动，tasks 索引消失、GIN 还原。
+	mustDownTo(t, m, migrationIndexTuning)
+	assertTasksPayloadIncidentIndex(t, dsn, false)
+	assertLabelsGIN(t, dsn, true)
+
+	// 3) 重新 up：证明可重复执行（down 没真还原会在此撞「索引已存在」）。
+	mustUp(t, m)
+	if v, dirty := currentVersion(t, m); v != latestVersion(t) || dirty {
+		t.Fatalf("再次 up 后版本应为 %d 且非 dirty，实际 version=%d dirty=%v", latestVersion(t), v, dirty)
+	}
+	assertTasksPayloadIncidentIndex(t, dsn, true)
+	assertLabelsGIN(t, dsn, false)
+}
+
+// assertTasksPayloadIncidentIndex 断言 idx_tasks_payload_incident 的存在性与定义。
+//
+// 为什么断言**定义**而不只查存在性：0009 的裁定全部来自 EXPLAIN 实测（ADR-023）——
+// 键列或谓词写错（运算符用 -> 而非 ->>、漏掉 WHERE kind、键名拼错）都会让索引
+// 建出来却罩不住目标查询，而「索引存在」的断言对此全绿。定义里必须同时含
+// 表达式键与部分谓词，缺一即红。
+//
+// 用子串包含而非整串相等：pg_get_indexdef 的确切格式随 PG 小版本有差异
+// （括号层数、::text 渲染位置），而不变量是「运算符 + 键名 + 谓词」这三样。
+func assertTasksPayloadIncidentIndex(t *testing.T, dsn string, want bool) {
+	t.Helper()
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		var def string
+		err := pool.QueryRow(ctx, `
+SELECT pg_get_indexdef(i.indexrelid)
+FROM pg_index i
+WHERE i.indexrelid = to_regclass($1)`, tasksPayloadIncidentIndex).Scan(&def)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if want {
+				t.Errorf("up 后 %s 应存在", tasksPayloadIncidentIndex)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("查询 %s 定义失败: %v", tasksPayloadIncidentIndex, err)
+		}
+		if !want {
+			t.Errorf("回滚后 %s 应被删除，实际仍在: %s", tasksPayloadIncidentIndex, def)
+			return
+		}
+		// 键列必须是 ->>（取 text）：用 -> 会得到 jsonb，与消费查询传入的
+		// incident_id 参数类型对不上，索引建了也走不得。
+		if !strings.Contains(def, "payload ->> 'incident_id'") {
+			t.Errorf("索引键应为表达式 (payload->>'incident_id')，实际定义: %s", def)
+		}
+		// 谓词必须落在 kind 上且值为 collect_evidence：两条消费查询
+		// （LastCollectWindowEnd / EnqueueTaskIfAbsent）都带该条件，
+		// 漏掉它会把其他任务类型吸进索引。
+		// 判法刻意不绑完整子串：pg_get_indexdef 把谓词渲染为
+		// `((kind)::text = 'collect_evidence'::text)`（列名带括号与 ::text 投射），
+		// 且括号层数随 PG 小版本有差异 —— 绑死完整串就是假红判据
+		// （2026-10-17 实测踩过：产品正确、断言先红）。
+		// 不变量取「WHERE 存在 + 谓词同时提到 kind 与 collect_evidence」：
+		// 定义里 kind 只可能出现在谓词中（键是 payload 表达式），三者齐备即命中。
+		if !strings.Contains(def, "WHERE") ||
+			!strings.Contains(def, "kind") ||
+			!strings.Contains(def, "'collect_evidence'") {
+			t.Errorf("索引应带部分谓词 kind='collect_evidence'，实际定义: %s", def)
+		}
+	})
+}
+
+// assertLabelsGIN 断言 idx_alerts_labels（alerts 分区父表上的 GIN）的存在性。
+//
+// 父表与分区副本一起数，且要求副本数 == 分区数：0008 重建的 GIN 是**分区索引**，
+// 每个分区各有一份副本。只查父表名会漏掉「副本残留」；不比分区数则会漏掉
+// 「还原出来的其实不是分区索引」。down 重建 → up 再删的往返必须两头都归零/齐全。
+func assertLabelsGIN(t *testing.T, dsn string, want bool) {
+	t.Helper()
+	withPool(t, dsn, func(ctx context.Context, pool *pgxpool.Pool) {
+		var parentExists bool
+		var childCount, partitionCount int
+		err := pool.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM pg_class WHERE oid = to_regclass($1)),
+       (SELECT count(*) FROM pg_inherits i
+          JOIN pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = to_regclass($1)),
+       (SELECT count(*) FROM pg_inherits i
+          JOIN pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = 'alerts'::regclass)`,
+			alertsLabelsGINIndex).Scan(&parentExists, &childCount, &partitionCount)
+		if err != nil {
+			t.Fatalf("查询 %s 存在性失败: %v", alertsLabelsGINIndex, err)
+		}
+		if want {
+			if !parentExists {
+				t.Errorf("回滚后 %s 应被还原", alertsLabelsGINIndex)
+			}
+			if childCount != partitionCount || partitionCount == 0 {
+				t.Errorf("还原后的 %s 应为覆盖全部分区的分区索引，"+
+					"实际分区副本 %d 个 / 分区 %d 个", alertsLabelsGINIndex, childCount, partitionCount)
+			}
+			return
+		}
+		if parentExists {
+			t.Errorf("up 后 %s（零读者 GIN）应被删除，实际仍在父表上", alertsLabelsGINIndex)
+		}
+		if childCount != 0 {
+			t.Errorf("up 后 %s 的全部分区副本应随父索引一并删除，实际残留 %d 个",
+				alertsLabelsGINIndex, childCount)
+		}
+	})
+}
 
 // latestVersion 是当前迁移文件到达的版本号。
 //

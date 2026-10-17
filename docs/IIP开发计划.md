@@ -266,8 +266,17 @@ iip/
 
 **任务清单**：
 
-- [ ] T7.1 告警数据分区：`alerts` 按月分区 + retention 配置（默认 90 天）+ `pg_partman` 或定时任务（1d）
-- [ ] T7.2 JSONB 索引调优：跑 Replay 慢查询采样，验证 GIN 索引命中，必要时加表达式索引（0.5d）
+- [x] T7.1 告警数据分区：`alerts` 按月分区 + retention 配置（默认 90 天）+ `pg_partman` 或定时任务（1d）
+  - 2026-10-17 实施完成（迁移 0008 + `internal/partition/` + `partition.sql` 三维护函数），决策记录 **ADR-022**（取代 ADR-002）。分区键 `starts_at`，PK `(id, starts_at)`，唯一索引收敛为 `(fingerprint, starts_at) WHERE firing`（分区表硬性要求；语义收敛与残余缺口见 ADR-022，缺口由 `iip_scan_firing_duplicates()` 定期曝光）。
+  - **保留期清理的可行形态是实测出来的，不是设计出来的**：被 FK 引用的分区 DROP / DETACH / TRUNCATE **全部失败**（对象级依赖，引用行删净也失败）⇒ `iip_drop_expired_alert_partitions()` 走整表 DELETE + 行级 CASCADE；为此 `incident_alerts` 增加 `alert_starts_at` 列、FK 改复合。代价如实记：分区只增不减、不回收磁盘（空分区保留，顺带为历史月回填留位）。
+  - **修了一个时区相关的真 bug**：分区月界原先写 `m AT TIME ZONE 'UTC'`（date 操作数被隐式转 timestamptz = 会话时区午夜），+08 会话下月末界落到分区中段、迁移直接重叠 FAIL；负偏移会话下更糟——**静默把行分错月**。已改 `(m::timestamp) AT TIME ZONE 'UTC'`（绝对 UTC 午夜），并加永久守卫 `TestPartitionBoundsAreUtcMonthRegardlessOfSessionTz`（显式 SET 负偏移会话时区，按 tableoid 钉行的月份归属）——+08 会让 bug 响亮失败，守卫必须覆盖安静失败的时区。
+  - 回归：真库全量 `go test -p 1` 0 FAIL；`TestAlertsPartitionMigration`（up → 单步回滚到 7 → up）证明 0008 可完整回滚。
+- [x] T7.2 JSONB 索引调优：跑 Replay 慢查询采样，验证 GIN 索引命中，必要时加表达式索引（0.5d）
+  - 2026-10-17 实施完成（迁移 0009），决策记录 **ADR-023**。先取证后裁定：5 万 alerts / 5 千 tasks 规模对 9 条热查询跑 `EXPLAIN (ANALYZE, BUFFERS)`，负载 COMMIT 后读 `pg_stat_user_indexes`（ROLLBACK 会把累计索引计数一并回滚——取证方法本身踩过的坑）。
+  - **裁定①：删 `idx_alerts_labels` GIN（零读者）**。代码级 44 条 sqlc 查询无 labels jsonb 谓词；运行时 600+ 次语句后 14 个分区副本 `idx_scan` **全为 0**（同期 fingerprint_idx=101、FK 索引=22578，证明统计口径有效）。工具脚本的 `labels->>'x'` 过滤不构成读者——`->>` 等式本来就用不了 GIN。代价如实：GIN 写入维护最贵且分区后每分区一份副本。
+  - **裁定②：建 `idx_tasks_payload_incident ON tasks((payload->>'incident_id')) WHERE kind='collect_evidence'`**。证据：Q5（LastCollectWindowEnd）bitmap 读 2144 行再过滤 1.25ms；Q6（EnqueueTaskIfAbsent）**插入路径永远全表扫**（EXISTS 只让跳过路径在首个匹配行短路——主探针里 0.024ms 是短路假象，专项探针三种形态对照证伪了「索引无用」的结论）；tasks 无保留期，成本随表量线性增长。
+  - **记录一个被实测否决的方案**：Q3 join 补分区键 `a.starts_at = ia.alert_starts_at`——V0 14.6ms / V1 21.0ms（2.1k 边），V0 19.9ms / V1 20.8ms（7.5k 边），一组更慢一组持平；主导成本是 5 万 alerts 的 Append + 逐分区 Seq Scan 底价（10.6–11.6ms），分区键裁剪去不掉。写进 ADR 以防后来者重做。
+  - 回归：`TestIndexTuningMigration`（up → 单步回滚到 8 → up，断言索引**定义**而非仅存在性）；变异测试两轮（注掉 DROP → 红；去掉 WHERE 谓词 → 红）证明判据有鉴别力；判据一度假红（`pg_get_indexdef` 渲染谓词带 `::text` 投射，初版子串绑太死），已改绑不变量。真库全量回归 0 FAIL（唯一 SKIP 为已知的 Windows 符号链接权限项）。
 - [x] T7.3 压测：scripts/ingest_bench 灌 1 万告警，目标 p95 < 200ms、零丢失、webhook 不拒绝（1.5d）
   - 2026-10-12 实测：**ingest 链路 6/6 全 PASS**（1 万条、b=1、c=8、吞吐 1785 条/s、折算单条 p95=6.0ms、零丢失、指纹全异）。
   - **但开启 M2 关联时无法收口**：吞吐退化至 ~6 条/s（1 万条 10 分钟跑不完）。分诊证实瓶颈 100% 在关联而非 ingest（`--no-correlation` 下同样 1 万条 16 秒完成）。

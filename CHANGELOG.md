@@ -11,6 +11,20 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **`alerts` 按月 RANGE 分区（T7.1，迁移 0008 / ADR-022）**：分区键 `starts_at`，
+  PK `(id, starts_at)`，月度边界按 UTC 计算——修掉了 `date AT TIME ZONE 'UTC'`
+  在非 UTC 会话时区下把月末界算错（+08 下重叠 FAIL、负偏移下**静默分错月**）
+  的真 bug，永久守卫 `TestPartitionBoundsAreUtcMonthRegardlessOfSessionTz`。
+  保留期清理 `iip_drop_expired_alert_partitions(retention_days)` 走整表 DELETE
+  + 行级 CASCADE（实测被 FK 引用的分区 DROP/DETACH/TRUNCATE 全部失败，
+  对象级依赖与行数无关）；`incident_alerts` 增加 `alert_starts_at` 列、
+  FK 改复合以放行清理。另有两个维护函数：插入路径补建分区（23514 重试）、
+  重复 firing 曝光（见下 Known limitations）。
+- **tasks 事件表达式索引（T7.2，迁移 0009 / ADR-023）**：
+  `idx_tasks_payload_incident ON tasks((payload->>'incident_id'))
+  WHERE kind='collect_evidence'`。LastCollectWindowEnd / EnqueueTaskIfAbsent
+  两条消费查询原先全表扫，且 tasks 无保留期（done 行按设计永久保留供审计），
+  成本随表量线性增长；索引把「按事件找任务」变成定长探测。
 - **E2E 一键回归（T7.7，`scripts/verify-e2e.py`）**：把各验证链路 + 真库测试 +
   UI + 压测编排为 S0–S7 八个阶段，按开发计划的 M1–M6 验收项与 MVP 总验收逐项
   出状态。特性：阶段结果独立落 `scripts/_e2e/<id>.json`（支持分多批跑完再
@@ -28,11 +42,31 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Changed
 
+- **删除 `idx_alerts_labels` GIN 索引（T7.2，迁移 0009 / ADR-023）**：零读者——
+  44 条 sqlc 查询无 labels jsonb 谓词；600+ 次语句执行（覆盖全部触达 alerts
+  的读路径）后，14 个分区副本 `idx_scan` 全为 0，同期其他索引有实际读数
+  （证明统计口径有效而非「统计没开」）。GIN 是写入维护最贵的索引类型且分区后
+  每分区一份副本，删除减少每条告警插入的维护开销与存储。工具脚本的
+  `labels->>'x'` 过滤不构成读者（`->>` 等式本来就用不了 GIN）；若将来要做
+  按 label 搜索，down 迁移已备好重建 DDL。
+- **firing 唯一性语义随分区收敛（T7.1，同 0008）**：同指纹 firing 唯一性从
+  「与 starts_at 无关」变为「同指纹 + 同 starts_at」（分区表唯一约束必须含
+  分区键的硬性要求）。正常路径由应用层 LatestByFingerprint 先行去重，DB 层
+  兜底并发投递（Alertmanager 保证重发不重置 startsAt）。
 - S1 静态段新增判据：helm lint + 两组 template、`compose config --quiet`
   由 T7.5/T7.6 的临时命令固化为 E2E 阶段。
 
 ### Known limitations
 
+- **T7.1 分区只增不减**：保留期清理删行不删分区（FK 对象级依赖使 DROP 分区
+  不可行），空分区长期保留；磁盘回收依赖 VACUUM。空分区顺带为历史月
+  回填/重放留位，是有意取舍。
+- **T7.1 语义收敛的残余缺口**：同指纹、不同 starts_at 的两条 firing 可并存
+  （「起火 → 未收到 resolved → 以新 startsAt 重火」），由
+  `iip_scan_firing_duplicates()` 在维护 tick 定期曝光——是已知限制而非静默错误。
+- **T7.2 删索引的恢复成本**：若将来要做「按 label 搜索告警」，需重新加回 GIN
+  或改用表达式索引（键集合要先设计，脚本用到的键 run/alertname/instance 各不
+  相同，直接建表达式索引是选择性灾难）。down 迁移已备好 GIN 的还原 DDL。
 - E2E 的 S7 容器链路需要 Docker daemon：本机 daemon 未启动时记 BLOCKED，
   MVP 总验收第一项（干净机器 clone + compose up ≤15 分钟）只实证了
   clone + 构建部分，compose up 计时待 daemon 恢复后补跑

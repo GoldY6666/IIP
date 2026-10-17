@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,7 +65,7 @@ func testLogger() *slog.Logger {
 
 // TestPoller_Loop_ExitsOnContextCancel：ctx 取消后 loop 必须返回（不挂死）。
 func TestPoller_Loop_ExitsOnContextCancel(t *testing.T) {
-	p := newPoller(testLogger(), simpleRunner{})
+	p := newPoller(testLogger(), simpleRunner{}, nil, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -92,7 +93,7 @@ func TestPoller_Loop_ExitsOnContextCancel(t *testing.T) {
 // 只能等超时回收（默认 5 分钟）才有人再领它。
 func TestPoller_Drain_WaitsForInFlight(t *testing.T) {
 	br := newBlockingRunner()
-	p := newPoller(testLogger(), br)
+	p := newPoller(testLogger(), br, nil, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -138,7 +139,7 @@ type panicRunner struct{}
 func (panicRunner) RunOnce(context.Context) (int, error) { panic("boom") }
 
 func TestPoller_RunOnce_RecoversPanic(t *testing.T) {
-	p := newPoller(testLogger(), panicRunner{})
+	p := newPoller(testLogger(), panicRunner{}, nil, 0)
 	// 不应 panic 到测试层面。
 	p.runOnce(context.Background())
 }
@@ -153,11 +154,94 @@ func TestPoller_RunOnce_RecoversPanic(t *testing.T) {
 // （pollCount 由 loop 递增，不在 runOnce 里）。这条用例的价值恰恰在于
 // 它不需要任何断言就能失败 —— panic 会直接让测试失败。
 func TestPoller_RunOnce_DoesNotCrashOnTaskError(t *testing.T) {
-	p := newPoller(testLogger(), erroringRunner{err: errors.New("Prometheus 超时")})
+	p := newPoller(testLogger(), erroringRunner{err: errors.New("Prometheus 超时")}, nil, 0)
 	p.runOnce(context.Background())
 
 	if n := p.inFlight.Load(); n != 0 {
 		t.Errorf("runOnce 结束后 in-flight 应为 0，实得 %d —— 计数只在 loop 里加减", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 分区维护 tick（T7.1）
+//
+// 维护与任务轮询是两个不同频率的 ticker（默认 1h vs 2s）。这里钉住两件事：
+//   1. 维护 tick 到点真的会跑 RunMaintenance —— 接口接了却从不调用的缺陷
+//      编译期零症状，上线后表现为「分区永远不补建、插入持续撞 23514」；
+//   2. 维护失败只记日志、不带崩循环 —— 旁路职责的失败必须可观测而非致命。
+// ---------------------------------------------------------------------------
+
+// fakeMaintainer 实现 maintainRunner，记录调用次数；lastErr 非 nil 时
+// RunMaintenance / Ensure 都返回它，用于模拟维护失败。
+type fakeMaintainer struct {
+	mu      sync.Mutex
+	calls   int
+	lastErr error
+}
+
+func (f *fakeMaintainer) RunMaintenance(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return f.lastErr
+}
+
+func (f *fakeMaintainer) Ensure(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return nil, f.lastErr
+}
+
+func (f *fakeMaintainer) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+var _ maintainRunner = (*fakeMaintainer)(nil)
+
+func TestPoller_Loop_RunsMaintenanceTick(t *testing.T) {
+	fm := &fakeMaintainer{}
+	// 维护间隔 5ms（任务轮询 10ms），保证测试窗口内能触发。
+	p := newPoller(testLogger(), simpleRunner{}, fm, 5*time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.loop(ctx, 10*time.Millisecond) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for fm.callCount() == 0 {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("维护 tick 到点未执行 RunMaintenance（接口接了但没调用？）")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("loop 返回错误: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ctx 取消后 loop 未退出")
+	}
+}
+
+func TestPoller_RunMaintenance_FailureDoesNotCrashLoop(t *testing.T) {
+	fm := &fakeMaintainer{lastErr: errors.New("补建分区失败")}
+	p := newPoller(testLogger(), simpleRunner{}, fm, 5*time.Millisecond)
+	// 直接调 runMaintenance（内部起 goroutine），不应 panic 到测试层。
+	p.runMaintenance(context.Background())
+
+	deadline := time.Now().Add(2 * time.Second)
+	for fm.callCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if fm.callCount() == 0 {
+		t.Fatal("runMaintenance 未真正调用 RunMaintenance")
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/yu/iip/internal/alert"
 	"github.com/yu/iip/internal/db"
+	"github.com/yu/iip/internal/partition"
 )
 
 // Alerts 是基于 PostgreSQL 的 alert.Repository 实现。
@@ -50,15 +51,23 @@ func (a *Alerts) LatestByFingerprint(ctx context.Context, fingerprint string) (a
 
 // Insert 落库一条告警。
 //
-// sqlc 生成的语句带 ON CONFLICT (fingerprint) WHERE status='firing' DO NOTHING，
-// 命中冲突时**不返回行**（pgx.ErrNoRows）。这在语义上是「已存在同指纹的 firing」，
+// sqlc 生成的语句带 ON CONFLICT (fingerprint, starts_at) WHERE status='firing' DO NOTHING，
+// 命中冲突时**不返回行**（pgx.ErrNoRows）。这在语义上是「已存在同指纹同 starts_at 的 firing」，
 // 属正常业务分支，因此翻译为 (zero, false, nil) 而不是错误。
+//
+// **T7.1（ADR-022）**：alerts 按 starts_at 月度分区，目标月分区不存在时
+// PostgreSQL 报 SQLSTATE 23514（「没有为行找到关系的分区」）。正常路径下
+// worker 维护 tick 会预建未来分区，但时钟漂移 / 手工 DROP / 跨月重火仍可能
+// 撞上——此时用告警自身的 starts_at 补建分区后重试一次（已批准方案）。
+// 兜底恒按 partition.DefaultAheadMonths 补建（与 worker 维护 tick 同默认值）：
+// 插入路径只关心「目标月被覆盖」，运维调大 IIP_PARTITION_AHEAD_MONTHS 不影响
+// 这里，多建的分区由 ensure 幂等收敛。
 func (a *Alerts) Insert(ctx context.Context, in *alert.Alert) (alert.StoredAlert, bool, error) {
 	if in == nil {
 		return alert.StoredAlert{}, false, errors.New("repository: 待插入的告警为 nil")
 	}
 
-	row, err := a.queries.InsertAlert(ctx, db.InsertAlertParams{
+	params := db.InsertAlertParams{
 		Fingerprint: in.Fingerprint,
 		Source:      in.Source,
 		Severity:    in.Severity,
@@ -69,7 +78,16 @@ func (a *Alerts) Insert(ctx context.Context, in *alert.Alert) (alert.StoredAlert
 		EndsAt:      nullableTimestamp(in.EndsAt),
 		RawPayload:  in.RawPayload,
 		IncidentID:  nullableInt8(in.IncidentID),
-	})
+	}
+
+	row, err := a.queries.InsertAlert(ctx, params)
+	if partition.IsNoPartition(err) {
+		if ensureErr := a.ensurePartitionFor(ctx, in.StartsAt); ensureErr != nil {
+			return alert.StoredAlert{}, false, fmt.Errorf(
+				"repository: 插入告警撞上未建分区（SQLSTATE 23514）且补建失败: %w", ensureErr)
+		}
+		row, err = a.queries.InsertAlert(ctx, params)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return alert.StoredAlert{}, false, nil
 	}
@@ -77,6 +95,20 @@ func (a *Alerts) Insert(ctx context.Context, in *alert.Alert) (alert.StoredAlert
 		return alert.StoredAlert{}, false, fmt.Errorf("repository: 插入告警失败: %w", err)
 	}
 	return toStoredAlert(&row), true, nil
+}
+
+// ensurePartitionFor 补建覆盖 startsAt 所在月份的分区（插入路径 23514 重试的地基）。
+//
+// 传告警自身的 starts_at 而非 NOW()：告警可能因时钟漂移落在未来月份，
+// 只有它的 starts_at 能保证「目标月」被覆盖。
+func (a *Alerts) ensurePartitionFor(ctx context.Context, startsAt time.Time) error {
+	if _, err := a.queries.EnsureAlertPartitions(ctx, db.EnsureAlertPartitionsParams{
+		FromTs:      timestamp(startsAt),
+		AheadMonths: partition.DefaultAheadMonths,
+	}); err != nil {
+		return fmt.Errorf("补建 alerts 分区失败: %w", err)
+	}
+	return nil
 }
 
 // Resolve 把指定行置为 resolved 并写入结束时间。

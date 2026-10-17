@@ -116,6 +116,20 @@ type Config struct {
 	// EvidenceTimeout 是单个采集器的超时上限（手册 §4.5：三类均为 5s）。
 	EvidenceTimeout time.Duration // IIP_EVIDENCE_TIMEOUT，默认 5s
 
+	// --- T7.1：alerts 月度分区维护（ADR-022，见 migrations/0008）---
+
+	// AlertRetentionDays 是告警保留天数（按 starts_at 计）。
+	// worker 维护 tick 删除更早的行，并级联清理 incident_alerts 链接。
+	AlertRetentionDays int // IIP_ALERT_RETENTION_DAYS，默认 90
+
+	// PartitionAheadMonths 是预创建的未来月分区数（不含当月）。
+	// 0 = 只建当月（配合插入路径 23514 重试仍可用，但失去「时钟漂移裕度」）。
+	PartitionAheadMonths int // IIP_PARTITION_AHEAD_MONTHS，默认 2
+
+	// PartitionMaintenanceInterval 是分区维护 tick 间隔：
+	// 补建未来分区 + 过期清理 + 重复 firing 扫描。
+	PartitionMaintenanceInterval time.Duration // IIP_PARTITION_MAINTENANCE_INTERVAL，默认 1h
+
 	// EvidenceTLSInsecure 跳过采集目标的服务器证书校验（T7.5）。
 	//
 	// 默认 false。仅在「内网自签证书、来不及铺 CA」的过渡场景打开，
@@ -197,6 +211,20 @@ const (
 
 	DefaultEvidenceTLSInsecure = false
 	DefaultEvidenceTLSCAFile   = ""
+
+	// --- T7.1：alerts 分区维护默认值（ADR-022）---
+
+	// DefaultAlertRetentionDays 取 90 天：覆盖「一个季度的事后复盘」窗口，
+	// 同时把 alerts 表的行数压在有界范围（月度分区 + 90 天 ⇒ 常驻 3-4 个分区）。
+	DefaultAlertRetentionDays = 90
+
+	// DefaultPartitionAheadMonths 与 0008 迁移的初始分区、partition 包的
+	// DefaultAheadMonths 三处一致（互相引用不到，改一处必须同步另两处）。
+	DefaultPartitionAheadMonths = 2
+
+	// DefaultPartitionMaintenanceInterval 取 1h：分区补建是「月度」粒度的
+	// 动作，1h 的 tick 只为在月初/跨月重火时尽快补上，不追求分钟级。
+	DefaultPartitionMaintenanceInterval = time.Hour
 )
 
 // Load 按优先级加载配置。
@@ -227,6 +255,13 @@ func Load(args []string) (*Config, error) {
 	fs.Int("evidence-max-per-incident", DefaultEvidenceMaxPerIncident, "单事件证据上限，超限截断并标记")
 	fs.Duration("evidence-window", DefaultEvidenceWindow, "证据采集时间窗口")
 	fs.Duration("evidence-timeout", DefaultEvidenceTimeout, "单个采集器超时上限")
+	// T7.1：分区维护。三个默认值都不改既有部署的行为（维护 tick 是新增旁路职责）。
+	fs.Int("alert-retention-days", DefaultAlertRetentionDays,
+		"告警保留天数（按 starts_at）；过期行由 worker 维护 tick 删除并级联清理事件链接")
+	fs.Int("partition-ahead-months", DefaultPartitionAheadMonths,
+		"预创建的未来月分区数（不含当月）；0=只建当月")
+	fs.Duration("partition-maintenance-interval", DefaultPartitionMaintenanceInterval,
+		"分区维护 tick 间隔（补建分区 + 过期清理 + 重复 firing 扫描）")
 	// T7.5：采集目标 TLS。两个都不改默认行为：默认仍走系统根证书校验，
 	// 显式开了 insecure 只是放宽校验，不改变默认部署的任何链路。
 	fs.Bool("evidence-tls-insecure", DefaultEvidenceTLSInsecure,
@@ -304,6 +339,10 @@ func Load(args []string) (*Config, error) {
 		EvidenceWindow:         k.Duration("evidence-window"),
 		EvidenceTimeout:        k.Duration("evidence-timeout"),
 
+		AlertRetentionDays:           k.Int("alert-retention-days"),
+		PartitionAheadMonths:         k.Int("partition-ahead-months"),
+		PartitionMaintenanceInterval: k.Duration("partition-maintenance-interval"),
+
 		EvidenceTLSInsecure: k.Bool("evidence-tls-insecure"),
 		EvidenceTLSCAFile:   k.String("evidence-tls-ca-file"),
 
@@ -368,6 +407,34 @@ func (c *Config) Validate() error {
 	}
 	if err := c.validateEvidenceTLS(); err != nil {
 		return err
+	}
+	if err := c.validatePartition(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePartition 校验 T7.1 分区维护参数（ADR-022）。
+//
+// retentionDays <= 0 必须拦下：它会让维护 tick 的 DELETE 删掉**全表**。
+// 「保留 0 天」在任何运维语境下都是误配——要清库应是显式运维动作
+// （psql 一把），而不是一个配置值在每次 tick 时静默生效。
+// aheadMonths 允许 0（只建当月，插入路径有 23514 重试兜底）但不允许负：
+// 负值无业务含义，且数据库函数对负值的行为是「静默按默认 2」，
+// 那会让「配了 -1 实际建了 3 个月」成为无声偏差。
+func (c *Config) validatePartition() error {
+	if c.AlertRetentionDays <= 0 {
+		return fmt.Errorf("AlertRetentionDays 必须为正数，当前为 %d"+
+			"（0 或负数会让维护 tick 删除全部告警；要清库请走显式运维动作，"+
+			"参见 %sALERT_RETENTION_DAYS）", c.AlertRetentionDays, envPrefix)
+	}
+	if c.PartitionAheadMonths < 0 {
+		return fmt.Errorf("PartitionAheadMonths 不能为负，当前为 %d"+
+			"（0 = 只建当月；负值会被数据库函数静默收敛为默认 2，"+
+			"配置与实际行为不符，故在此拦下）", c.PartitionAheadMonths)
+	}
+	if c.PartitionMaintenanceInterval <= 0 {
+		return fmt.Errorf("PartitionMaintenanceInterval 必须为正数，当前为 %s", c.PartitionMaintenanceInterval)
 	}
 	return nil
 }

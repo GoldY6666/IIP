@@ -23,6 +23,8 @@ sql:
       - "migrations/0005_evidence_tasks_m4.up.sql"
       - "migrations/0006_evidence_budget_idx.up.sql"
       - "migrations/0007_task_window_cursor.up.sql"
+      - "migrations/0008_alerts_partition.up.sql"
+      - "migrations/0009_index_tuning.up.sql"
     queries:
       - "internal/db/queries/"
     gen:

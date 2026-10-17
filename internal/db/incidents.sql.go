@@ -84,25 +84,35 @@ func (q *Queries) GetIncidentByID(ctx context.Context, id int64) (Incident, erro
 }
 
 const linkAlertToIncident = `-- name: LinkAlertToIncident :exec
-INSERT INTO incident_alerts (incident_id, alert_id, correlation_score, needs_review)
-VALUES ($1, $2, $4, $3)
+INSERT INTO incident_alerts (incident_id, alert_id, alert_starts_at, correlation_score, needs_review)
+VALUES ($1, $2, $3, $5, $4)
 ON CONFLICT (incident_id, alert_id) DO NOTHING
 `
 
 type LinkAlertToIncidentParams struct {
-	IncidentID  int64          `json:"incident_id"`
-	AlertID     int64          `json:"alert_id"`
-	NeedsReview bool           `json:"needs_review"`
-	Score       pgtype.Numeric `json:"score"`
+	IncidentID    int64              `json:"incident_id"`
+	AlertID       int64              `json:"alert_id"`
+	AlertStartsAt pgtype.Timestamptz `json:"alert_starts_at"`
+	NeedsReview   bool               `json:"needs_review"`
+	Score         pgtype.Numeric     `json:"score"`
 }
 
 // 关联一条告警到 Incident。(incident_id, alert_id) 为主键，重复链接静默跳过（幂等）。
 // correlation_score 为 0.0000-1.0000；NEW 档传 NULL（无关联对象）。
 // needs_review = true 表示 REVIEW 档，待人工确认。
+//
+// **T7.1（ADR-022）**：alert_starts_at 是分区键。0008 起 alerts 按 starts_at
+// 月度 RANGE 分区，incident_alerts 对 alerts 的外键必须是
+// (alert_id, alert_starts_at) → alerts(id, starts_at) 复合 FK
+// （单列 FK 会把每个旧分区都变成 DROP/DETACH 不可达，连保留期 DELETE 都被
+// 对象级依赖挡死 —— 2026-10-17 实证，见 0008 头部注释）。
+// 调用方传告警自身的 starts_at（correlation.AlertView.StartsAt），
+// 与 alerts 行精确匹配才满足外键；传错值 = 外键违反（23503），不会静默错链。
 func (q *Queries) LinkAlertToIncident(ctx context.Context, arg LinkAlertToIncidentParams) error {
 	_, err := q.db.Exec(ctx, linkAlertToIncident,
 		arg.IncidentID,
 		arg.AlertID,
+		arg.AlertStartsAt,
 		arg.NeedsReview,
 		arg.Score,
 	)

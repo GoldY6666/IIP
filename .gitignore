@@ -37,8 +37,11 @@ _tmp/
 _probe.txt
 _tree.txt
 _*.txt
-# 验证脚本的服务日志（scripts/verify-*.py 会落 _verify_*_srv.log）
+# 验证脚本的运行产物：服务日志（scripts/verify-*.py 落 _verify_*_srv.log）
+# 与 UI 截图（verify-images.py 落 _verify_ui.png）——每次跑都重新生成，
+# 入库只会制造无意义 diff；M6 的 UI 交付证据是 screenshots/ 那三张，另行入库。
 _*.log
+_*.png
 # E2E 编排器的阶段 JSON 与日志（scripts/verify-e2e.py 落 scripts/_e2e/）
 scripts/_e2e/
 

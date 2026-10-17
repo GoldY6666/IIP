@@ -19,10 +19,11 @@ import (
 
 // linkCall 记录一次「建立关联边」的调用参数。
 type linkCall struct {
-	IncidentID  int64
-	AlertID     int64
-	Score       *float64
-	NeedsReview bool
+	IncidentID    int64
+	AlertID       int64
+	AlertStartsAt time.Time
+	Score         *float64
+	NeedsReview   bool
 }
 
 // fakeIncidentStore 是 IncidentStore 的内存替身。
@@ -63,11 +64,11 @@ func (f *fakeIncidentStore) ListOpenIncidentAlerts(_ context.Context, _ int32) (
 	return f.candidates, nil
 }
 
-func (f *fakeIncidentStore) LinkAlertToIncident(_ context.Context, incidentID, alertID int64, score *float64, needsReview bool) error {
+func (f *fakeIncidentStore) LinkAlertToIncident(_ context.Context, incidentID, alertID int64, alertStartsAt time.Time, score *float64, needsReview bool) error {
 	if f.linkErr != nil {
 		return f.linkErr
 	}
-	f.links = append(f.links, linkCall{IncidentID: incidentID, AlertID: alertID, Score: score, NeedsReview: needsReview})
+	f.links = append(f.links, linkCall{IncidentID: incidentID, AlertID: alertID, AlertStartsAt: alertStartsAt, Score: score, NeedsReview: needsReview})
 	return nil
 }
 

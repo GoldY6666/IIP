@@ -43,17 +43,27 @@ func insertIncidentFull(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 //
 // score 为 nil 表示 NEW 档（列写 NULL）。numeric 列用文本 + 显式 cast 写入，
 // 避免 Go float64 与 PG numeric 之间的隐式转换歧义。
+//
+// T7.1 起 incident_alerts 带分区键 alert_starts_at（复合 FK，NOT NULL）：
+// 这里从告警行**实读** starts_at，保证引用侧两列与父表行一致——
+// 调用方不必各自维护这份派生状态（复合 FK 的语义由 migrations 包的
+// TestDropExpiredCascadesIncidentAlerts 专门覆盖）。
 func linkAlert(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
 	incidentID, alertID int64, score *float64, needsReview bool, correlatedAt time.Time) {
 	t.Helper()
+	var alertStartsAt time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT starts_at FROM alerts WHERE id = $1`, alertID).Scan(&alertStartsAt); err != nil {
+		t.Fatalf("读取告警 %d 的 starts_at 失败: %v", alertID, err)
+	}
 	var scoreVal any
 	if score != nil {
 		scoreVal = fmt.Sprintf("%.4f", *score)
 	}
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO incident_alerts (incident_id, alert_id, correlation_score, needs_review, correlated_at)
-		 VALUES ($1, $2, $3::numeric, $4, $5)`,
-		incidentID, alertID, scoreVal, needsReview, correlatedAt); err != nil {
+		`INSERT INTO incident_alerts (incident_id, alert_id, alert_starts_at, correlation_score, needs_review, correlated_at)
+		 VALUES ($1, $2, $3, $4::numeric, $5, $6)`,
+		incidentID, alertID, alertStartsAt, scoreVal, needsReview, correlatedAt); err != nil {
 		t.Fatalf("插入关联边 (%d,%d) 失败: %v", incidentID, alertID, err)
 	}
 }

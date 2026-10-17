@@ -74,6 +74,31 @@ func mergeM5(base Config) Config {
 	return base
 }
 
+// t71Defaults 返回 T7.1 分区维护字段的默认取值集合（ADR-022）。
+//
+// 沿 m4Defaults / m5Defaults 的同一理由：集中列举，避免用例里逐个内联
+// 书写；三个字段的默认值全部非零，漏写会以零值参与比较。
+func t71Defaults() Config {
+	return Config{
+		AlertRetentionDays:           DefaultAlertRetentionDays,
+		PartitionAheadMonths:         DefaultPartitionAheadMonths,
+		PartitionMaintenanceInterval: DefaultPartitionMaintenanceInterval,
+	}
+}
+
+// mergeT71 把 T7.1 字段的默认值合并进 base。
+//
+// 哨兵用 AlertRetentionDays == 0：三个字段默认全非零，且 0 恰是
+// validatePartition 要拒绝的非法值（保留 0 天 = 删全表），
+// 没有用例会把它显式设成 0 还期望通过。
+func mergeT71(base Config) Config {
+	d := t71Defaults()
+	base.AlertRetentionDays = d.AlertRetentionDays
+	base.PartitionAheadMonths = d.PartitionAheadMonths
+	base.PartitionMaintenanceInterval = d.PartitionMaintenanceInterval
+	return base
+}
+
 // mergeHTTPTimeout 把 S5 的 HTTPTimeout 默认值合并进 base。
 //
 // **哨兵不能用 HTTPTimeout == 0**：那正是「未合并」的状态，
@@ -100,6 +125,11 @@ func m4Valid() Config {
 	// 会先撞上 HTTPTimeout=0，失败原因与被测意图无关 ——
 	// 这正是本函数存在要避免的那类现象。
 	c.HTTPTimeout = DefaultHTTPTimeout
+	// T7.1：分区维护三个参数同样要给合法值，否则 validatePartition
+	// 会先以 AlertRetentionDays=0 拦下，失败原因与被测意图无关。
+	c.AlertRetentionDays = DefaultAlertRetentionDays
+	c.PartitionAheadMonths = DefaultPartitionAheadMonths
+	c.PartitionMaintenanceInterval = DefaultPartitionMaintenanceInterval
 	return c
 }
 
@@ -275,6 +305,10 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			// 「期望全默认」的用例变红。
 			if tc.wantHTTPTimeout {
 				want = mergeHTTPTimeout(want)
+			}
+			// T7.1 同理：三个分区维护参数默认全非零。
+			if want.AlertRetentionDays == 0 {
+				want = mergeT71(want)
 			}
 			if *got != want {
 				t.Fatalf("配置不匹配\n got=%+v\nwant=%+v", *got, want)

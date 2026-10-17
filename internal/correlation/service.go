@@ -196,8 +196,11 @@ func (s *Service) correlateOne(
 }
 
 // link 建立关联边并回写告警的 incident_id 反规范化指针。
+//
+// v.StartsAt 是分区键（T7.1 / ADR-022）：复合 FK 要求它与 alerts 行
+// 精确匹配，而 AlertView 正是从刚落库的告警行构造的，天然一致。
 func (s *Service) link(ctx context.Context, incidentID int64, v AlertView, score *float64, needsReview bool) error {
-	if err := s.incidents.LinkAlertToIncident(ctx, incidentID, v.ID, score, needsReview); err != nil {
+	if err := s.incidents.LinkAlertToIncident(ctx, incidentID, v.ID, v.StartsAt, score, needsReview); err != nil {
 		return fmt.Errorf("关联告警 %d → 事件 %d 失败: %w", v.ID, incidentID, err)
 	}
 	if err := s.incidents.SetAlertIncident(ctx, v.ID, incidentID); err != nil {

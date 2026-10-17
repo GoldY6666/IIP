@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：v0.1.0 已发布（T7.3–T7.7 收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化中 T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）已收口。**如实标注的未交付项**：开发计划 §10 的 M6（Slack 通知 + `/metrics`，T6.1–T6.5）**未开工**；T7.1（告警分区）/ T7.2（JSONB 索引调优）未做；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测编排成一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（最近一轮：7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED）。真库门禁最近一轮 **939 PASS / 1 SKIP / 0 FAIL**（SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
+> **当前阶段：v0.1.0 已发布（T7.1–T7.7 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线七项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**如实标注的未交付项**：开发计划 §10 的 M6（Slack 通知 + `/metrics`，T6.1–T6.5）**未开工**；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测编排成一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（最近一轮 `--no-bench`：S0–S5 全 PASS、S6 压测跳过、S7 容器链路因 daemon 缺席 BLOCKED）。真库门禁最近一轮 **979 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -774,13 +774,13 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 
 | 项 | 状态 | 说明 |
 |----|------|------|
-| T7.1 告警按月分区 + retention | **未做** | `pg_partman` 或定时任务方案未实施 |
-| T7.2 JSONB 索引调优 | **未做** | Replay 慢查询采样未跑 |
+| T7.1 告警按月分区 + retention | **已收口** | 迁移 0008（ADR-022，取代 ADR-002）：分区键 `starts_at`、PK `(id, starts_at)`、UTC 月界（修非 UTC 会话时区错月 bug + 永久守卫测试）；保留期走 `iip_drop_expired_alert_partitions()` 整表 DELETE + 行级 CASCADE（实测 FK 引用的分区 DROP/DETACH/TRUNCATE 全失败）；`incident_alerts` 复合 FK。已知限制：分区只增不减；同指纹跨 starts_at 的 firing 可并存（`iip_scan_firing_duplicates()` 曝光） |
+| T7.2 JSONB 索引调优 | **已收口** | 迁移 0009（ADR-023）：先取证后裁定（5 万 alerts / 5 千 tasks 规模 EXPLAIN 采样）。**删** labels GIN——14 个分区副本 `idx_scan` 全 0 = 零读者；**建** `idx_tasks_payload_incident((payload->>'incident_id')) WHERE kind='collect_evidence'`——两条消费查询原先全表扫且 tasks 无保留期。Q3「join 补分区键」变体实测更慢/持平，记录否决 |
 | T7.3 压测（1 万条） | **已收口** | **6/6 判据 PASS**：吞吐 346 条/s、折算单条 p95=45.6ms < 200ms、零丢失、rejected=0；M2 Replay 指标无退化（1.0000/1.0000）。残留边界：候选限额下「新告警最佳匹配为非种子老成员」仍可能漏合并（窄，待 V1.1 复查） |
 | T7.4 故障演练 | **已收口** | `scripts/fault_drill.py` **33/33 PASS**：真 kill worker → ReclaimStale 回收（attempts=2）；真停 PG 25s → 不重启进程自动重连 + 队列不丢；Redis 缺席 = 默认形态（依赖闭包静态证明） |
 | T7.5 compose 生产化 + Helm | **已收口** | 7 服务 resources + 日志轮转；采集器 TLS（CA / insecure 双模式，读不到 CA 启动即失败）；`deploy/helm/iip` 简化版 chart（内置/外置 PG 双轨）。真栈容器链路段待 Docker daemon 恢复后补跑（T7.5 收口报告已如实标注） |
-| T7.6 README + CHANGELOG + v0.1.0 | **本轮** | 即本文档重构 + `CHANGELOG.md` + 标签四联动 |
-| T7.7 E2E 一键脚本 | **未做** | M1–M6 验收项一键化 |
+| T7.6 README + CHANGELOG + v0.1.0 | **已收口** | 本文档重构 + `CHANGELOG.md` + 标签四联动；tag `v0.1.0` 本地已打（push / GitHub Release 待 remote） |
+| T7.7 E2E 一键脚本 | **已收口** | `scripts/verify-e2e.py` 编排 S0–S7 按 M1–M6 验收项 + MVP 总验收出状态；最近一轮 7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED（`--stages s7` 可补跑） |
 | 开发计划 §10 M6（Slack 通知 + `/metrics`） | **未开工** | T6.1–T6.5 全部 `[ ]`：无 Slack adapter、无通知去风暴、无 `/metrics` 端点、无抓取示例、无操作者文档。**v0.1.0 不含通知与自监控指标** |
 
 ---

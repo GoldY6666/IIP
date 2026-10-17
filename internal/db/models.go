@@ -10,8 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// alerts 表（T7.1 起按 starts_at 月度 RANGE 分区，ADR-022）。分区键 = starts_at；PK/唯一索引均含分区键；保留期清理走行级 DELETE（FK 对象级依赖使 DROP/DETACH 分区不可行）。
 type Alert struct {
-	ID          int64              `json:"id"`
+	ID int64 `json:"id"`
+	// 由稳定 label 集合 SHA256 生成。T7.1 分区后 firing 唯一性收敛为 (fingerprint, starts_at)（分区表唯一约束必须含分区键，ADR-022）；跨 starts_at 的重火并存由 iip_scan_firing_duplicates() 定期曝光。
 	Fingerprint string             `json:"fingerprint"`
 	Source      string             `json:"source"`
 	Severity    string             `json:"severity"`
@@ -80,6 +82,7 @@ type IncidentAlert struct {
 	CorrelatedAt     pgtype.Timestamptz `json:"correlated_at"`
 	CorrelationScore pgtype.Numeric     `json:"correlation_score"`
 	NeedsReview      bool               `json:"needs_review"`
+	AlertStartsAt    pgtype.Timestamptz `json:"alert_starts_at"`
 }
 
 type ReviewSuppression struct {

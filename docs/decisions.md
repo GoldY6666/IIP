@@ -28,7 +28,11 @@
 
 ## ADR-002：`alerts` 表 V1.0 不做分区
 
-- **Status**: 待人工确认（AI 起草）
+> **已被 ADR-022 取代（2026-10-17，T7.1 落地分区）。**
+> 本条目保留原文以供追溯：它当初押的是「不在信息不足时锁定 fingerprint 唯一性策略」，
+> 该判断在 M1–M6 有实测数据后不再成立，分区决策见 ADR-022。
+
+- **Status**: 待人工确认（AI 起草）→ 已由 ADR-022 取代
 - **Date**: 2026-09-25
 - **来源**: IIP-M0详细开发计划 §T0.2 决策 ②
 - **Background**:
@@ -543,7 +547,7 @@
 | ADR | 决策 | 状态 |
 |-----|------|------|
 | ADR-001 | VARCHAR + CHECK 替代 PG ENUM | 待人工确认 |
-| ADR-002 | alerts 表暂不分区 | 待人工确认 |
+| ADR-002 | alerts 表暂不分区 | 已被 ADR-022 取代（2026-10-17 T7.1：延期条件「M4-M7 关联引擎实测数据 + 运维刚需」已满足，分区落地） |
 | ADR-003 | 时间列一律 TIMESTAMPTZ | 待人工确认 |
 | ADR-004 | M0 建 correlation_feedback 预留表 | 待人工确认 |
 | ADR-005 | 多阶段构建 + distroless 运行层 + `--healthcheck` 自检 | 待人工确认 |
@@ -563,6 +567,8 @@
 | ADR-019 | compose 必须给 worker 注入 `IIP_PROM_URL` / `IIP_LOKI_URL`；容器链路的造数走 Loki push API | 已实施（M4 容器链路：原 compose 只给 `IIP_PG_URL`+`IIP_LOG_LEVEL`，两个采集器静默跳过注册，事件恒 0 条证据而 M1–M3 断言全绿） |
 | ADR-020 | 验收断言禁止绑定会随里程碑漂移的总数：总数只记录不判定，硬契约改用「关键表逐张存在」，数量类只做 `>= N` 下界 | 已实施（M4 链路 B：`public 表数量 == 8` 因新增 tasks 表变 10，产品正确而测试红；与 M3「表数因 0004 变 9」是同一个坑，同一处踩了两次） |
 | ADR-021 | M5 新增明暗主题切换：默认暗色 + localStorage 记忆，Header 图标切换，palette 动态解析保持 17 处调用点不变 | 已实施（推翻 M5 手册 §3.2 的 Out-of-Scope；**不推翻** ADR-016 —— 后者裁定的是默认基调而非「只有深色」。亮色语义色按白底重新校准，对比度须计算验证） |
+| ADR-022 | `alerts` 表按 `starts_at` 月度 RANGE 分区（T7.1，取代 ADR-002 的「暂不分区」） | 已实施（0008；PK/唯一索引含分区键、复合 FK、UTC 月界守卫测试、保留期走行级 DELETE） |
+| ADR-023 | T7.2 索引调优：建 `tasks` 事件表达式索引 + 删 `alerts` labels GIN | 已实施（0009；EXPLAIN 实测双重证据：GIN 的 14 个分区副本 `idx_scan` 全 0 = 零读者；tasks 两条消费查询全表扫且无保留期。Q3「join 加分区键」变体实测更慢/持平，**记录否决**以防重做） |
 
 ---
 
@@ -632,6 +638,166 @@ ADR-021：M5 新增明暗主题切换（推翻 M5 手册 §3.2 的 Out-of-Scope 
 - **Evidence**: 「17 处 / 5 个文件 / 零处硬编码」由文件系统实查得出
   （`web/src` 全量 `.ts`/`.tsx` 正则扫描 `palette\.`），非估算。
   亮色对比度将由计算脚本给出实测值并记入手册 F5 段落，不凭观感描述。
+
+---
+
+ADR-023：T7.2 索引调优 —— 建 `tasks` 事件表达式索引，删 `alerts` labels GIN
+
+- **Status**: 已实施（T7.2，迁移 0009）
+- **Date**: 2026-10-17
+- **来源**: docs/IIP开发计划.md §11 T7.2「JSONB 索引调优：跑 Replay 慢查询采样，
+  验证 GIN 索引命中，必要时加表达式索引」；禹 2026-10-17 裁定「按证据裁定并落地」。
+- **Background**:
+  T7.2 的原始诉求有两半：「验证 GIN 索引命中」与「必要时加表达式索引」。
+  两者的共同前提是**先取证后裁定** —— 没有量级的 EXPLAIN 会给出
+  「不需要索引」的假结论。本次取证中最典型的一例：
+  主探针里 Q6（EnqueueTaskIfAbsent）的 NOT EXISTS 子查询 seq scan 只报
+  **1 行 / 0.024ms**，看着像「索引无用」；专项探针（三种形态对照）证明
+  **插入路径（NOT EXISTS 为真）永远全表扫** 5000 行 —— 0.024ms 是
+  EXISTS 在首个匹配行处短路的**最好情况**，不是全貌。
+  取证方式为一次性探针脚本（已随收口批次删除；全部原始输出存档于
+  `D:\_iip_setup\_probe_explain.txt` / `_probe_q6.txt` / `_probe_q3variant.txt`）：
+  5 万 alerts / 30 incidents / 2157 关联边 / 5 千 tasks 的代表性数据，
+  对 9 条热查询跑 `EXPLAIN (ANALYZE, BUFFERS)`，负载 **COMMIT** 后读
+  `pg_stat_user_indexes` / `pg_stat_user_tables`（ROLLBACK 会把累计计数
+  一并回滚，那是本次取证方法本身踩过的坑）。
+
+- **Options**:
+  ① labels GIN（`idx_alerts_labels`）：(a) 留；(b) 删。
+  ② `tasks(payload->>'incident_id')`：(a) 不加索引；(b) 单列表达式部分索引；
+     (c) `(incident_id, window_end DESC)` 复合部分索引。
+  ③ Q3（ListOpenIncidentsWithAlerts）join 补分区键
+     `a.starts_at = ia.alert_starts_at`：(a) 加；(b) 不加。
+
+- **Decision**（禹 2026-10-17 按证据裁定）:
+  ① **(b) 删** `idx_alerts_labels`。
+  ② **(b) 建** `idx_tasks_payload_incident ON tasks((payload->>'incident_id'))
+     WHERE kind = 'collect_evidence'`。
+  ③ **(b) 不加** Q3 分区键 join 条件（实测无效，证据见下；记录在此以防重做）。
+
+- **Consequences**:
+  - **删 GIN 的证据（双重，缺一不可）**：
+    - 代码级：全部 44 条 sqlc 查询 + API 层，无一条对 `labels` 用 jsonb 谓词
+      （`@>` / `?` / `?|` / `?&` 全无命中）；唯一用法是 SELECT 投影与应用层取值
+      （`incidents.service` 从 `labels.service` 取，在 Go 侧处理）。
+    - 工具脚本层（如实补记，防「证据只挑对自己有利的」之嫌）：
+      verify-func / fault_drill / verify-images 确有 `labels->>'run' = '...'`
+      一类过滤。但 `->>` 等式**本来就用不了 GIN**（GIN 只罩 `@>` / `?` / `?|` / `?&`），
+      要罩它得为每个键单建表达式索引，而脚本用到的键（run / alertname / instance /
+      drill / d2-base）各不相同 —— 建了也是选择性灾难。故脚本用量既不构成
+      GIN 的读者，也不构成建表达式索引的理由；真要按 label 搜索是产品级需求，
+      应作为独立裁量（含键集合设计）另行立项。
+    - 运行时：600+ 次语句执行（覆盖所有触达 alerts 的读路径：去重读 / 候选查询 /
+      重复扫描 / 事件列表）之后，**14 个分区副本的 `labels_idx` `idx_scan` 全为 0**。
+      同期 `fingerprint_idx` `idx_scan=101`、`idx_incident_alerts_alert_id`
+      `idx_scan=22578` 有实际读数 —— 证明统计口径本身有效，不是「统计没开」。
+  - **删 GIN 的代价（如实）**：GIN 是所有索引类型里写入维护最贵的，且分区后
+    每个分区一份副本；删掉 = 每条告警插入少维护一份 GIN + 省存储。
+    若将来要做「按 label 搜索告警」，需要重新加回（DDL 已备在 0009 的 down）。
+  - **建 tasks 索引的证据**：
+    - Q5 LastCollectWindowEnd（每轮采集一次）：`idx_tasks_claim` bitmap 读 2144 行
+      再 Filter kind/payload/window_end，1.25ms @ 5 千行；
+    - Q6 EnqueueTaskIfAbsent（每次入队一次）：插入路径 seq scan 全表
+      （最好情况 3 行 / 0.024ms，最坏 5000 行 / 1.4ms，两种都抓到过）；
+    - **tasks 表没有保留期**（done 行按设计永久保留供审计）⇒ 两条查询的成本
+      随表量线性增长，索引把「按事件找任务」变成定长探测。
+  - **为什么不把 window_end 放进键序**：Q5 要 `(incident_id, window_end DESC)`
+    定序、Q6 要可见 pending/in_flight —— 同一个部分索引谓词服务不了两种
+    status 集；单键索引对两者都够用（每事件任务数百行级，余下过滤/排序可忽略）。
+  - **Q3 变体实测否决**（2.1k 边 / 7.5k 边两组数据）：
+    V0（现网）14.6ms / 19.9ms；V1（加分区键 join）21.0ms / 20.8ms ——
+    一组更慢、一组持平。根因：主导成本是 5 万 alerts 的 Append + 逐分区
+    Seq Scan（约 10.6–11.6ms 的底价），分区键裁剪去不掉它。
+  - **观察项（本次不裁定）**：`idx_tasks_stale`（status='in_flight' 超时回收路径）
+    在探针负载下 `idx_scan=0` —— 但该路径由 worker 维护 tick 驱动、依赖
+    claimed_at 超时，**探针负载未覆盖它**，零读数不能证明零读者，故不删；
+    留待有真实长时间运行的统计数据后再评估。
+  - **破坏性：否** —— 纯索引增删，不动数据与表结构；down 完整还原两者。
+  - **回归网**：`migrate_test.go` 的 `TestIndexTuningMigration`（up → 单步回滚到 8
+    → up 三连，断言索引**定义**而非仅存在性：键表达式、部分谓词、GIN 的
+    父表+分区副本数）；变异测试两轮（注掉 `DROP INDEX` → 红；去掉 WHERE 谓词
+    → 红）证明判据有鉴别力。判据一度假红过：`pg_get_indexdef` 把谓词渲染为
+    `((kind)::text = 'collect_evidence'::text)`，初版断言绑死 `kind = 'collect_evidence'`
+     子串而产品其实正确 —— 已改为绑不变量（WHERE + kind + 值三者齐备）。
+
+- **Related ADRs**: ADR-022（T7.1 alerts 分区 —— GIN 随之成为分区索引、
+  每分区一份副本，删除时代价按副本数计）、
+  ADR-018（迁移单步回滚用例纪律，0009 的回滚用例即其延伸）。
+- **Evidence**: 全部数字为 2026-10-17 实测（5 万 alerts / 5 千 tasks 规模），
+  原始输出存档于 `D:\_iip_setup\_probe_explain.txt`（9 条查询计划 + 索引统计）、
+  `_probe_q6.txt`（EXISTS 短路专项）、`_probe_q3variant.txt`（Q3 三变体对照）。
+  取证用的探针脚本为一次性工具，已随本收口批次删除。
+
+---
+
+ADR-022：`alerts` 表按 `starts_at` 月度 RANGE 分区（取代 ADR-002）
+
+- **Status**: 已实施（T7.1，迁移 0008）
+- **Date**: 2026-10-17
+- **来源**: docs/IIP-V1.0-技术设计文档.md §3.2（alerts 分区策略）
+  + docs/IIP开发计划.md §11 T7.1；ADR-002 的延期条件已满足，本 ADR 取而代之。
+- **Background**:
+  ADR-002（2026-09-25）押「暂不分区」，理由是分区表主键必须含分区键、
+  会在信息不足时锁死 fingerprint 全局唯一策略，要等 M4-M7 关联引擎实测数据。
+  T7.1 重新评估时两个条件都已成立：
+  ① 关联引擎跑完 M2–M6 + R7 压测（1 万条 / 6 场景），fingerprint 策略有实测支撑；
+  ② 保留期清理与月度膨胀成为运维刚需（alerts 是写入量最大的表）。
+  同时实测确认了「按时间分区」是唯一可行维度 —— 保留期清理本来就是时间行为，
+  按 incident_id / source 分区对清理没有意义。
+
+- **Options**:
+  1. 维持单表 + 索引（延续 ADR-002）
+  2. 按 `starts_at` 月度 RANGE 分区
+  3. 按其他键（incident_id / source）分区 —— 与保留期清理的时间维度不匹配，直接排除
+
+- **Decision**: 采用 **方案 2**。PK 改 `(id, starts_at)`（分区表硬性要求）；
+  0002 的部分唯一索引从 `(fingerprint) WHERE firing` 收敛为
+  `(fingerprint, starts_at) WHERE firing`（同为硬性要求）。
+
+- **Consequences**:
+  - **唯一性语义的收敛（本 ADR 最核心的变化，必须如实记）**：
+    原语义 = 「同一指纹同时最多一条 firing，与 starts_at 无关」；
+    新语义 = 「同一指纹 + 同一 starts_at 最多一条 firing」。
+    可接受的理由：应用层 `LatestByFingerprint`（已 firing 则跳过）在正常路径上
+    恒在数据库兜底之前生效，DB 层只拦「并发投递同一条告警」——
+    而并发投递的 startsAt 由 Alertmanager 保证相同（重发不重置 startsAt）。
+    **残余缺口** = 「同指纹、不同 starts_at 的两条 firing 并存」，
+    只能由「起火 → 未收到 resolved → 以新 startsAt 重火」造成。
+    缓解 = `iip_scan_firing_duplicates()`（`internal/db/queries/partition.sql`）
+    在维护 tick 定期曝光 —— 是已知限制而非静默错误。
+  - **分区月界必须按 UTC 算（2026-10-17 踩过的真 bug）**：
+    `date AT TIME ZONE 'UTC'` 的 date 操作数先被隐式转成 **timestamptz**
+    （= 会话时区午夜）再按 UTC 输出 ⇒ +08 会话下 10 月末界变成
+    `2026-10-31 16:00`，与下一分区重叠、迁移直接 FAIL；
+    负偏移会话下更糟 —— **静默把行分到错误的月**。
+    正确形式 = `(m::timestamp) AT TIME ZONE 'UTC'`（绝对 UTC 午夜，与会话时区无关）。
+    永久守卫 = `migrations/partition_test.go`
+    `TestPartitionBoundsAreUtcMonthRegardlessOfSessionTz`
+    （显式 `SET TIME ZONE 'America/New_York'` 后按 tableoid 钉行的月份归属）。
+  - **保留期清理走整表 DELETE，不能 DROP 分区（对象级依赖实测）**：
+    被外键引用的分区 DROP / DETACH / TRUNCATE **全部失败**，
+    即使引用行已删完（ref_left=0）也失败 —— FK 是对象级依赖，与行数无关。
+    故 `iip_drop_expired_alert_partitions(retention_days)` 用
+    `DELETE FROM alerts WHERE starts_at < cutoff` + 行级 `ON DELETE CASCADE`。
+    代价（如实）：分区只增不减（空分区保留，顺带给历史月回填/重放留位）；
+    不回收磁盘（VACUUM 的职责）。
+  - **incident_alerts 必须带分区键**：否则每个旧分区都被 FK 挡死，连 DELETE
+    都无法进行。故增加 `alert_starts_at` 列（从 alerts 行回填后 NOT NULL），
+    FK 改复合 `(alert_id, alert_starts_at) → alerts(id, starts_at)`，
+    行级 CASCADE 语义不变。
+  - **跨分区读的底价**：候选集查询（ListOpenIncidentsWithAlerts）要 Append
+    扫全部分区，实测主导成本约 10.6–11.6ms @ 5 万行，分区键裁剪去不掉 ——
+    ADR-023 记录了为此做过的 join 变体实验与否决。
+  - **down 的破坏性：是** —— 分区布局与 `alert_starts_at` 列丢失，
+    数据不丢（全量搬回单表），但回滚后保留期清理能力随之消失。
+
+- **Related ADRs**: ADR-002（本 ADR 取代之）、ADR-023（T7.2 索引调优：
+  labels GIN 随之成为分区索引、每分区一份副本；Q3 跨分区底价的实测）、
+  ADR-018（0008 的单步回滚用例遵循其「绝对版本」纪律）。
+- **Evidence**: 0008 up/down 迁移文件（含 FK 交互与 UTC 边界的实测注释）；
+  `migrations/partition_test.go` 7 个用例（含会话时区守卫）+
+  `migrate_test.go` 的 `TestAlertsPartitionMigration`（up → 单步回滚到 7 → up）；
+  T7.1 收口时真库全量回归 0 FAIL。
 
 ---
 

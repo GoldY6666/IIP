@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -77,12 +78,18 @@ func (r *Incidents) ListOpenIncidentAlerts(ctx context.Context, perIncidentLimit
 }
 
 // LinkAlertToIncident 建立关联边（幂等）。score 为 nil 表示 NEW 档（无关联对象）。
-func (r *Incidents) LinkAlertToIncident(ctx context.Context, incidentID, alertID int64, score *float64, needsReview bool) error {
+//
+// alertStartsAt 是分区键（T7.1 / ADR-022）：incident_alerts 对 alerts 的
+// 外键是复合 FK (alert_id, alert_starts_at) → alerts(id, starts_at)，
+// 调用方必须传告警自身的 starts_at；传错值 = 外键违反（23503），
+// 不会静默错链（这正是复合 FK 相对「只按 alert_id 关联」多出来的保护）。
+func (r *Incidents) LinkAlertToIncident(ctx context.Context, incidentID, alertID int64, alertStartsAt time.Time, score *float64, needsReview bool) error {
 	err := r.queries.LinkAlertToIncident(ctx, db.LinkAlertToIncidentParams{
-		IncidentID:  incidentID,
-		AlertID:     alertID,
-		NeedsReview: needsReview,
-		Score:       numericFromFloatPtr(score),
+		IncidentID:    incidentID,
+		AlertID:       alertID,
+		AlertStartsAt: timestamp(alertStartsAt),
+		NeedsReview:   needsReview,
+		Score:         numericFromFloatPtr(score),
 	})
 	if err != nil {
 		return fmt.Errorf("repository: 关联事件-告警失败: %w", err)

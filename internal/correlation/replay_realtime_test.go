@@ -116,10 +116,17 @@ func (r *realtimeStore) ListOpenIncidentAlerts(_ context.Context, perIncidentLim
 	return out, nil
 }
 
-func (r *realtimeStore) LinkAlertToIncident(_ context.Context, incidentID, alertID int64, _ *float64, _ bool) error {
+func (r *realtimeStore) LinkAlertToIncident(_ context.Context, incidentID, alertID int64, alertStartsAt time.Time, _ *float64, _ bool) error {
 	v, ok := r.views[alertID]
 	if !ok {
 		return fmt.Errorf("假存储未登记告警 %d 的视图", alertID)
+	}
+	// 分区键一致性：调用方传的 starts_at 必须与视图里的相等。
+	// 复合 FK (alert_id, alert_starts_at) 要求二者精确匹配，
+	// 这里替外键先拦一道「接线时传错月/传错行」的错误——
+	// 否则要到真库才以 23503 暴露，而回放用例本可以零成本先发现。
+	if !alertStartsAt.Equal(v.StartsAt) {
+		return fmt.Errorf("告警 %d 的 starts_at 不一致: 传入 %s, 视图 %s", alertID, alertStartsAt, v.StartsAt)
 	}
 	r.members[incidentID] = append(r.members[incidentID], CandidateAlert{IncidentID: incidentID, View: v})
 	return nil
