@@ -1,11 +1,19 @@
-# IIP M0 — Prometheus 配置（占位 + 示例告警规则）
-# 规格依据：docs/IIP-M0详细开发计划.md §T0.6
+# IIP — Prometheus 抓取配置
+# 规格依据：docs/IIP-M0详细开发计划.md §T0.6（骨架）、docs/IIP开发计划.md §T6.4（接真实指标）
 #
-# 说明：M0 阶段还没有真实的 exporter（IIP 自身 /metrics 在 M6 才做）。
-# 因此这里只保留 Prometheus 自身的 self-scrape job，并用一条"必然触发"的
-# 假规则（up{job="prometheus"} == 1）来保证 Alertmanager 随时能收到 firing，
-# 用于 M0 联调验证告警链路（Prometheus → Alertmanager → webhook 接收端）。
-# M1 起 Alertmanager 的 receiver 将真实打到 iip-server。
+# 历史：M0 时本文件只有 Prometheus 自抓取，iip-server 那段是**注释占位**
+# （原注释写着「M1 预留…M6 打开」）。T6.3 交付 /metrics、T6.4 把占位兑现，
+# 现在两个 job 都是真的：
+#
+#   iip-server → :8080/metrics  入库/去重/webhook 耗时/关联分数/新建事件
+#   iip-worker → :9091/metrics  证据采集耗时/任务重试
+#
+# **必须是两个 job，不能合成一个**：server 与 worker 各持一份独立注册表
+# （ADR-026），同一个指标名不会在两个 target 上同时出现。合起来抓不会报错，
+# 只会让面板一半空图 —— 那是最难查的失败形态。
+#
+# 两个 job 的 up 语义也不同：iip-worker 掉线意味着「证据采集在重试」，
+# iip-server 掉线意味着「告警根本进不来」，各自单独告警（见 rules/iip-self.yml）。
 
 global:
   scrape_interval: 15s
@@ -13,21 +21,43 @@ global:
   # 未显式设置时区，Prometheus 内部一律 UTC
   external_labels:
     cluster: iip-local
-    env: m0
+    # 由 m0 改为 local：M0 已收口，标签值继续叫 m0 会让「这批数据来自哪个阶段」
+    # 变成谎言（T6.4 顺手修，属同一类静默漂移）
+    env: local
 
 # 规则文件：目录挂载方式（rules/ 下所有 *.yml 都会被加载）
+# 注意 *.yml.example 不会被加载 —— M0 的烟测规则曾长期持续 firing，
+# 接通真实链路后它会不断灌假告警进生产库，故降级为 .example（见 rules/ 下文件头）
 rule_files:
   - /etc/prometheus/rules/*.yml
 
 scrape_configs:
-  # 自身自抓取：job_name 必须与 rules 中 up{job="prometheus"} 保持一致，
-  # 否则假规则永远不会满足 up == 1。
+  # 自身自抓取：job_name 必须与 rules 中 up{job="prometheus"} 保持一致
   - job_name: "prometheus"
     static_configs:
       - targets: ["localhost:9090"]
 
-  # M1 预留：iip-server（当前未实现 /metrics，先注释，M6 打开）
-  # - job_name: "iip-server"
-  #   metrics_path: /metrics
-  #   static_configs:
-  #     - targets: ["host.docker.internal:8080"]
+  # iip-server：/metrics 与 /healthz 同级，**不受 IIP_AUTH_TOKEN 保护**
+  # （Prometheus 不该持有业务 token；鉴权只作用于 /api/v1/*）。
+  #
+  # 若 IIP_METRICS_ENABLED=false，该路由不注册 → 这里持续 target down + 404。
+  # 那是**预期**，不是故障：IIP_METRICS_ENABLED 与 IIP_WORKER_METRICS_ADDR
+  # 是排查「target down 但业务正常」的第一顺位。
+  - job_name: "iip-server"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["iip-server:8080"]
+    # 宿主机裸跑 server（不进 compose）时改用下面这行：
+    #   - targets: ["host.docker.internal:8080"]
+
+  # iip-worker：独立指标端口，取值必须与 IIP_WORKER_METRICS_ADDR 默认值
+  # （:9091）一致。compose 用 expose 而非 ports，故只能从 compose 网络内按服务名访问。
+  #
+  # 端口被占用时 worker **只 WARN 不退出**（指标是旁路，不该拖死采集）——
+  # 于是「worker 健康、任务照跑、指标不可抓」是可能的，本条 target down 是唯一信号。
+  - job_name: "iip-worker"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["iip-worker:9091"]
+    # 宿主机裸跑 worker 时改用：
+    #   - targets: ["host.docker.internal:9091"]

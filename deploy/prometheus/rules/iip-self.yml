@@ -1,0 +1,98 @@
+# IIP 自身指标的记录规则 + 告警规则（T6.4）
+#
+# 依据：ADR-026（7 个指标、标签纪律、不变量）、docs/IIP开发计划.md §T6.4
+#
+# 这里只放两件"必须全局唯一"的东西：
+#
+#  1. **去重命中率的定义**。它要两行 PromQL 拼（分子/分母），散落在各面板里
+#     迟早各自漂移 —— 那种漂移没有任何报错，只会让两个面板给出不同数字。
+#     定成记录规则后，面板统一引用 iip:dedup_hit_ratio:5m。
+#  2. **两条低误报告警**。其余阈值类告警留给人按真实流量定，不由配置替人拍板。
+#
+# ⚠️ 部署拓扑提醒（比规则本身更容易踩）：
+#    本仓库的 deploy/alertmanager/alertmanager.yml 把**所有**告警都送给
+#    iip-server 的 webhook。自监控告警若也走这条路由，会形成自指：
+#    「入库停滞」这条告警一旦送达 IIP，它自己就是一条入库 —— 条件随即消失，
+#    告警在下个周期自动 resolve。故**自监控告警应走独立 receiver（邮件/Slack）**，
+#    不要接回 IIP 自身。路由不属于本文件，见 T6.5 操作者文档。
+
+groups:
+  - name: iip-self-recording
+    interval: 30s
+    rules:
+      # 去重命中率 = hit / (hit + miss)
+      #
+      # 分母**只含 hit + miss，绝不能加 race**：race 是 miss 的**子集**
+      # （internal/alert/service.go 先记 miss，插入撞唯一约束时再额外记 race），
+      # 加进分母就是重复计数，命中率恒偏低 —— 而且偏得不多，很难被看出来。
+      #
+      # clamp_min(..., 1e-9)：无流量时分母为 0，避免 0/0 = NaN 污染面板
+      # （NaN 在 stat 面板显示成 "No data"，会被误读成"指标没抓到"）。
+      - record: iip:dedup_hit_ratio:5m
+        expr: |
+          sum(rate(iip_alert_dedup_total{result="hit"}[5m]))
+          /
+          clamp_min(sum(rate(iip_alert_dedup_total{result=~"hit|miss"}[5m])), 1e-9)
+
+      # 入库速率按结果拆分。与 dedup 的关系是埋点自检的依据：
+      #   dedup{hit} + dedup{miss} == ingest{stored} + ingest{duplicate}
+      # 面板里并排画这两组就能一眼看出漏埋点（数值对不上）。
+      - record: iip:alert_ingest:rate5m
+        expr: sum by (result) (rate(iip_alert_ingest_total[5m]))
+
+      # webhook 端到端 p95（含同批告警的关联）。加和不加 sum by (le) 的差别：
+      # 后者跨 instance 聚合，目标只有一个时两者等价，但扩多副本时前者更稳。
+      - record: iip:webhook_duration:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(iip_webhook_duration_seconds_bucket[5m])))
+
+      # 证据采集 p95。桶上界 30s（evidenceBuckets 最大档），
+      # 超过 30s 的样本全部落进 +Inf 桶，p95 会顶在 30 —— 此时该看日志而非面板。
+      - record: iip:evidence_duration:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(iip_evidence_collect_duration_seconds_bucket[5m])))
+
+  - name: iip-self-alerting
+    rules:
+      # 抓取失败：任一 IIP target 连续 5 分钟抓不到。
+      #
+      # 这是"指标侧死了"的**唯一外部信号** —— 埋点再全，没人抓等于没有。
+      # 常见真因（按排查顺序）：
+      #   ① iip-worker 指标端口被占用 → 进程健康但不可抓（只 WARN 不退出）；
+      #   ② IIP_METRICS_ENABLED=false → /metrics 路由未注册（404）；
+      #   ③ IIP_WORKER_METRICS_ADDR 为空 → worker 根本没起监听。
+      - alert: IIPTargetDown
+        expr: up{job=~"iip-server|iip-worker"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: iip-self
+        annotations:
+          summary: "IIP 指标端点抓取失败：{{ $labels.job }}"
+          description: "{{ $labels.instance }} 连续 5 分钟抓取失败。业务可能完全正常（指标是旁路），先查 IIP_METRICS_ENABLED 与 IIP_WORKER_METRICS_ADDR。"
+
+      # 入库停滞：target 活着，但最近 15 分钟一条告警都没进来。
+      #
+      # 两处刻意的设计，去掉任何一处都会让这条消息变得没用：
+      #  ① `or vector(0)`：计数器是**惰性创建**的 —— 一条告警都没进过时，
+      #     iip_alert_ingest_total 一条序列都不存在，sum() 返回空而非 0，
+      #     告警永远不触发。而这恰恰是最该报的场景（部署完 webhook 就没配对）。
+      #     只写 `== 0` 的版本在"从没通过告警"的环境里是恒假的。
+      #  ② `increase(...[24h]) > 0` 基线：排除"这套环境本来就没接入过告警"。
+      #     没有它，任何空库都会在 15 分钟后开始响。
+      #
+      # 残留误报：白天有量、夜间归零的环境，凌晨会响。那是真实语义
+      # （"确实 15 分钟没入库"），要静音请在本环境按作息 silence，别改这条表达式的窗口 ——
+      # 把 15m 调成 6h 只是把误报推后，同时让真断流晚 6 小时才被发现。
+      - alert: IIPAlertIngestStalled
+        expr: |
+          ((sum(rate(iip_alert_ingest_total[15m])) or vector(0)) == 0)
+          and on()
+          (sum(increase(iip_alert_ingest_total[24h])) > 0)
+          and on()
+          (up{job="iip-server"} == 1)
+        for: 15m
+        labels:
+          severity: warning
+          service: iip-self
+        annotations:
+          summary: "告警入库停滞：15 分钟无任何告警进入 IIP"
+          description: "此前 24 小时有过入库，但最近 15 分钟速率归零且 server 指标可抓。检查上游 Alertmanager 路由与 webhook 连通性。"

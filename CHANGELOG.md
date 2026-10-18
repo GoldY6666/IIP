@@ -11,6 +11,21 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **可观测性接入：抓取配置 + 记录/告警规则 + Grafana 面板（T6.4）**：把 M0 留在
+  `prometheus.yml` 里的注释占位换成两个真实 job（`iip-server:8080` /
+  `iip-worker:9091`），并补上操作者真正能用的三件东西。
+  - `deploy/prometheus/rules/iip-self.yml`：4 条记录规则（其中
+    `iip:dedup_hit_ratio:5m` 是去重命中率的**唯一权威定义**，分母只含 `hit+miss`，
+    `race` 是 miss 的子集不进分母）+ 2 条告警（`IIPTargetDown`、`IIPAlertIngestStalled`）。
+  - `deploy/grafana/iip-overview.json`：9 个面板（入库速率 / 去重命中率 / target 状态 /
+    新建事件 / webhook 延迟 p50-p99 / 关联分数热图 / 采集耗时 p95 / 重试速率 / 抓取耗时），
+    带数据源变量，导入即可用。**不新增 Grafana 容器**：会破坏「七服务」计数并牵动
+    `verify-images`/`verify-e2e` 的断言，面板以可导入文件形式交付。
+  - 静态判据 `scripts/verify-observability.py`（`tasks.ps1 verify-observability`）：
+    核对指标名闭包、指标覆盖、标签名与取值、记录规则引用与 `rule_files` 通配、
+    抓取端口漂移、面板结构六类。这些错法**全都不报错**，只表现为面板永久空图。
+    变异 6/6 全红。**它不核对 PromQL 语法与渲染结果**（需 promtool / Grafana / Docker，
+    本仓库三者皆无），故不声明「面板已验证可用」。
 - **自监控 `/metrics`（T6.3 / ADR-026）**：7 个业务指标 + Go 运行时/进程指标，
   Prometheus 文本格式。`internal/metrics` 是叶子包（只依赖 `client_golang`），
   每个实例自带**独立注册表**（不用全局默认表：单测会因为重复注册 panic，
@@ -79,6 +94,13 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Changed
 
+- **M0 烟测规则停用（T6.4）**：`deploy/prometheus/rules/highlatency.yml` 改名为
+  `highlatency.yml.example`。里面两条规则是 M0 用来验证「Prometheus → Alertmanager →
+  webhook」链路的**恒真假规则**；链路自 M1 起就是真的了，于是它们每 4 小时往
+  `alerts` 表灌一条 checkout 的假告警（会被采集证据、可能建事件），并在 T6.4 的面板上
+  表现为无法解释的周期尖峰。需要恢复联调时去掉 `.example` 后缀即可。
+  同时把 `prometheus.yml` 的 `external_labels.env` 由 `m0` 改为 `local`（M0 已收口，
+  继续叫 m0 会让「这批数据来自哪个阶段」变成谎言）。
 - **删除 `idx_alerts_labels` GIN 索引（T7.2，迁移 0009 / ADR-023）**：零读者——
   44 条 sqlc 查询无 labels jsonb 谓词；600+ 次语句执行（覆盖全部触达 alerts
   的读路径）后，14 个分区副本 `idx_scan` 全为 0，同期其他索引有实际读数

@@ -275,7 +275,35 @@ iip/
   - **端点契约**：`/metrics` 与 `/healthz` 同级、**不受 `IIP_AUTH_TOKEN` 保护**（Prometheus 不带业务 token）；`IIP_METRICS_ENABLED=false` 时不注册路由（404 而非 403）。worker 端口被占用**只 WARN 不退出**（指标是旁路，不该拖死采集）；compose 给 worker 加 `expose: 9091`（不发布到宿主机）。
   - 判据：新包 6 例 + 埋点侧 29 例；**变异 11/11 全红**；真栈探针（真 PG + 真 server + 真 worker + 假 Prometheus）**6 阶段全 PASS**（含「worker 指标只在真采到证据后出现」与「两个注册表确实独立」）；全量真库 **1088 PASS / 1 SKIP / 0 FAIL**；lint `0 issues`。
   - **未做**：抓取配置示例与 Grafana 面板（T6.4）；抑制次数升级为指标（仍只有 INFO 日志，理由见 ADR-026 的 Related ADRs）。
-- [ ] T6.4 部署侧 Prometheus 抓取配置示例 + 基础面板 JSON（0.5d）
+- [x] T6.4 部署侧 Prometheus 抓取配置示例 + 基础面板 JSON（0.5d）
+  - 2026-10-18 实施完成。性质是**兑现 M0 留的欠条**：`deploy/prometheus/prometheus.yml` 里
+    iip-server 那段本来就是注释占位（原注释写着「M1 预留…M6 打开」），本次换成两个真 job。
+  - 交付四件：抓取配置两个 job（`iip-server:8080` / `iip-worker:9091`）＋
+    `rules/iip-self.yml`（4 条记录规则 + 2 条告警）＋ `grafana/iip-overview.json`（9 个 panel）＋
+    `deploy/README.md` 接入说明。
+  - **去重命中率定成记录规则**（`iip:dedup_hit_ratio:5m`）：它要两行 PromQL 拼，散落在多个面板里
+    迟早各自漂移，而那种漂移没有任何报错，只会让两个面板给出不同数字。分母**只含 hit+miss**——
+    race 是 miss 的子集（`service.go` 先记 miss，撞唯一约束时再额外记 race），加进去就是重复计数。
+  - **两条告警**（禹裁定「最不易误报」两条）：`IIPTargetDown`（up==0 5m）、
+    `IIPAlertIngestStalled`（15m 无入库 + 24h 有过入库 + up==1）。第二条两个刻意设计：
+    ① `or vector(0)` —— 计数器惰性创建，一条告警都没进过时序列不存在，`sum()` 返回空，
+    只写 `== 0` 的版本在「从没通过告警」的环境里**恒不触发**，而那正是最该报的场景；
+    ② 24h 基线 —— 排除「这套环境本来就没接入过」。残留误报（白天有量、夜间归零）如实写进注释。
+  - **自指问题**：`alertmanager.yml` 把所有告警都送给 iip-server，自监控告警若也走这条路由，
+    「入库停滞」一旦送达 IIP 就自己消除条件（它自己就是一条入库）。故文档要求自监控告警走独立 receiver。
+  - **顺手清理一个真危害**：`rules/highlatency.yml` 改名 `.yml.example`。两条规则是 M0 用来验链路的
+    **恒真假规则**，接通真实指标后每 4h 往库里灌一条 checkout 假告警（落库 → 建事件 → 采证据），
+    并在新面板上表现为无法解释的周期尖峰。
+  - **不加 Grafana 服务进 compose**（禹裁定）：会破坏「七服务」计数，`verify-images`/`verify-e2e`
+    的断言要跟着改一轮，收益不值得。面板以可导入 JSON 形式提供。
+  - 判据：`scripts/verify-observability.py`（六类静态核对：引用闭包 / 覆盖 / 标签名与值 /
+    记录规则引用与加载通配 / 端口漂移 / 面板结构），**变异 6/6 全红**（拼错指标名、删面板、
+    改标签值、引用不存在的规则、端口写错、规则改名 .yaml），恢复后基线仍绿；接入 `tasks.ps1 verify-observability`。
+  - **判据自己踩的坑（已修，留在脚本注释里）**：`balanced_block(src, m.start()+m.end()-1)` 把索引
+    写成了两数相加，越界后返回空块 ⇒ 0 个 instrument ⇒ 模型为空 ⇒「覆盖检查」因集合差为空而**恒绿**。
+    这是判据自证失效的典型形态，故补了「解析到 0 个 instrument 必须硬报」与「0 个选择器必须硬报」两条自守卫。
+  - **做不到的（如实标注）**：本机无 Docker daemon / promtool / Grafana 实例 ⇒ PromQL 语法、
+    面板渲染、抓取成功三者**均未经机器验证**。文档只声明「名字与定义一致」，不声明「面板可用」。
 - [ ] T6.5 操作者文档《5 分钟接入 Alertmanager》（0.5d）
 
 **验收标准**：新 Incident 30 秒内 Slack 收到通知且消息含证据计数；/metrics 指标在压测中可观测（见 M7）。

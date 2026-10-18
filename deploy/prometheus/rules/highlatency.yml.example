@@ -1,5 +1,19 @@
-# IIP M0 — 示例告警规则
+# IIP M0 — 示例告警规则（**已停用，扩展名改为 .yml.example**）
 # 规格依据：docs/IIP-M0详细开发计划.md §T0.6
+#
+# ⚠️ 为什么不再叫 .yml（T6.4 变更）：
+#    prometheus.yml 的 rule_files 是 `rules/*.yml`，本文件里两条规则是
+#    **故意恒真**的（`up{job="prometheus"} == 1` 与 `vector(1) == 1`）——
+#    它们在 M0 的唯一用途是验证「Prometheus → Alertmanager → webhook」链路能通。
+#
+#    链路自 M1 起就是真的了，于是这两条假规则开始往 iip-server 里灌假告警：
+#    每 repeat_interval（4h）重发一次 checkout 的 HighLatency，
+#    在 alerts 表里落库、被采集证据、可能建事件。
+#    T6.4 交付面板后这件事不再是"看不见的噪声"——它会让入库速率、事件新建速率、
+#    采集耗时三个面板都出现无法解释的周期性尖峰。
+#
+#    因此保留文件（M0 联调仍可一键恢复：去掉 .example 后缀），但不默认加载。
+#    真实的自身指标告警见同目录 iip-self.yml。
 #
 # 目的：提供一条"必然触发"的假规则，验证 Prometheus → Alertmanager 告警链路。
 # 逻辑：job="prometheus" 自抓取永远 up == 1，因此该规则在采集到第一个样本后

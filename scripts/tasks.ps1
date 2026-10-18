@@ -169,6 +169,16 @@ function Invoke-VerifyE2E {
     python scripts/verify-e2e.py @TaskArgs
 }
 
+function Invoke-VerifyObservability {
+    <#
+    T6.4 可观测性配置的静态核对：面板/规则里引用的指标名、标签值、记录规则、
+    抓取端口是否与代码里的定义一致。这些错法全都不报错，只表现为面板空图。
+    不需要 Docker / Prometheus / Grafana，纯静态，可进 CI。
+    #>
+    Write-Host '[tasks] verify-observability' -ForegroundColor Cyan
+    python scripts/verify-observability.py @TaskArgs
+}
+
 function Invoke-List {
     Write-Host 'IIP 本地任务（PowerShell 等价物）：' -ForegroundColor Green
     @(
@@ -194,7 +204,8 @@ function Invoke-List {
         '  verify-runtime 应用链路验证：真实 PG 从零建库 -> 迁移 -> 探活 -> 心跳 -> 退出',
         '  check-binaries 交叉编译 linux/amd64 并校验真静态链接（distroless 前提）',
         '  run-local     无 Docker 的本地全栈启动（绿色版 PG + server + Vite）',
-        '  verify-e2e    E2E 一键回归（M1-M6 验收 + MVP 总验收；可透传 --stages s2,s3 / --summary / --strict）'
+        '  verify-e2e    E2E 一键回归（M1-M6 验收 + MVP 总验收；可透传 --stages s2,s3 / --summary / --strict）',
+        '  verify-observability 核对 Grafana 面板 / Prometheus 规则与代码里的指标定义是否一致（静态，不需 Docker）'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -222,9 +233,10 @@ switch ($Task.ToLowerInvariant()) {
     'check-binaries' { Invoke-CheckBinaries }
     'run-local'    { Invoke-RunLocal }
     'verify-e2e'   { Invoke-VerifyE2E }
+    'verify-observability' { Invoke-VerifyObservability }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability）"
         exit 1
     }
 }

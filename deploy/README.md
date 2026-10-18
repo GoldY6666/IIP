@@ -186,6 +186,63 @@ worker 启动期提前到安装期）。
 刻意不做（写了跑不起来比不写更危险）：多副本 server 选主、PG 高可用、
 Ingress/TLS 终止、HPA——这些属于集群层设施，理由见 values.yaml 顶部注释。
 
+## 自监控指标与面板（T6.3 / T6.4）
+
+`iip-server` 与 `iip-worker` 各自暴露 `/metrics`（Prometheus 文本格式）。两者是
+**独立注册表**，同一个指标名不会在两个 target 上同时出现：
+
+| 指标 | 出现位置 | 说明 |
+|---|---|---|
+| `iip_alert_ingest_total{result}` | server | `stored`/`duplicate`/`invalid`/`error` |
+| `iip_alert_dedup_total{result}` | server | `hit`/`miss`/`race`（race 是 miss 的子集） |
+| `iip_webhook_duration_seconds` | server | 端到端时长（含关联） |
+| `iip_correlation_score{action}` | server | 关联分数直方图，桶步长 0.1 |
+| `iip_incident_created_total` | server | 仅 `new` 档，不含合入 |
+| `iip_evidence_collect_duration_seconds{source}` | **worker** | 单次采集耗时（含失败） |
+| `iip_task_retry_total{reason}` | **worker** | `stale_reclaim`/`attempt_failed` |
+
+三条接入步骤：
+
+```bash
+# 1. 起栈（观测组 + 应用组）。Prometheus 会按 deploy/prometheus/prometheus.yml
+#    抓 iip-server:8080/metrics 与 iip-worker:9091/metrics
+docker compose -f deploy/docker-compose.yml --profile app up -d
+
+# 2. 确认两个 target 都是 UP（页面：Status → Targets）
+#    只有 prometheus 自己 UP、两个 iip-* 是 DOWN 时，先看目标进程是否真的起了
+
+# 3. 导入面板：Grafana → Dashboards → Import → 上传
+#    deploy/grafana/iip-overview.json，数据源选你的 Prometheus
+```
+
+`/metrics` **不受 `IIP_AUTH_TOKEN` 保护**（Prometheus 不该持有业务 token；鉴权只作用于
+`/api/v1/*`）。关掉指标的两个开关与各自的症状：
+
+- `IIP_METRICS_ENABLED=false`（server）→ `/metrics` 路由不注册，返回 **404**，target DOWN；
+- `IIP_WORKER_METRICS_ADDR` 置空（worker）→ 不监听，target DOWN。
+  **端口被占用时 worker 只 WARN 不退出**（指标是旁路，不该拖死采集），
+  所以「worker 健康、任务照跑、指标不可抓」是可能的状态，`up{job="iip-worker"}` 是唯一信号。
+
+两条告警规则在 `deploy/prometheus/rules/iip-self.yml`（`IIPTargetDown`、
+`IIPAlertIngestStalled`）。**它们不该路由回 iip-server**：`IIPAlertIngestStalled`
+一旦送达 IIP，它自己就是一条入库，条件随即消失、下个周期自动 resolve。
+自监控告警请配独立 receiver（邮件/Slack）。
+
+改完面板或规则后跑静态核对（不需要 Docker / Prometheus / Grafana）：
+
+```bash
+python scripts/verify-observability.py        # 或 powershell scripts/tasks.ps1 verify-observability
+```
+
+它核对「指标名 / 标签名与取值 / 记录规则引用 / 抓取端口 / 面板结构」五类一致性。
+**它不核对 PromQL 语法与渲染结果** —— 那需要 promtool 与 Grafana 实例，本仓库的
+验证链路里都没有，所以「面板已验证可用」这句话目前给不出证据，只能说
+「面板引用的名字与代码里的定义一致」。
+
+> 历史：`deploy/prometheus/rules/highlatency.yml` 已改名为 `.yml.example`。
+> 里面两条规则是 M0 用来验证告警链路的**恒真假规则**，接通真实指标后它们会
+> 每 4 小时往库里灌一条 checkout 的假告警，并在面板上表现为无法解释的周期尖峰。
+
 ## 常用命令
 
 ```bash
