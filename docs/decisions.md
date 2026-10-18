@@ -570,6 +570,7 @@
 | ADR-022 | `alerts` 表按 `starts_at` 月度 RANGE 分区（T7.1，取代 ADR-002 的「暂不分区」） | 已实施（0008；PK/唯一索引含分区键、复合 FK、UTC 月界守卫测试、保留期走行级 DELETE） |
 | ADR-023 | T7.2 索引调优：建 `tasks` 事件表达式索引 + 删 `alerts` labels GIN | 已实施（0009；EXPLAIN 实测双重证据：GIN 的 14 个分区副本 `idx_scan` 全 0 = 零读者；tasks 两条消费查询全表扫且无保留期。Q3「join 加分区键」变体实测更慢/持平，**记录否决**以防重做） |
 | ADR-024 | T6.1 Slack 通知：默认关闭 + 异步 best-effort + 失败静默丢弃 | 已实施（`internal/notify` 叶子包 + 两处 hook；真库真栈探针 PASS，含竞态修复与标题去重；T6.2 的范围边界已在 ADR 内划清） |
+| ADR-025 | T6.2 通知去风暴（滑动窗口 2 条/10 分钟 + 终态白名单）+ 通用出站 webhook | 已实施（终态/重开必发由禹裁定；档位固定常量；两个 sink 拒重定向；变异 5 处全红，真栈探针 4/4 条数断言） |
 
 ---
 
@@ -882,6 +883,76 @@ ADR-024：T6.1 Slack 通知 —— 默认关闭、异步 best-effort、失败静
     NEW 档消息含 `关联告警: 1 条｜证据: 0 条` 与深链，
     transition 后消息含 `open → acknowledged（操作人: probe）`，
     Ctrl+Break 优雅退出码 0。
+
+ADR-025：T6.2 通知去风暴与通用出站 webhook —— 滑动窗口、终态白名单、拒重定向
+
+- **Status**: 已实施（T6.2；`internal/notify/limits.go` + `webhook.go`）
+- **Date**: 2026-10-18
+- **来源**: docs/IIP开发计划.md §10 T6.2「通知去风暴：同 Incident 10 分钟内最多
+  2 条更新消息；通用出站 webhook（预留外部系统接收）」；禹 2026-10-18 批准方案，
+  并裁定「终态/重开必发」「档位用固定常量」。
+- **Background**:
+  状态机有 6 个状态且只许前向，一次真实处置会连续产生
+  `acknowledged → investigating → mitigated → resolved` 四条消息；
+  风暴场景（多个事件同时处置）下通道会被淹没，人反而看不清关键那条。
+  计划只给了「最多 2 条」，真正要裁定的是：**窗口怎么算、谁能豁免、在哪判定**。
+  另一侧的通用 webhook 也不是「再写个 POST」——出站凭据与重定向是安全面。
+- **Options**:
+  ① 窗口：(a) 固定窗口（从首条起算）；(b) 滑动窗口。
+  ② 例外：(a) 严格 2 条无例外；(b) 终态（resolved/ignored）与重开（open）必发。
+  ③ 档位：(a) 常量；(b) 配置键。
+  ④ 判定位置：(a) 入队前（不占队列）；(b) 派发时。
+  ⑤ 通用出站：(a) Slack 式纯文本；(b) 结构化 JSON。
+  ⑥ 通用出站凭据：(a) URL 查询参数；(b) `Authorization: Bearer` 头。
+- **Decision**（禹 2026-10-18 批准）:
+  ① **(b) 滑动窗口**；② **(b) 终态/重开必发**；③ **(a) 常量**（2 条 / 10 分钟）；
+  ④ **(a) 入队前**判定，被抑制的条目不占队列；⑤ **(b) JSON**；
+  ⑥ **(b) Bearer 头**。两个 sink 统一**拒绝重定向**。
+- **Consequences**:
+  - **滑动窗口的判别证据（为什么不能图省事用固定窗口）**：
+    固定窗口在边界处会漏掉已发出的消息。场景：t0 与 t0+9m59s 各发一条
+    （都合法），固定窗口在 t0+10m 一到就清零 ⇒ **10 分 2 秒内可以发到 4 条**；
+    滑动窗口只允许再发 1 条。`TestLimiterWindowIsSlidingNotFixed` 专抓这条，
+    变异验证：改成固定窗口实现后它立刻红（且断言点正是 t0+10m02s 那条）。
+  - **白名单使「最多 2 条」严格意义上有例外（如实记录）**：
+    终态与重开**不进限额、不消耗配额**。理由是代价不对称——
+    on-call 收到「已确认」却收不到「已解决」会以为故障还在；
+    而重开意味着复发，是最该被看见的消息。代价是极端情况下
+    10 分钟内可能超过 2 条（最多 2 条中间态 + 若干终态/重开）。
+  - **抑制可见**：每条被抑制的状态变更记一行 INFO（incident_id / 目标状态 /
+    窗口内已发条数）。风暴时日志行数会上升，这是刻意的取舍——
+    静默丢消息带来的排查成本更高。T6.3 出 metrics 后可改成计数。
+  - **内存有界**：每事件最多记 2 个时间戳；条目数超过 4096 时清理
+    「最后一次发送早于 2×窗口」的事件。不用定时器（少一个要关的 goroutine）。
+  - **限流在入队前**：被抑制的消息不进队列，因此不会挤占 256 容量；
+    代价是 `NotifyStatusChanged` 的 `false` 同时表示「关闭后拒收」与
+    「被限流」，两者靠日志区分（接口不为此增加返回值）。
+  - **通用 webhook 契约**（`webhookPayload`）：
+    `{kind, incident:{id,title,severity,service,status,started_at},
+    from_status?, to_status?, actor?, alert_count, evidence_count}`。
+    状态字段用 `omitempty`——创建通知里出现空的 `"from_status":""` 会让接收端疑惑。
+  - **拒重定向是安全要求，不是洁癖**：接收端一个 302 就能把请求体与
+    `Authorization` 头转发到任意主机（Slack 的密钥 URL 也可能被转走）。
+    变异验证：去掉 `CheckRedirect` 后，测试里那个「第三方」**实测收到 2 次请求**
+    （两个 sink 各一次），判据因此从「没报错」升级为「第三方一次都不该收到」。
+  - **凭据处理**：token 不入日志、不入错误串（真栈探针断言日志里搜不到 token）；
+    webhook URL 本身也不打日志（可能带密钥或暴露内网拓扑），只记
+    「是否带鉴权」。
+  - **已知取舍（不做）**：发送不重试、不排队重投；窗口结束后不发
+    「期间还有 N 次变更」的汇总消息（记作后续选项，需要定时器或惰性触发）；
+    两个 sink 共用单 worker，接收端慢时会占住派发线程（由 15s 总超时兜底）。
+- **Related ADRs**: ADR-024（本 ADR 是其「T6.2 边界」条款的落地；
+  异步与失败语义不变）、ADR-017（默认关闭纪律）、ADR-020（取证诚实原则）。
+- **Evidence**:
+  - 单测：`limits_test.go` 6 例（配额、滑动窗口判别、白名单不消耗配额、
+    按事件隔离、内存清理、Service 层集成）+ `webhook_test.go` 5 例
+    （payload 形状、空字段省略、错误可读且不泄露 token、超时、两个 sink 拒重定向）。
+  - 变异 5 处全红：删配额判定 / 删白名单 / 改固定窗口 / 默认跟随重定向 /
+    删 `validateWebhook` 调用。
+  - 真栈探针（`D:\_iip_setup\_probe_slack.py`）：真 PG + 真 server + 假 Slack +
+    假通用 webhook；一条告警 + 四次流转（ack→investigating→mitigated→resolved），
+    两个出口均收到 **4 条**（created + 2 中间态 + resolved），mitigated 被抑制、
+    resolved 必发、Bearer 头正确、日志无 token、优雅退出码 0。
 
 ---
 

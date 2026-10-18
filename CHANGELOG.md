@@ -11,6 +11,15 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **通知去风暴 + 通用出站 webhook（T6.2 / ADR-025）**：同一事件 10 分钟滑动窗口内
+  最多 2 条**中间态**更新；终态（resolved/ignored）与重开必发且不消耗配额——
+  静默丢掉「已解决」会让 on-call 以为故障还在。被抑制的条目不进队列，
+  每抑制一条记一行 INFO（含窗口内已发条数）。
+  新增 `GenericSink`：POST 机器可读 JSON（`kind` / `incident{...}` /
+  `from_status` / `to_status` / `actor` / `alert_count` / `evidence_count`），
+  可选 `Authorization: Bearer`，三键 `IIP_NOTIFY_WEBHOOK_URL` /
+  `_TIMEOUT` / `_TOKEN`，默认关闭、与 Slack 独立开关。
+  两个 sink 统一**拒绝重定向**（302 会把请求体与凭据转给第三方，实测过）。
 - **Slack 通知（T6.1 / ADR-024）**：新事件与状态变更两类消息，含事件摘要、
   关联告警数/证据数、UI 深链。`internal/notify` 是叶子包（只依赖标准库）：
   异步派发（256 队列 + 单 worker，`Notify` 非阻塞），失败只记日志

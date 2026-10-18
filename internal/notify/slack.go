@@ -42,7 +42,9 @@ func NewSlackSink(webhookURL, uiBaseURL string, timeout time.Duration) *SlackSin
 	return &SlackSink{
 		webhookURL: webhookURL,
 		uiBaseURL:  strings.TrimRight(uiBaseURL, "/"),
-		client:     &http.Client{Timeout: timeout},
+		// 与通用 webhook 同一套拒重定向策略：webhook URL 本身就是凭据，
+		// 一次 302 就能把它交给第三方（见 noRedirectClient 注释）。
+		client: noRedirectClient(timeout),
 	}
 }
 

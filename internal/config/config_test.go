@@ -95,6 +95,27 @@ func mergeT61(base Config) Config {
 	return base
 }
 
+// t62Defaults 返回 T6.2 通用 webhook 字段的默认取值集合（ADR-025）。
+//
+// 与 T6.1 同构：URL/Token 默认空串（不能作合并哨兵），
+// 所以哨兵只能用 NotifyWebhookTimeout == 0。
+func t62Defaults() Config {
+	return Config{
+		NotifyWebhookURL:     DefaultNotifyWebhookURL,
+		NotifyWebhookTimeout: DefaultNotifyWebhookTimeout,
+		NotifyWebhookToken:   DefaultNotifyWebhookToken,
+	}
+}
+
+// mergeT62 把 T6.2 字段的默认值合并进 base。
+func mergeT62(base Config) Config {
+	d := t62Defaults()
+	base.NotifyWebhookURL = d.NotifyWebhookURL
+	base.NotifyWebhookTimeout = d.NotifyWebhookTimeout
+	base.NotifyWebhookToken = d.NotifyWebhookToken
+	return base
+}
+
 // t71Defaults 返回 T7.1 分区维护字段的默认取值集合（ADR-022）。
 //
 // 沿 m4Defaults / m5Defaults 的同一理由：集中列举，避免用例里逐个内联
@@ -155,6 +176,8 @@ func m4Valid() Config {
 	// UIBaseURL 无校验规则，但一并给默认值保持「基座=默认部署」语义。
 	c.SlackTimeout = DefaultSlackTimeout
 	c.UIBaseURL = DefaultUIBaseURL
+	// T6.2：通用 webhook 的超时间理（零值会被 validateWebhook 拦下）。
+	c.NotifyWebhookTimeout = DefaultNotifyWebhookTimeout
 	return c
 }
 
@@ -334,6 +357,49 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			env:     map[string]string{},
 			wantErr: true,
 		},
+		{
+			// 通用 webhook 与 Slack 独立：这里只开通用出口，Slack 保持关闭。
+			name:            "通用webhook配置生效",
+			wantHTTPTimeout: true,
+			args: []string{
+				"--pg-url=postgres://u:p@localhost:5432/iip",
+				"--notify-webhook-url=http://receiver.internal:9000/hook",
+				"--notify-webhook-timeout=2s",
+				"--notify-webhook-token=tok-123",
+			},
+			env: map[string]string{},
+			want: Config{
+				HTTPAddr:             DefaultHTTPAddr,
+				PGURL:                "postgres://u:p@localhost:5432/iip",
+				LogLevel:             DefaultLogLevel,
+				WorkerPoll:           DefaultWorkerPoll,
+				DBPollOnly:           DefaultDBPollOnly,
+				WebhookMaxBytes:      DefaultWebhookMaxBytes,
+				TopologyFile:         DefaultTopologyFile,
+				CorrelationEnabled:   DefaultCorrelationEnabled,
+				NotifyWebhookURL:     "http://receiver.internal:9000/hook",
+				NotifyWebhookTimeout: 2 * time.Second,
+				NotifyWebhookToken:   "tok-123",
+			},
+		},
+		{
+			name: "通用webhook_timeout为零_应报错",
+			args: []string{
+				"--pg-url=postgres://u:p@localhost:5432/iip",
+				"--notify-webhook-timeout=0s",
+			},
+			env:     map[string]string{},
+			wantErr: true,
+		},
+		{
+			name: "通用webhook_url缺scheme_应报错",
+			args: []string{
+				"--pg-url=postgres://u:p@localhost:5432/iip",
+				"--notify-webhook-url=receiver.internal:9000/hook",
+			},
+			env:     map[string]string{},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -383,6 +449,10 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			// 不能作哨兵，理由见 mergeT61 的说明）。
 			if want.SlackTimeout == 0 {
 				want = mergeT61(want)
+			}
+			// T6.2 同理：NotifyWebhookTimeout 默认 5s 非零。
+			if want.NotifyWebhookTimeout == 0 {
+				want = mergeT62(want)
 			}
 			if *got != want {
 				t.Fatalf("配置不匹配\n got=%+v\nwant=%+v", *got, want)
@@ -733,4 +803,117 @@ func TestExplicitPromEnabledRequiresURL(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Errorf("显式关闭 Prometheus 时不应要求地址: %v", err)
 	}
+}
+
+// TestNotifyWebhookSources 验 T6.2 通用 webhook 的三来源（默认/flag/env）。
+//
+// 与 TestSlackNotifySources 同构：默认关闭是硬性要求（ADR-017 纪律），
+// 打开后必须真的能读到值，否则「配了却不生效」只会在告警来临时才暴露。
+func TestNotifyWebhookSources(t *testing.T) {
+	const url = "http://receiver.internal:9000/hook"
+
+	t.Run("默认关闭", func(t *testing.T) {
+		c, err := Load([]string{"--pg-url=postgres://u:p@localhost:5432/iip"})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.NotifyWebhookURL != "" || c.NotifyWebhookToken != "" {
+			t.Errorf("默认应关闭通用 webhook，实际 url=%q token=%q", c.NotifyWebhookURL, c.NotifyWebhookToken)
+		}
+		if c.NotifyWebhookTimeout != DefaultNotifyWebhookTimeout {
+			t.Errorf("默认超时 = %s，want %s", c.NotifyWebhookTimeout, DefaultNotifyWebhookTimeout)
+		}
+	})
+
+	t.Run("flag覆盖", func(t *testing.T) {
+		c, err := Load([]string{
+			"--pg-url=postgres://u:p@localhost:5432/iip",
+			"--notify-webhook-url=" + url,
+			"--notify-webhook-timeout=3s",
+			"--notify-webhook-token=tok",
+		})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.NotifyWebhookURL != url || c.NotifyWebhookToken != "tok" {
+			t.Errorf("flag 覆盖后 url=%q token=%q", c.NotifyWebhookURL, c.NotifyWebhookToken)
+		}
+		if c.NotifyWebhookTimeout != 3*time.Second {
+			t.Errorf("flag 覆盖后超时 = %s，want 3s", c.NotifyWebhookTimeout)
+		}
+	})
+
+	t.Run("环境变量覆盖", func(t *testing.T) {
+		t.Setenv("IIP_NOTIFY_WEBHOOK_URL", url)
+		t.Setenv("IIP_NOTIFY_WEBHOOK_TIMEOUT", "8s")
+		t.Setenv("IIP_NOTIFY_WEBHOOK_TOKEN", "env-tok")
+		c, err := Load([]string{"--pg-url=postgres://u:p@localhost:5432/iip"})
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.NotifyWebhookURL != url || c.NotifyWebhookToken != "env-tok" {
+			t.Errorf("env 覆盖后 url=%q token=%q", c.NotifyWebhookURL, c.NotifyWebhookToken)
+		}
+		if c.NotifyWebhookTimeout != 8*time.Second {
+			t.Errorf("env 覆盖后超时 = %s，want 8s", c.NotifyWebhookTimeout)
+		}
+	})
+}
+
+// TestValidateWebhook 钉住 validateWebhook 的四条规则。
+func TestValidateWebhook(t *testing.T) {
+	base := func() Config {
+		c := m4Valid()
+		c.NotifyWebhookTimeout = DefaultNotifyWebhookTimeout
+		return c
+	}
+
+	t.Run("默认关闭_空URL合法", func(t *testing.T) {
+		c := base()
+		if err := c.Validate(); err != nil {
+			t.Errorf("未配 webhook 应合法: %v", err)
+		}
+	})
+
+	t.Run("合法地址通过", func(t *testing.T) {
+		for _, u := range []string{"https://example.com/hook", "http://10.0.0.5:9000/hook"} {
+			c := base()
+			c.NotifyWebhookURL = u
+			if err := c.Validate(); err != nil {
+				t.Errorf("%s 应通过: %v", u, err)
+			}
+		}
+	})
+
+	t.Run("缺scheme应报错", func(t *testing.T) {
+		c := base()
+		c.NotifyWebhookURL = "receiver.internal:9000/hook"
+		if err := c.Validate(); err == nil {
+			t.Error("缺 scheme 应在启动期拦下")
+		}
+	})
+
+	t.Run("非http协议应报错", func(t *testing.T) {
+		c := base()
+		c.NotifyWebhookURL = "ftp://receiver.internal/hook"
+		if err := c.Validate(); err == nil {
+			t.Error("ftp 协议应被拒绝")
+		}
+	})
+
+	t.Run("超时为零应报错", func(t *testing.T) {
+		c := base()
+		c.NotifyWebhookTimeout = 0
+		if err := c.Validate(); err == nil {
+			t.Error("零超时会让通知恒丢，应报错")
+		}
+	})
+
+	t.Run("有token无URL合法", func(t *testing.T) {
+		c := base()
+		c.NotifyWebhookToken = "pre-set-token"
+		if err := c.Validate(); err != nil {
+			t.Errorf("预置 token 但未配出口应合法: %v", err)
+		}
+	})
 }

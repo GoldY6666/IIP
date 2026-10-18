@@ -257,7 +257,12 @@ iip/
   - **失败语义是本次的实质裁定**：默认关闭、异步 best-effort、失败只记日志（不返回 error，避免 Alertmanager 重投放大故障）；**计数查询失败宁可漏发**也不发「证据 0 条」的假消息。关闭顺序 `srv.Shutdown → notifier.Close → pool.Close`。
   - **实测抓到两个真缺陷**：① 关闭竞态 —— `select` 同时等 queue 与 stopped 时两 case 同时就绪，Go 随机选分支，约一半概率把事件塞进已无人消费的队列并**返回 true**（10 次跑 5 次红）；修法用互斥量把「判 closed + 入队」做成原子段，新增 `TestServiceConcurrentCloseAndNotify` 并用变异证明必红。② 标题重复 —— `incidentTitle` 已含服务名，模板又拼一次（`LatencyHigh (checkout)（checkout）`）；模板改为只用 Title。
   - 判据：`internal/notify` 15 用例（20 连跑稳定，变异 5 处全红）；两处 hook 各 4 用例（变异 3 处全红，其中「触发提前」只被时序用例抓到）；真栈探针（真 PG + 真 server + 假 webhook）两条消息内容与计数全对、优雅退出码 0。
-- [ ] T6.2 通知去风暴：同 Incident 10 分钟内最多 2 条更新消息；通用出站 webhook（预留外部系统接收）（1d）
+- [x] T6.2 通知去风暴：同 Incident 10 分钟内最多 2 条更新消息；通用出站 webhook（预留外部系统接收）（1d）
+  - 2026-10-18 实施完成：`internal/notify/limits.go`（滑动窗口 2 条/10 分钟 + 终态/重开白名单 + 内存上界）+ `webhook.go`（结构化 JSON + 可选 Bearer token）+ 配置三键（`IIP_NOTIFY_WEBHOOK_URL` / `_TIMEOUT` / `_TOKEN`，默认关闭）。决策记录 **ADR-025**。
+  - **两个裁定**：① 终态（resolved/ignored）与重开必发且不消耗配额（禹 2026-10-18 裁定，理由是静默丢失终态比多一条消息代价大）；② 档位用固定常量而非配置键（T6.3 出 metrics 后再议）。
+  - **滑动窗口而非固定窗口**：固定窗口在边界会漏掉已发消息（t0 与 t0+9m59 各一条后，t0+10m 起算的新窗口可再发 2 条 ⇒ 10 分 2 秒内 4 条）；`TestLimiterWindowIsSlidingNotFixed` 专抓这条，变异成固定窗口后该用例红。
+  - **两个 sink 拒绝重定向**：实测默认跟随会把请求体与 `Authorization` 头发给第三方（变异验证时「第三方」收到 2 次请求）。
+  - 判据：限流 6 例 + 通用 webhook 5 例 + 配置用例；变异 5 处全红；真栈探针一条告警 + 四次流转，两出口均 4 条（mitigated 被抑制、resolved 必发）、日志无 token、退出码 0。
 - [ ] T6.3 自监控 `/metrics`：`alert_ingest_total`、`webhook_duration_seconds`、`dedup_hit_ratio`、`correlation_score_bucket`（直方图）、`incident_created_total`、`evidence_collect_duration_seconds`、`task_retry_total`（1.5d）
 - [ ] T6.4 部署侧 Prometheus 抓取配置示例 + 基础面板 JSON（0.5d）
 - [ ] T6.5 操作者文档《5 分钟接入 Alertmanager》（0.5d）

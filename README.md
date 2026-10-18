@@ -81,6 +81,24 @@ curl.exe http://localhost:8080/healthz  # 预期输出 ok
 （`from → to` + 操作人）。通知走异步队列，**Slack 挂掉不会影响告警接入**；
 计数查询失败时该条通知被放弃（不发送「证据 0 条」这类误导消息）。
 
+**去风暴**：同一事件 10 分钟（滑动窗口）内最多 2 条**中间态**更新
+（acknowledged / investigating / mitigated）；终态（resolved / ignored）与重开
+**必发**。被抑制的条目不进队列，日志里有「状态变更通知被去风暴抑制」。
+
+**通用出站 webhook**（给外部系统，与 Slack 独立开关）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `IIP_NOTIFY_WEBHOOK_URL` | 空（关闭） | 接收端地址，POST JSON |
+| `IIP_NOTIFY_WEBHOOK_TIMEOUT` | `5s` | 单条发送的 HTTP 超时 |
+| `IIP_NOTIFY_WEBHOOK_TOKEN` | 空 | 可选，发送 `Authorization: Bearer <token>`；不会写进日志 |
+
+payload：`{"kind","incident":{"id","title","severity","service","status","started_at"},
+"from_status","to_status","actor","alert_count","evidence_count"}`
+（`from_status`/`to_status`/`actor` 仅在状态变更时出现）。两个出口都**不跟随
+重定向**，接收端返回 3xx 会记为发送失败。
+
+
 
 **卸载/清理**
 

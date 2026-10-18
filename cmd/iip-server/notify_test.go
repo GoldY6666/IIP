@@ -43,3 +43,22 @@ func TestBuildNotifierEnabledWhenWebhookSet(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+// TestBuildNotifierGenericWebhookOnly 钉住两个出口相互独立：
+// 只配通用 webhook（不配 Slack）也必须构造派发器。
+func TestBuildNotifierGenericWebhookOnly(t *testing.T) {
+	cfg := &config.Config{
+		NotifyWebhookURL:     "http://receiver.internal:9000/hook",
+		NotifyWebhookToken:   "tok",
+		NotifyWebhookTimeout: config.DefaultNotifyWebhookTimeout,
+	}
+	got := buildNotifier(cfg, nil, testLogger())
+	if got == nil {
+		t.Fatal("只配通用 webhook 时也应构造派发器")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := got.Close(ctx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}

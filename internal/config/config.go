@@ -143,6 +143,19 @@ type Config struct {
 	// 绝不反压 ingest / 状态流转主路径（派发是异步的，见 notify.Service）。
 	SlackTimeout time.Duration // IIP_SLACK_TIMEOUT，默认 5s
 
+	// --- T6.2：通用出站 webhook（M6 §10，ADR-025，实现见 internal/notify）---
+
+	// NotifyWebhookURL 是通用出站地址（POST 机器可读 JSON）。**空 = 关闭**。
+	// 与 Slack 键相互独立：可只开一个，也可两个同时开。
+	NotifyWebhookURL string // IIP_NOTIFY_WEBHOOK_URL，默认空
+	// NotifyWebhookTimeout 是单次 POST 的超时上限（同 Slack 的 5s 档）。
+	NotifyWebhookTimeout time.Duration // IIP_NOTIFY_WEBHOOK_TIMEOUT，默认 5s
+	// NotifyWebhookToken 是 Bearer token（可选，空则不发 Authorization 头）。
+	//
+	// 用头而不是 URL 查询参数承载凭据：URL 更容易被日志、代理配置与
+	// 浏览器历史带走；头只存在于这一次请求里。
+	NotifyWebhookToken string // IIP_NOTIFY_WEBHOOK_TOKEN，默认空
+
 	// EvidenceTLSInsecure 跳过采集目标的服务器证书校验（T7.5）。
 	//
 	// 默认 false。仅在「内网自签证书、来不及铺 CA」的过渡场景打开，
@@ -301,6 +314,7 @@ func Load(args []string) (*Config, error) {
 	registerHTTPTimeoutFlags(fs)
 	// T6.1：Slack 通知。注册在 slack.go，默认空 = 关闭。
 	registerSlackFlags(fs)
+	registerWebhookFlags(fs)
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -383,6 +397,7 @@ func Load(args []string) (*Config, error) {
 
 	// T6.1：Slack 通知（见 slack.go）。
 	readSlack(k, cfg)
+	readWebhook(k, cfg)
 
 	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
 	//
@@ -436,6 +451,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := validateSlack(c); err != nil {
+		return err
+	}
+	if err := validateWebhook(c); err != nil {
 		return err
 	}
 	return nil

@@ -115,6 +115,9 @@ type Service struct {
 	// 比丢通知更糟——调用方以为发出去了。
 	mu     sync.Mutex
 	closed bool
+
+	// limiter 做状态变更通知的去风暴（T6.2）。
+	limiter *statusLimiter
 }
 
 // New 构造派发器并启动 worker。sinks 为空时仍可构造（计数仍会跑，
@@ -130,6 +133,7 @@ func New(sinks []Sink, counts CountsProvider, logger *slog.Logger) *Service {
 		queue:      make(chan Event, defaultQueueSize),
 		stopped:    make(chan struct{}),
 		workerDone: make(chan struct{}),
+		limiter:    newStatusLimiter(time.Now),
 	}
 	go s.run()
 	return s
@@ -174,6 +178,19 @@ func (s *Service) enqueue(ev *Event) bool {
 		// 「优雅退出」的日志里混进吓人的条目。
 		return false
 	}
+
+	// 去风暴（T6.2）：只作用于状态变更；事件创建是锚点消息，永远发。
+	// 判定与记账在同一把 limiter 锁内，被抑制的条目不占队列容量。
+	if ev.Kind == KindStatusChanged {
+		if ok, sent := s.limiter.allow(ev.Incident.ID, ev.ToStatus); !ok {
+			s.logger.Info("状态变更通知被去风暴抑制",
+				slog.Int64("incident_id", ev.Incident.ID),
+				slog.String("to", ev.ToStatus),
+				slog.Int("sent_in_window", sent))
+			return false
+		}
+	}
+
 	select {
 	case s.queue <- *ev:
 		return true

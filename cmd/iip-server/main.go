@@ -225,30 +225,44 @@ func run() error {
 	return nil
 }
 
-// buildNotifier 按配置构造通知派发器；未配置 Slack webhook 时返回 nil。
+// buildNotifier 按配置构造通知派发器；一个出口都没配时返回 nil。
+//
+// 两个出口相互独立：Slack（给人看的文本）与通用 webhook（给程序看的 JSON），
+// 可以只开一个、也可以同时开。共用同一个异步队列与同一套去风暴。
 //
 // 只在服务端装配：worker 不产生事件，也就不发通知（它只消费采集任务）。
 func buildNotifier(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) *notify.Service {
-	if cfg.SlackWebhookURL == "" {
+	var sinks []notify.Sink
+
+	if cfg.SlackWebhookURL != "" {
+		if cfg.UIBaseURL == "" {
+			// validateSlack 已允许空值（消息降级为不带深链），这里再提示一次：
+			// 没有深链的告警通知，on-call 要多点两次才能到事件页。
+			logger.Warn("UIBaseURL 为空，Slack 消息将不带事件深链")
+		}
+		// 刻意不打印 webhook URL：它是凭据（拿到即可往通道发任意消息）。
+		logger.Info("Slack 通知已启用",
+			slog.Duration("timeout", cfg.SlackTimeout),
+			slog.String("ui_base_url", cfg.UIBaseURL))
+		sinks = append(sinks, notify.NewSlackSink(cfg.SlackWebhookURL, cfg.UIBaseURL, cfg.SlackTimeout))
+	}
+
+	if cfg.NotifyWebhookURL != "" {
+		// 同样不打印 URL：内网接收端地址可能带密钥或暴露拓扑。
+		// 只报「带不带鉴权」——这决定接收端是否要校验 Authorization。
+		logger.Info("通用 webhook 通知已启用",
+			slog.Duration("timeout", cfg.NotifyWebhookTimeout),
+			slog.Bool("auth", cfg.NotifyWebhookToken != ""))
+		sinks = append(sinks, notify.NewGenericSink(cfg.NotifyWebhookURL, cfg.NotifyWebhookToken, cfg.NotifyWebhookTimeout))
+	}
+
+	if len(sinks) == 0 {
 		// 默认形态。明确记一条 INFO 而不是静默：运维要能区分
 		// 「没配所以没发」与「配了但发不出去」。
-		logger.Info("未配置 Slack webhook，通知功能关闭")
+		logger.Info("未配置任何通知出口，通知功能关闭")
 		return nil
 	}
-	if cfg.UIBaseURL == "" {
-		// validateSlack 已允许空值（消息降级为不带深链），这里再提示一次：
-		// 没有深链的告警通知，on-call 要多点两次才能到事件页。
-		logger.Warn("UIBaseURL 为空，Slack 消息将不带事件深链")
-	}
-	// 刻意不打印 webhook URL：它是凭据（拿到即可往通道发任意消息）。
-	logger.Info("Slack 通知已启用",
-		slog.Duration("timeout", cfg.SlackTimeout),
-		slog.String("ui_base_url", cfg.UIBaseURL))
-	return notify.New(
-		[]notify.Sink{notify.NewSlackSink(cfg.SlackWebhookURL, cfg.UIBaseURL, cfg.SlackTimeout)},
-		repository.NewIncidents(pool), // CountsProvider：消息里的告警数/证据数
-		logger,
-	)
+	return notify.New(sinks, repository.NewIncidents(pool), logger) // CountsProvider：消息里的告警数/证据数
 }
 
 // newRouter 装配中间件与路由。业务逻辑不得写入此处（AGENTS.md 约束 2）。
