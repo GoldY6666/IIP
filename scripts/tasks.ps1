@@ -169,6 +169,17 @@ function Invoke-VerifyE2E {
     python scripts/verify-e2e.py @TaskArgs
 }
 
+function Invoke-CheckFileSize {
+    <#
+    OPEN-M5-7 / OPEN-M6-1 的守卫：单文件 <= 300 行（docs/IIP-M1详细开发手册.md §4）。
+    存量欠债记在 scripts/file-size-baseline.txt，规则是「只减不增」：
+    新文件超限必红；已还清却未销账也红；账目行数过期也红。
+    纯静态、秒级，可进 CI。
+    #>
+    Write-Host '[tasks] check-file-size' -ForegroundColor Cyan
+    python scripts/check-file-size.py @TaskArgs
+}
+
 function Invoke-VerifyObservability {
     <#
     T6.4 可观测性配置的静态核对：面板/规则里引用的指标名、标签值、记录规则、
@@ -219,6 +230,7 @@ function Invoke-List {
         '  verify-e2e    E2E 一键回归（M1-M6 验收 + MVP 总验收；可透传 --stages s2,s3 / --summary / --strict）',
         '  verify-observability 核对 Grafana 面板 / Prometheus 规则与代码里的指标定义是否一致（静态，不需 Docker）',
         '  verify-onboarding 从接入指南抽代码块原文，在真栈上跑一遍（真 PG + 真 server，需启动数据库）'
+        '  check-file-size 单文件 <= 300 行门禁：存量记基线，只减不增（静态，秒级）'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -248,9 +260,10 @@ switch ($Task.ToLowerInvariant()) {
     'verify-e2e'   { Invoke-VerifyE2E }
     'verify-observability' { Invoke-VerifyObservability }
     'verify-onboarding' { Invoke-VerifyOnboarding }
+    'check-file-size' { Invoke-CheckFileSize }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding/check-file-size）"
         exit 1
     }
 }

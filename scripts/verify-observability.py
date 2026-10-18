@@ -47,8 +47,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 METRICS_GO = ROOT / "internal" / "metrics" / "metrics.go"
 CORR_TYPES = ROOT / "internal" / "correlation" / "types.go"
-CONFIG_GO = ROOT / "internal" / "config" / "config.go"
-CONFIG_METRICS_GO = ROOT / "internal" / "config" / "metrics.go"
+# config 包按**目录**取，不钉死单个文件。
+# 2026-10-18（ADR-028）把默认值常量从 config.go 搬到了 config_defaults.go，
+# 原先写死 config.go 的版本立刻假红 —— 产品只是换了文件布局，判据却把布局
+# 当成了不变量。真正的不变量是「config 包里有这个默认值」。
+CONFIG_DIR = ROOT / "internal" / "config"
 PROM_YML = ROOT / "deploy" / "prometheus" / "prometheus.yml"
 RULES_DIR = ROOT / "deploy" / "prometheus" / "rules"
 DASH_DIR = ROOT / "deploy" / "grafana"
@@ -232,14 +235,29 @@ def check_value_prefixes(model, src):
 # ---------------------------------------------------------------- 配置侧解析
 
 
+def find_const_in_config(name):
+    """在 config 包的**所有**非测试 .go 里找常量定义，返回 (path, src)。
+
+    刻意不钉文件名：常量搬家不该让判据变红（ADR-028 就是这么踩到的）。
+    但「整包都找不到」必须红 —— 那才是真的定义没了。
+    """
+    for p in sorted(CONFIG_DIR.glob("*.go")):
+        if p.name.endswith("_test.go"):
+            continue
+        src = read(p)
+        if re.search(r'\b%s\s*=' % name, src):
+            return p, src
+    return None, ""
+
+
 def config_ports():
     """从 config 包取默认监听端口。"""
     ports = {}
-    for path, const in ((CONFIG_GO, "DefaultHTTPAddr"), (CONFIG_METRICS_GO, "DefaultWorkerMetricsAddr")):
-        src = read(path)
-        m = re.search(r'%s\s*=\s*"([^"]+)"' % const, src)
+    for const in ("DefaultHTTPAddr", "DefaultWorkerMetricsAddr"):
+        path, src = find_const_in_config(const)
+        m = re.search(r'%s\s*=\s*"([^"]+)"' % const, src) if path else None
         if not m:
-            record(FAIL, "端口漂移", "%s 里找不到 %s 的定义" % (path.name, const))
+            record(FAIL, "端口漂移", "config 包里找不到 %s 的定义" % const)
             continue
         addr = m.group(1)
         if ":" not in addr:

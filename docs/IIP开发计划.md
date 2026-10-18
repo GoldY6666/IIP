@@ -425,6 +425,33 @@ iip/
   - **踩坑记录（5 个，都已修）**：① **`script_stage` 闭包把 `cmd[0]`（python 绝对路径）当 stage id 传参**——`os.path.join` 遇绝对路径吞掉前缀，JSON 写到 `python.exe.json`，阶段跑过了但汇总 MISSING；是「汇总不装 PASS」的机制抓到的（若只跑批次不看汇总就会漏）。② pnpm 在 Windows 是 `.CMD`，`subprocess` 裸名字调用 rc=127——改 `cmd /c <绝对路径>` 包一层（bash 里直接跑 pnpm 还会被 corepack 垫片搞出 `D:\c\Users\...` 路径，两条路不一样）。③ 分批模式原本阶段 FAIL 也返 rc=0——脚本化消费会误判，补上退出码传导。④ `find_helm` 的相对路径候选按 `REPO/../../` 算成 `D:\Documents\_iip_setup`，实际在 `D:\_iip_setup`——加绝对路径候选。⑤ 子检查原本只在失败时留输出，快 PASS 无法复核——改为成功也落盘。
   - **接线**：`scripts/tasks.ps1` +`verify-e2e` 任务与 `$TaskArgs` 透传口（list 22 项）；`.gitignore` +`scripts/_e2e/`；README 验证链路节加第六行（编排器）+ 任务表补 3 行并修「五服务」→「七服务」；CHANGELOG 加 `[Unreleased]` 节（含 2 条 Known limitations）。
   - **诚实声明**：① S7 容器链路 BLOCKED——本机 docker daemon 仍不在跑（Docker Desktop 未启动），compose up 计时与镜像全链路未实证；② 汇总的判据计数取自各阶段自己的报告文件，阶段超时/崩溃时可能是上一轮旧值（以阶段状态为准）；③ E2E 有意不含 golangci-lint/vet（属 CI 三色范畴，而 CI 因 remote 空从未跑过）与人工 UX 计时；④ 未打新 tag——T7.7 不涉及版本变更，`v0.1.0` 仍是当前发布版。
+- [x] T7.8（**计划外新增**）技术债收口：单文件 ≤ 300 行门禁 + 登记在册的三个文件（0.5d）
+  - 2026-10-18 实施完成，决策记录 **ADR-028**（关闭 OPEN-M5-7 / OPEN-M6-1）。
+  - **立项理由是一笔真实教训**：约束写在 `docs/IIP-M1详细开发手册.md` §4，
+    但 M2–M6 之间**从未被任何脚本检查过** ⇒ `main.go` 318→340→485、
+    `config.go` 352→410→616，每轮都「只拆本里程碑新增的部分」，存量原封不动地长大。
+    **文档里的约束不是门禁**；这次补的是门禁本身。
+  - **拆法**：只做同包内的**文件边界**移动，不碰类型边界。`Config` 结构体刻意保持扁平 ——
+    拆成内嵌会让所有 `Config{...}` 字面量编译失败，那是拿大面积回归面换「文件短」。
+    main.go 485→264（+`router.go` 244）、config.go 616→212（+defaults/load/validate 三文件）、
+    processor.go 483→253（+task/log 两文件）。
+  - **门禁五条判据**（每一条都对应一种让门禁形同虚设的办法）：新欠债 / 已还清却未销账 /
+    账目过期 / 账实不符 / 扫描根失效（路径写错时必须红，不能让「扫不到文件」变成全绿）。
+    基线 `scripts/file-size-baseline.txt` 登记 44 个存量，**只减不增**；生成物按
+    `Code generated ... DO NOT EDIT` 标记排除（不硬编码路径）。
+  - **判据的判据**：变异 5/5 全红（301 行新文件 / 已修好的文件塞回基线 / 基线行数记错 1 /
+    基线指向不存在的文件 / 扫描根失效），且每条都断言「rc=1 **且** 输出命中关键字」——
+    只判 rc 不够，崩在解析异常上也是 rc=1。
+  - **顺带修了一个假红**：`verify-observability.py` 的端口判据原先只在 `config.go` 里找
+    `DefaultHTTPAddr`，常量搬到 `config_defaults.go` 后**产品正确、判据先红**。
+    改为整包搜索后重跑 T6.4 的 6 项变异仍 6/6 全红，证明鉴别力没被削弱。
+  - **顺带修了一行过期文案**：E2E 的 `M_MAP` 一直把「计划 §10 M6」写成
+    `未开工`（T6.1 落地当天就过期），与 README/CHANGELOG 直接矛盾；现按
+    「实际被哪一阶段证明」拆成 5 项，并把 `check-file-size.py` /
+    `verify-observability.py` 接进 S1 静态段。
+  - **回归**：全量真库 **1103 PASS / 0 FAIL / 1 SKIP**，与拆分前**逐位一致**
+    （用例数没变 = 纯移动的强证据）；`go build ./...` rc=0、`gofmt` 干净、lint 0 issues。
+  - **不声称的**：存量 44 个文件仍未达标，基线只保证「不会更糟」。
 
 **验收标准（= MVP 总验收）**：
 

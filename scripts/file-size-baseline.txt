@@ -1,0 +1,63 @@
+# 单文件 ≤ 300 行的**存量**基线（门禁：scripts/check-file-size.py）
+#
+# 约束原文：docs/IIP-M1详细开发手册.md §4「单文件 ≤ 300 行」。
+# 该约束在 M2–M6 之间从未被任何脚本检查过，于是 main.go 从 318 涨到 485、
+# config.go 从 352 涨到 616 而无人发现。本文件把**今天的欠债**钉住，
+# 从此**只减不增**。
+#
+# 规则（脚本逐条判红）：
+#   1. 文件 > 300 行且不在本清单        → 新欠债，禁止
+#   2. 文件 ≤ 300 行但仍在清单里        → 已还清未销账，必须删掉这一行
+#   3. 行数与清单记录不一致             → 账目过期，改代码必须同步改账
+#   4. 清单指向不存在的文件             → 账实不符
+#
+# 想新增欠债 = 不可能（除非同时改脚本，那是明摆着的作弊）。
+# 还清一个文件 = 删掉对应一行；这是本清单唯一的演化方向。
+#
+# 格式：<相对路径> <物理行数>（含空行与注释，与 wc -l 同口径）
+# 带 "Code generated ... DO NOT EDIT" 标记的文件（sqlc 产物）不在检查范围内。
+
+cmd/iip-worker/main.go 516
+cmd/iip-worker/main_test.go 438
+internal/alert/service_test.go 378
+internal/api/alert_webhook_test.go 423
+internal/api/correlation_config_test.go 331
+internal/api/evidence_test.go 501
+internal/api/incidents.go 356
+internal/api/incidents_test.go 384
+internal/collectors/k8s.go 533
+internal/collectors/k8s_test.go 1246
+internal/collectors/loki.go 551
+internal/collectors/loki_test.go 775
+internal/collectors/prometheus.go 333
+internal/collectors/prometheus_test.go 601
+internal/collectors/trace.go 486
+internal/collectors/trace_test.go 425
+internal/config/config_test.go 946
+internal/correlation/replay_realtime_test.go 372
+internal/correlation/replay_test.go 336
+internal/correlation/service_test.go 495
+internal/evidence/evidence.go 407
+internal/evidence/evidence_test.go 472
+internal/incident/service_test.go 449
+internal/metrics/metrics_test.go 325
+internal/middleware/authtoken_test.go 309
+internal/middleware/timeout_test.go 398
+internal/notify/notify_test.go 325
+internal/rca/confidence.go 325
+internal/rca/confidence_test.go 335
+internal/repository/alerts_test.go 516
+internal/repository/correlation_test.go 896
+internal/repository/evidence.go 327
+internal/repository/evidence_test.go 632
+internal/repository/lifecycle.go 374
+internal/repository/lifecycle_query_test.go 589
+internal/repository/lifecycle_test.go 430
+internal/repository/m4_pipeline_test.go 491
+internal/repository/tasks.go 309
+internal/repository/tasks_test.go 545
+internal/testsupport/pg.go 319
+internal/worker/confidence_f3_test.go 714
+internal/worker/processor_test.go 723
+migrations/migrate_test.go 949
+migrations/partition_test.go 354

@@ -459,7 +459,7 @@ def check_clean_clone_build():
 def stage_s1():
     sid = "s1"
     t0 = time.time()
-    title = "S1 静态：二进制/标签四联动/helm/compose/克隆构建"
+    title = "S1 静态：二进制/标签/helm/compose/文件规模/观测配置/克隆构建"
     subs = []
 
     def sub(name, status, detail):
@@ -510,7 +510,23 @@ def stage_s1():
         sub("compose config --quiet", "pass" if rc == 0 else "fail",
             "rc=%d %s" % (rc, "" if rc == 0 else out[-200:]))
 
-    # 5) 干净克隆构建
+    # 5) 单文件 <= 300 行门禁（OPEN-M5-7 / OPEN-M6-1 的守卫）
+    #    纯静态、秒级。它的价值不在「今天全绿」，而在「下次有人把文件写长时立刻红」——
+    #    这条约束在 M2–M6 之间没人守，于是 main.go 从 318 涨到 485 也没人发现。
+    rc, out = run_cmd([py, os.path.join("scripts", "check-file-size.py")],
+                      timeout=60)
+    sub("单文件 <= 300 行门禁", "pass" if rc == 0 else "fail",
+        "rc=%d %s" % (rc, "" if rc == 0 else out[-200:]))
+
+    # 6) 观测配置静态核对（T6.4）：面板/规则引用的指标名、标签值、记录规则、
+    #    抓取端口是否与代码里的定义一致。这些错法**全都不报错**，只表现为面板永久空图，
+    #    所以它是纯静态也能抓到东西的那一类，不需要 Docker / Prometheus / Grafana。
+    rc, out = run_cmd([py, os.path.join("scripts", "verify-observability.py")],
+                      timeout=120)
+    sub("观测配置静态核对（T6.4）", "pass" if rc == 0 else "fail",
+        "rc=%d %s" % (rc, "" if rc == 0 else out[-200:]))
+
+    # 7) 干净克隆构建
     st, detail, clone_subs = check_clean_clone_build()
     subs.extend(clone_subs)
     sub("干净克隆 + 全量 build", st, detail)
@@ -722,7 +738,18 @@ M_MAP = [
     ("M5", "新用户 30 分钟内完成处置（UX 计时）", [],
      "人工验收项：E2E 覆盖功能不覆盖人的操作时长"),
     ("M6", "手册 M6 S1–S5（证据深化/confidence 判据）", ["s3"], ""),
-    ("M6", "计划 §10 M6：Slack 通知 + /metrics", [], "未开工（Known limitations 已列）"),
+    # 计划 §10 的 M6（T6.1–T6.6）已全部收口。**此前的写法是 `([], "未开工")`** ——
+    # 那段文字在 T6.1 落地当天就过期了，却一直躺在总验收表里，让汇总报告
+    # 与人读的 README/CHANGELOG 直接矛盾。现按「实际被哪一阶段证明」逐项拆分：
+    # 单测类挂在 S2（真库全量测试会跑它们），静态类挂在 S1；
+    # 没有编排进 E2E 的，宁可写空列表 + 原因，也不给它一个假的 PASS。
+    ("M6", "通知去风暴 / 终态必发 / 两个 sink 拒重定向（T6.1/T6.2）单测", ["s2"],
+     "真栈收消息判据曾用一次性探针验过，未入库 ⇒ 本 E2E 只覆盖单测那一半"),
+    ("M6", "`/metrics` 指标族、标签上界、worker 独立注册表（T6.3）单测", ["s2"], ""),
+    ("M6", "观测配置与代码定义一致（T6.4，静态）", ["s1"], ""),
+    ("M6", "接入指南代码块原文可执行（T6.5）", [],
+     "有专项脚本 verify-onboarding.py（真 PG + 真 server），尚未编排进本 E2E"),
+    ("M6", "非 UTF-8 → 400 / 超限 → 413 入口矩阵（T6.6）单测", ["s2"], ""),
 ]
 
 MVP_MAP = [

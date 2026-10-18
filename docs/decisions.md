@@ -573,6 +573,7 @@
 | ADR-025 | T6.2 通知去风暴（滑动窗口 2 条/10 分钟 + 终态白名单）+ 通用出站 webhook | 已实施（终态/重开必发由禹裁定；档位固定常量；两个 sink 拒重定向；变异 5 处全红，真栈探针 4/4 条数断言） |
 | ADR-026 | T6.3 自监控 `/metrics`：每实例独立注册表 + 无界标签禁令 + worker 独立监听 | 已实施（禹裁定官方 client_golang / 计数器+PromQL / 独立监听；比率不落 Gauge；变异 11/11 全红，真栈探针 6 阶段 PASS，真库 1088 PASS/1 SKIP/0 FAIL） |
 | ADR-027 | T6.6 三个 JSON 入口收成一个 `readBody`：非法 UTF-8 在解码前挡成 400，超限统一 413 | 已实施（修掉两个活缺陷：incidents 入口 413 被吞成 400、非 UTF-8 一路走到 PG 才爆成 503；矩阵判据 3 入口 × 2 类坏输入 + 反面用例；变异 5/5 全红。**同批裁定不做限流、不做 CORS**，理由写入 `deploy/README.md` 与 CHANGELOG Known limitations） |
+| ADR-028 | 单文件 ≤ 300 行做成「基线只减不增」门禁（关闭 OPEN-M5-7 / OPEN-M6-1） | 已实施（拆 3 个：main.go 485→264 + router.go、config.go 616→212 + 三个分文件、processor.go 483→253 + 两个分文件；存量 44 个登记基线；`check-file-size.py` 五条判据 + 变异 5/5 全红，接入 `tasks.ps1` 与 E2E S1。**基线≠还清**：44 个存量仍欠，只是不再增长） |
 
 ---
 
@@ -1150,6 +1151,64 @@ ADR-027：三个 JSON 入口收成一个 `readBody`，非法 UTF-8 在解码前�
 
 ---
 
+ADR-028：单文件 ≤ 300 行做成「基线只减不增」门禁，并偿清登记的 3 个文件
+
+- **Background**: 约束原文在 `docs/IIP-M1详细开发手册.md` §4（表格末列「单文件
+  ≤ 300 行」）。它在 M2–M6 之间**从未被任何脚本检查过**，于是：
+  - `cmd/iip-server/main.go` 318（M5 收尾）→ 340 → **485**；
+  - `internal/config/config.go` 352 → 410 → **616**；
+  - `internal/worker/processor.go` 483（M6 期间涨上来，补登记）。
+  OPEN-M5-7 / OPEN-M6-1 两次登记过这件事，但当时的处置是「只拆本里程碑新增的
+  部分，不顺手重构既有装配代码」—— 那条纪律本身没错（避免把功能提交与大规模
+  移动混在一起），但它的副作用是**文件一直在长大**：每轮只拆自己加的那 15 行，
+  存量 400 行原封不动。**约束写在文档里不等于门禁**，这是本次最直接的教训。
+- **Decision**: 三件事一起做，缺一件则无效。
+  1. **偿清登记在册的 3 个**（纯同包移动，零行为变化）：
+     - `cmd/iip-server/main.go` 485 → 264：`newRouter` + `handleHealthz` →
+       `cmd/iip-server/router.go`（244 行）。main 只留「起进程、等信号、优雅退出」。
+     - `internal/config/config.go` 616 → 212：默认值 const → `config_defaults.go`（57）；
+       `Load` → `config_load.go`（181）；`Validate` 与三个 `validateX` → 
+       `config_validate.go`（189）。
+     - `internal/worker/processor.go` 483 → 253：`processOne` + `fail` →
+       `processor_task.go`（156）；打点/日志/置信度格式化 → `processor_log.go`（103）。
+  2. **存量登记成基线** `scripts/file-size-baseline.txt`（44 个文件，含 14 个测试文件、
+     `loki.go` 551、`k8s.go` 533 等）。**不假装它们不存在**，而是把今天的欠债钉住。
+  3. **门禁** `scripts/check-file-size.py`（`tasks.ps1 check-file-size`，并进 E2E 的
+     S1 静态段），五条判据各对应一种「让门禁形同虚设」的办法：
+     ① 文件 > 300 且不在基线 → 新欠债；
+     ② 在基线但已 ≤ 300 → 已还清却未销账（**防白名单变永久豁免**）；
+     ③ 在基线但行数 ≠ 记录值 → 账目过期（改代码必须改账）；
+     ④ 基线指向不存在的文件 → 账实不符；
+     ⑤ 扫描到 0 个文件 → 路径失效必须红（**不能让「路径写错」变成全绿**）。
+- **Consequences**:
+  - `Config` **结构体保持扁平**，拆成内嵌会改变字段提升语义并让所有
+    `Config{PGURL: ...}` 字面量编译失败 —— 那是大面积回归面，收益只是「文件短」。
+    本次拆的是**文件边界**，不是类型边界。
+  - **生成物按标记排除**（头部含 `Code generated ... DO NOT EDIT` 的 sqlc 产物），
+    不硬编码路径：对着生成物报「请拆分」是让人去改会被覆盖的文件。
+  - **测试文件也在扫描范围内**。不说「测试不算」，而是把它们如实挂进基线 ——
+    口径含糊比欠债本身更糟。
+  - 基线只能变短：修好一个文件 = 删掉一行。想新增欠债只能改脚本，那是明摆着的作弊。
+  - `--baseline-out` 只**打印**建议基线，不写文件：自动改基线等于自己给自己盖章。
+  - 残留风险（如实）：44 个存量文件仍在账上，其中 `k8s_test.go` 1246 行、
+    `migrate_test.go` 949 行等仍需后续里程碑逐个偿清；基线只是止损，不是还清。
+- **Related ADRs**: ADR-020（验收断言禁止绑会漂移的总数 —— 本次的「行数」是**硬约束
+  而非漂移量**，故可以直接绑阈值；而「受检文件总数 178」只打印不判定，正是 ADR-020
+  的用法）、ADR-018（用绝对量而非相对量做断言）。
+- **Evidence**:
+  - 编译：`go build ./...` rc=0；`gofmt -l` 空；三包单测 `internal/config` /
+    `internal/worker` / `cmd/iip-server` 全 `ok`。
+  - 行数（拆后实测）：main.go 264 / router.go 244 / config.go 212 /
+    config_defaults.go 57 / config_load.go 181 / config_validate.go 189 /
+    processor.go 253 / processor_task.go 156 / processor_log.go 103。
+  - **门禁变异 5/5 全红**（`D:\_iip_setup\_mut_fsize.py`）：301 行新文件 / 把已修好的
+    config.go 塞回基线 / 基线行数记错 1 / 基线指向不存在的文件 / 扫描根改成不存在的
+    目录。每条都断言「rc=1 **且** 输出命中期望关键字」—— 只判 rc 不够，崩在解析异常上
+    也是 rc=1，那不是判据生效。还原后字节级 sha 一致且基线复归绿。
+  - 真库全量回归与 E2E S1 结果见 `_t78_regression.txt` / `_e2e_s1_t78.txt`。
+
+---
+
 ## 悬而未决项（OPEN）
 
 > 出现「定不下来／先放一放／等外部条件」时在此登记。只追加 + 就地关闭。
@@ -1177,11 +1236,11 @@ ADR-027：三个 JSON 入口收成一个 `readBody`，非法 UTF-8 在解码前�
 | 2026-10-07 | M5 补登记 | **OPEN-M5-4**：`vitest`/`jsdom`/Testing Library 为新增 devDependency，需在 CI 加 `pnpm test` job 才算进门禁 | 仓库**无 git remote** ⇒ `.github/workflows/ci.yml` 从未在 GitHub 上跑过，该 job 只能本地等价复现 | F7 已加本地等价门禁；CI 上真正生效需先有 remote | **需仓库有 git remote**（2026-10-11 更新：remote 已建但**尚未 push**，见下） | 仓库有 remote **且 CI 在 GitHub 上真跑起来**后 | **OPEN**（2026-10-11 更新阻塞项，本条**不关闭**） | F7 补齐本地门禁。**但「交由 CI 覆盖」在本仓库 = 从未验证**，这一点不掩饰。<br>**2026-10-11 核对：仍不能关。** 阻塞条件已部分解除 —— 仓库已有 remote `https://github.com/GoldY6666/IIP.git`（77 commits / 292 文件 / 工作树干净），**但一次都没推上去**（沙箱无法连 `github.com:443`，需用户本机 GitHub Desktop 推送），故 `.github/workflows/ci.yml` **仍未在 GitHub 上跑过**。<br>另注：`ci.yml` 已于 2026-10-09 静态审查并修掉四处硬伤（backend job 补 `services.postgres` + `IIP_TEST_PG_URL` 修真库测试恒 SKIP、e2e job 删与 `stack.mjs` 抢 5434 的 service、`PLAYWRIGHT_CHANNEL` 改显式哨兵 `none`、补 `-p 1`），修法经 6/6 变异测试验证有鉴别力 —— **但静态审查不等于跑过**，首次真跑结果仍是未知数。其中 `golangci-lint v1.61.0` 构建 Go 版本可能低于 `go.mod` 的 `go 1.23`，真报错时的修法是升 v1.x 最新版而非降 go.mod |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-5**：组件覆盖率仅 `EvidenceList.tsx` 44%，其余 5 个页面/组件为 0 | — | **不追数字**。把覆盖率设成门禁阈值会诱导「为凑数字写测试」，这类测试既慢又易脆（与 M5 自己的判据「不许为覆盖率而覆盖率」同向） | 无 | 无 | **RESOLVED**（2026-10-05） | 裁定为**不做**。F5 补测试时覆盖率自然上升，但阈值不设为门禁 |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-6**：真实 symlink 形态须在容器链路（Linux）补验 | Windows 无管理员权限时 `os.Symlink` **返回 nil 却建不出有效链接**（缺 `SeCreateSymbolicLink`），「root 是符号链接」这条路径在本机长期 SKIP | 在 `golang:1.23-alpine` 内实跑 Linux 侧 | 无外部阻塞 | 无 | **RESOLVED**（2026-10-05） | 容器内 `go test ./internal/webui/ -v` 得**PASS 24 / SKIP 0**；并用 `-run TestHandlerAllowsSymlinkedRoot` **单跑独立复核**（`=== RUN` → `--- PASS`，9 秒）—— 因为「零 SKIP」也可能是「压根没跑」 |
-| 2026-10-07 | M5 补登记 | **OPEN-M5-7**：两个文件超 AGENTS.md 的 300 行约束 | `cmd/iip-server/main.go` 与 `internal/config/config.go`。**该超限自 M2 起就存在**（M4 收尾时已 312/341），不是 M5 造成的 | M5 只拆自己新增的部分，不顺手重构既有装配代码 —— 那是一次独立的回归面 | 无 | 后续里程碑把两个文件拆到 300 以内 | **OPEN**（**且已加剧**，见 OPEN-M6-1） | — |
+| 2026-10-07 | M5 补登记 | **OPEN-M5-7**：两个文件超 AGENTS.md 的 300 行约束 | `cmd/iip-server/main.go` 与 `internal/config/config.go`。**该超限自 M2 起就存在**（M4 收尾时已 312/341），不是 M5 造成的 | M5 只拆自己新增的部分，不顺手重构既有装配代码 —— 那是一次独立的回归面 | 无 | 后续里程碑把两个文件拆到 300 以内 | **RESOLVED**（2026-10-18，ADR-028） | main.go **485 → 264**（+ `router.go` 244）、config.go **616 → 212**（+ `config_defaults.go` 57 / `config_load.go` 181 / `config_validate.go` 189）。**纯同包移动，零行为变化**：`go build ./...` rc=0、三包单测全 ok、全量真库回归与 E2E S1 复核。⚠️ 关闭的是**这两个文件**，不是「全仓库都 ≤300」——另有 44 个存量文件登记在 `scripts/file-size-baseline.txt`，只能变短 |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-8**：容器内无头浏览器截图 | 手册 §八 判据 4 的验证手段 | — | 原被镜像源阻塞（本机四条源全不通） | — | **RESOLVED**（2026-10-05） | 重启 Docker Desktop 后实测：`--profile app` 起全部服务，无头浏览器对compose 映射的 8080 截图成功，**颜色种类 1198**（阈值 ≥4；纯白/纯黑失败页只有 1 种）。判据 4 由此达成 |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-9**：`evidence.confidence` 仍全空（OPEN-M4-1 延续） | M4 手册把它列为「待 M5 处理的能力缺口」，但 M5 的判据 1/2/3 **不依赖**它 | 归入 M6 的 S1（需先有 RCA 才有能力评估） | 无 | M6 S1 完成后 | **RESOLVED**（2026-10-11 核对关闭） | 与 `OPEN-M4-1` 同源同批关闭：M6 S1（`F2`）+ S1-b（`F3`）已交付 `internal/rca/` 并接进真链路（`internal/worker/processor.go:250` 调 `rca.Assign`），宿主真库 10 条断言全绿，前端四档展示在位。**本行此前记「延至 M6 S1」但未在 M6 完成时关闭**，2026-10-11 核对后关闭　｜⚠️ 同 `OPEN-M4-1`：关闭的是「能力缺口」，「给不出依据时留空」这条约束不变 |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-10**：判据 3 只验到「URL 合法且能发起连接」 | **没有验证面板上真的能看到这条查询的结果** —— 那需要真实 Prometheus/Grafana 实例 | 容器链路（判据 4）已覆盖部署形态 | 需真实 Grafana/Prometheus 实例 | V1.1 若接真实面板 | **OPEN**（V1.0 内可接受） | 口径已写入 `docs/M5-交付详细报告.md` §3 与 §6.2，**不修饰为「已验证」** |
-| 2026-10-07 | M6 新登记 | **OPEN-M6-1**：`main.go` 340 行 / `config.go` 410 行，超 300 行约束且**较 M5 收尾时进一步加剧** | 2026-10-07 现查实测值。**M6 S4 给这两个文件各加了约 20 行**（`AuthToken` 配置项 + `RequireToken` 挂载 + `/auth/session` 端点）⇒ OPEN-M5-7 的超限不是停滞而是**在长大** | 按M2 起的既有做法：**只拆本里程碑新增的部分**，不顺手重构既有装配代码 | 无外部阻塞，纯排期 | 后续里程碑把两个文件拆到 300 以内 | **OPEN** | 登记此条的目的是让「超限加剧」这件事**可追溯** —— 否则下一个读 M5 报告的人会以为还是318/352 那两个数　｜**2026-10-18 复测（T6.3 收口时实测）**：`main.go` **485 行** / `config.go` **616 行**，`internal/worker/processor.go` 也已到 **483 行**（该文件不在原条目范围内，一并登记）。T6.3 自身只各加约 14–16 行；`config.go` 从 410 涨到 616 主要是 T6.1–T6.3 的**字段注释**（字段必须在结构体内，flag/read/validate 已按 `slack.go` / `webhook.go` / `metrics.go` 分文件）。**仍 OPEN** |
+| 2026-10-07 | M6 新登记 | **OPEN-M6-1**：`main.go` 340 行 / `config.go` 410 行，超 300 行约束且**较 M5 收尾时进一步加剧** | 2026-10-07 现查实测值。**M6 S4 给这两个文件各加了约 20 行**（`AuthToken` 配置项 + `RequireToken` 挂载 + `/auth/session` 端点）⇒ OPEN-M5-7 的超限不是停滞而是**在长大** | 按M2 起的既有做法：**只拆本里程碑新增的部分**，不顺手重构既有装配代码 | 无外部阻塞，纯排期 | 后续里程碑把两个文件拆到 300 以内 | **OPEN** | 登记此条的目的是让「超限加剧」这件事**可追溯** —— 否则下一个读 M5 报告的人会以为还是318/352 那两个数　｜**2026-10-18 复测（T6.3 收口时实测）**：`main.go` **485 行** / `config.go` **616 行**，`internal/worker/processor.go` 也已到 **483 行**（该文件不在原条目范围内，一并登记）。T6.3 自身只各加约 14–16 行；`config.go` 从 410 涨到 616 主要是 T6.1–T6.3 的**字段注释**（字段必须在结构体内，flag/read/validate 已按 `slack.go` / `webhook.go` / `metrics.go` 分文件）。**RESOLVED**（2026-10-18，ADR-028） | 三个文件全部拆到 300 行内：main.go 485→**264**、config.go 616→**212**、processor.go 483→**253**（+ `processor_task.go` 156 / `processor_log.go` 103）。**同时补上了这条约束一直缺的东西：门禁。** 该约束在 M2–M6 之间从未被任何脚本检查过（所以从 318 涨到 485 也无人发现），现由 `scripts/check-file-size.py` 守：五条判据（新欠债 / 已还清未销账 / 账目过期 / 账实不符 / 扫描根失效）+ 变异 5/5 全红，接入 `tasks.ps1 check-file-size` 与 E2E S1。存量 44 个文件（含 14 个测试文件、`loki.go` 551、`k8s.go` 533）**如实登记在基线里而非假装不存在**；基线只减不增。⚠️ 本条关闭的是「登记在册的三个文件 + 约束有守卫」，**不是**「债已还清」 |
 | 2026-10-05 | M5 补登记 | **OPEN-M5-1**：UI 部署形态无访问控制，`deploy/README.md` 只能以「V1.0 仅供内网 / 演示环境」标注作为唯一防护 | M5 手册 §八 裁定①（S3 不做鉴权）时留的欠账：当时没有登录页也没有 token，UI 一旦端口可达即全开放。**该条目此前只写在 `IIP-M5详细开发手册.md` 正文与 §八 前言，未进本登记册** —— 而 M6 手册 §〇第 4 条与 §2.1 的 S4 都直接引用 `OPEN-M5-1`，构成「引用了一个登记册里不存在的条目」 | 延至 M6 S4 处置：环境变量注入静态 token + 请求头校验，**默认关**（未配即完全不开鉴权，保证 M5 既有 `compose --profile app up` 用法不变） | 无外部阻塞，纯实现 | M6 的 S4 完成且 `deploy/README.md` 的「仅供内网」标注可移除时 | **RESOLVED**（2026-10-05） | 由 M6 S4（F6 批次）关闭：`IIP_AUTH_TOKEN` 环境变量注入 → `X-IIP-Token` 请求头用 `crypto/subtle.ConstantTimeCompare` 校验；新增轻量会话端点 `GET /api/v1/auth/session` 作为 token 下发途径（因 `web/src/uiconfig.ts` 明确约定「注入内容不含任何密钥」，不能借 `__IIP_UI__` 下发）；豁免 `/healthz`（容器 healthcheck 依赖且不可能带自定义头）与 `/api/v1/auth/session` 自身（否则前端取不到 token 即死锁）。真二进制验收 17 PASS / 0 FAIL，变异测试确认判据有鉴别力。`deploy/README.md` 的「仅供内网」标注**保留**（本条关闭的是「无访问控制」，不是「可以公网暴露」）—— 静态 token 只挡误连，不等于多因素认证 |
 | 2026-10-07 | M6 S1 登记 | **OPEN-M6-2**：k8s 与 trace 两类证据在当前判据下**恒为「无法评估」**，模板「部署变更与指标突变」永远不会被触发 | 2026-10-07 实测采集器写入的 Metadata 键：k8s 写 `occurrences`/`matched`/`rollout_ok`/`replicas`/`ready`，trace 不写任何可比字段；两者都**没有 `change_ratio`**，而 `Assess` 只认 `change_ratio` | **保持现状**（留空符合手册 §4.3 第 2 条「给不出依据的仍留空」），不为凑覆盖率给它们硬编一个强度值。代价是deployment 类假设在 k8s 证据上无法触发，这一点必须如实告知使用者，不能装作模板都可用| 无（不需要外部条件，是一笔明确的取舍） | 给 k8s 采集器补一个可比的强度字段（如 rollout 失败比例的变化倍数）后 | **OPEN（2026-10-07 部分细化）** | 已由 k8s Warning 事件侧补上可信 `change_ratio`：`k8s.go` 对 events 只发一次请求、时间过滤在客户端做，故基线窗口数据本就在手里，拆成两桶是纯客户端改动（新增 `internal/collectors/k8s_baseline.go`，写 `matched`/`matched_before`/`change_ratio`，`matched_before==0` 时改写 `novelty` 不给假倍数）。**本条不关闭**：① rollout 侧 K8s API 不保留历史副本数，确实给不出，已改为写 `baseline` 说明键（落`Assess` 第①步而非第②步，让 basis 说清「K8s 没有历史数据」而不是「采集器忘了写」）；② trace 侧完全未处理。模板「部署变更与指标突变」现已可由 Warning 事件侧触发，但触发依据是**事件窗口倍数**而非「发布变更本身的强度」。判据有效性由变异测试证明（`D:\_iip_setup\_m62_mut.py`，正向 6/6 变红、反向 5/5 全绿、还原 sha256 一致） |
 | 2026-10-07 | M6 新登记 | **OPEN-M6-3**：k8s 采集器默认不注册，`change_ratio` 补齐后**在默认部署里零可观测变化** | `IIP_EVIDENCE_K8S_ENABLED` 默认 false（偏差 B1，理由见 `k8s.go` 文件头：仓库零 K8s 依赖，无 kubeconfig / RBAC / compose 服务）⇒ `verify-func.py` 与 `verify-images.py` 都跑不到这条路径 | **不为验收而打开开关**。接入是部署侧的事（用户自带集群 + kubeconfig），写一个接不上任何真实集群却「看起来在工作」的采集器比不写更危险 | 需真实 K8s 集群 + kubeconfig + RBAC 授权 | 用户接入真实集群后，在容器链路里观察到 deployment 类证据的 `change_ratio` 非空且随数据变化 | **OPEN** | 登记此条是为了让「本次改动未被任何端到端链路验过」这件事**可追溯** —— 否则下一个读报告的人会以为 k8s 路径已实测。现有证据只有 mock server 单测 + 变异测试 |

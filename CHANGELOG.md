@@ -11,6 +11,23 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **单文件规模门禁 + 技术债收口（T7.8 / ADR-028，关闭 OPEN-M5-7 / OPEN-M6-1）**。
+  「单文件 ≤ 300 行」写在 `docs/IIP-M1详细开发手册.md` §4，但它在 M2–M6 之间
+  **从未被任何脚本检查过** —— 于是 `main.go` 从 318 涨到 485、`config.go` 从 352
+  涨到 616，中间没有任何人（或任何命令）会因此变红。这条约束补了门禁：
+  - `scripts/check-file-size.py`（`tasks.ps1 check-file-size`，并进 E2E 的 S1 静态段）
+    五条判据，每条对应一种「让门禁形同虚设」的办法：新欠债 / 已还清却未销账 /
+    账目过期 / 账实不符 / 扫描根失效。变异 5/5 全红。
+  - `scripts/file-size-baseline.txt` 把**今天的存量欠债**（44 个文件，含 14 个测试文件、
+    `loki.go` 551、`k8s.go` 533）如实登记，规则是**只减不增**：修好一个就删一行。
+    这不是「债已还清」，是「不再增长」。
+  - 生成物（头部带 `Code generated ... DO NOT EDIT` 的 sqlc 产物）按**标记**排除，
+    不硬编码路径 —— 对着生成物报「请拆分」是让人去改会被覆盖的文件。
+  - 登记在册的三个文件已偿清：`cmd/iip-server/main.go` 485→**264**（+`router.go` 244）、
+    `internal/config/config.go` 616→**212**（+默认值/Load/校验三个分文件）、
+    `internal/worker/processor.go` 483→**253**（+任务执行/日志两个分文件）。
+    **纯同包移动，零行为变化**；`Config` 结构体刻意保持扁平（拆内嵌会让所有
+    `Config{...}` 字面量编译失败，那是大面积回归面换「文件短」）。
 - **HTTP 入口加固：三个 JSON 入口收成一个 `readBody`（T6.6 / ADR-027）**。
   这次不是加功能，是**修掉两个一直在的语义缺陷**：
   - `POST /api/v1/incidents/{id}/comments` 把「请求体超限」报成 **400
@@ -126,6 +143,17 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Changed
 
+- **`verify-observability.py` 的端口判据不再钉死文件名（T7.8）**：它原先只在
+  `internal/config/config.go` 里找 `DefaultHTTPAddr`，而 ADR-028 把默认值常量搬到了
+  `config_defaults.go` ⇒ **产品正确、判据先红**。现改为在 config 包内按目录搜索：
+  不变量是「config 包里有这个默认值」，不是「它在哪个文件里」。改完重跑 T6.4 的
+  6 项变异仍 6/6 全红（含「worker 端口写成 9090」这条），证明鉴别力没被削弱。
+- **E2E 的 M6 验收映射不再是过期文案（T7.8）**：`M_MAP` 里那条
+  `("M6", "计划 §10 M6：Slack 通知 + /metrics", [], "未开工")` 在 T6.1 落地当天
+  就已过期，却一直躺在总验收表里，与 README/CHANGELOG 直接矛盾。现按「实际被哪一
+  阶段证明」拆成 5 项（单测挂 S2、观测配置静态挂 S1），**没有编排进 E2E 的宁可写空
+  列表 + 原因，也不给它一个假的 PASS**。同时把 `verify-observability.py` 与
+  `check-file-size.py` 接进 S1 静态段。
 - **非 UTF-8 请求体：503 → 400（T6.6 / ADR-027，产品行为变更）**。此前
   GBK 等非 UTF-8 编码的请求体会一路走到落库，PG 回 `SQLSTATE 22021`，
   接口报 **503（存储不可用）**；现三个 JSON 入口在解码前统一挡成
@@ -156,6 +184,12 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Known limitations
 
+- **44 个文件仍超 300 行，只是不再增长（T7.8 / ADR-028）**：本轮只偿清了登记在册的
+  3 个（main.go / config.go / processor.go）。剩余存量登记在
+  `scripts/file-size-baseline.txt` 并按基线只减不增，其中最大的是
+  `internal/collectors/k8s_test.go`（1246 行）、`migrations/migrate_test.go`（949 行）、
+  `internal/config/config_test.go`（946 行）、`internal/collectors/loki.go`（551 行）。
+  **基线不是「已合规」的同义词** —— 门禁只保证「不会更糟」。
 - **告警入口不做限流（T6.6 裁定，ADR-027）**：给 `/api/v1/alerts/webhook` 加
   速率限制，在**风暴**这个它唯一需要被用上的场景里会起反作用 ——
   429 会触发 Alertmanager 退避重试，于是**最新的告警**被排在退避队列后面，
