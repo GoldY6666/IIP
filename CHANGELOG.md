@@ -11,6 +11,16 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **接入指南 + 可执行验收（T6.5）**：`docs/接入指南-Alertmanager.md` 是操作侧文档
+  （receiver 配置 → 手发验证 → 数据/指标/收尾三处确认 → payload 契约 → 排错表 →
+  通用 HTTP 源 → checklist），与 M1 手册的开发侧契约互相引用。
+  - `scripts/verify-onboarding.py`（`tasks.ps1 verify-onboarding`）把文档里的代码块
+    **按 `<!-- verify:NAME -->` 标记抽出来原文执行**（Git Bash + curl，真 PG + 真 server），
+    断言文档声称的 `accepted/skipped/updated/rejected` 与 5 个状态码。文档最容易被自己毁掉：
+    少个引号、缺个必填字段、路径错一个字符，都只在操作者那里暴露。
+    13 项判据全 PASS；**变异 6/6 全红**（文档侧 4 + 实现侧 2）。
+  - 文档明确写出两个反直觉行为：`severity` 里的 `error` 归一到 **critical**；
+    指纹**含** `severity`，故同一故障从 warning 升到 critical 会作为新告警落库。
 - **可观测性接入：抓取配置 + 记录/告警规则 + Grafana 面板（T6.4）**：把 M0 留在
   `prometheus.yml` 里的注释占位换成两个真实 job（`iip-server:8080` /
   `iip-worker:9091`），并补上操作者真正能用的三件东西。
@@ -117,6 +127,12 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Known limitations
 
+- **非 UTF-8 请求体被报成 503（T6.5 发现，未改，待裁定）**：`json.Unmarshal` 不校验
+  字符串的 UTF-8 合法性，故 GBK 等编码的请求体能通过解析，直到落库时 PG 报
+  `无效的 "UTF8" 编码字节顺序 (SQLSTATE 22021)`，接口回 **503（存储不可用）**。
+  表现为「客户端编码错了」却报成「IIP 存储坏了」，且 Alertmanager 会按失败一直重试。
+  候选修法：handler 入口 `utf8.Valid(body)` 不合法直接 **400** 并说明编码问题。
+  属产品行为变更，本轮只记录；文档侧已规避（中文别内联在命令行，用 `-d @file`）。
 - **T7.1 分区只增不减**：保留期清理删行不删分区（FK 对象级依赖使 DROP 分区
   不可行），空分区长期保留；磁盘回收依赖 VACUUM。空分区顺带为历史月
   回填/重放留位，是有意取舍。

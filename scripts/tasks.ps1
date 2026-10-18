@@ -179,6 +179,18 @@ function Invoke-VerifyObservability {
     python scripts/verify-observability.py @TaskArgs
 }
 
+function Invoke-VerifyOnboarding {
+    <#
+    T6.5 接入指南的可执行验收：从 docs/接入指南-Alertmanager.md 里抽出代码块原文
+    （payload / curl / resolve / 通用源）在真 PG + 真 server 上跑一遍，
+    断言文档声称的 accepted/skipped/updated/rejected 与状态码。
+    文档与实现一旦不一致，这里就红 —— 免得由操作者去踩。
+    需要绿色版 PG（D:\pgsql16）与 Go 工具链。
+    #>
+    Write-Host '[tasks] verify-onboarding' -ForegroundColor Cyan
+    python scripts/verify-onboarding.py @TaskArgs
+}
+
 function Invoke-List {
     Write-Host 'IIP 本地任务（PowerShell 等价物）：' -ForegroundColor Green
     @(
@@ -205,7 +217,8 @@ function Invoke-List {
         '  check-binaries 交叉编译 linux/amd64 并校验真静态链接（distroless 前提）',
         '  run-local     无 Docker 的本地全栈启动（绿色版 PG + server + Vite）',
         '  verify-e2e    E2E 一键回归（M1-M6 验收 + MVP 总验收；可透传 --stages s2,s3 / --summary / --strict）',
-        '  verify-observability 核对 Grafana 面板 / Prometheus 规则与代码里的指标定义是否一致（静态，不需 Docker）'
+        '  verify-observability 核对 Grafana 面板 / Prometheus 规则与代码里的指标定义是否一致（静态，不需 Docker）',
+        '  verify-onboarding 从接入指南抽代码块原文，在真栈上跑一遍（真 PG + 真 server，需启动数据库）'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -234,9 +247,10 @@ switch ($Task.ToLowerInvariant()) {
     'run-local'    { Invoke-RunLocal }
     'verify-e2e'   { Invoke-VerifyE2E }
     'verify-observability' { Invoke-VerifyObservability }
+    'verify-onboarding' { Invoke-VerifyOnboarding }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding）"
         exit 1
     }
 }

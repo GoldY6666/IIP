@@ -304,7 +304,34 @@ iip/
     这是判据自证失效的典型形态，故补了「解析到 0 个 instrument 必须硬报」与「0 个选择器必须硬报」两条自守卫。
   - **做不到的（如实标注）**：本机无 Docker daemon / promtool / Grafana 实例 ⇒ PromQL 语法、
     面板渲染、抓取成功三者**均未经机器验证**。文档只声明「名字与定义一致」，不声明「面板可用」。
-- [ ] T6.5 操作者文档《5 分钟接入 Alertmanager》（0.5d）
+- [x] T6.5 操作者文档《5 分钟接入 Alertmanager》（0.5d）
+  - 2026-10-18 实施完成：`docs/接入指南-Alertmanager.md`（操作侧：receiver → 手发验证 →
+    三处确认 → payload 契约 → 排错表 → 通用 HTTP 源 → checklist）+
+    `scripts/verify-onboarding.py`（把文档里的代码块**原文**在真栈上跑一遍）。
+  - **为什么文档要配可执行验收**：「5 分钟」是可证伪的承诺，而文档最容易被自己毁掉 ——
+    curl 少个引号、payload 缺个必填字段、路径错一个字符，都只在操作者那里暴露。
+    故脚本按 `<!-- verify:NAME -->` 标记抽出代码块，交给 Git Bash 执行，断言文档声称的
+    `accepted/skipped/updated/rejected` 与 5 个状态码。文档与实现一旦不一致就红。
+  - 判据 13 项全 PASS（S1–S9）：receiver YAML 结构、curl 原文执行、`page→critical` 归一、
+    指标计数、改 `instance` 重发仍 `skipped=1`（动态标签不参与指纹）、resolve 后库里只剩
+    resolved、缺 version→400、缺 alertname→200 且 `rejected=1/errors[0].index=0`、
+    `/metrics` 与 `/healthz` 免 token 而 `/api/v1/*` 401、通用源最小体。
+    **变异 6/6 全红**（文档侧 4：删 version / 路径多 s / 鉴权头写成 Authorization /
+    severity 写成未识别值；实现侧 2：指纹不再剔除 instance、不校验 version），恢复后基线仍绿。
+  - **判据自己踩的两个坑（都修了，注释留在脚本里）**：
+    ① `shutil.which("bash")` 在 Windows 上会拿到 `System32\bash.exe`（WSL 启动器）——
+    从 Git Bash 调用能跑、从 PowerShell 调用全红，**判据结论取决于调用者的 PATH**。
+    改为逐个候选用 `uname -s` 自证是 MINGW/MSYS/CYGWIN 才用；
+    ② 报红只打 stdout 不打 stderr，导致「bash 起不来」看起来像「文档写错了」。
+    报红不带真因等于没报。
+  - **顺手发现一个真缺陷（未改产品，待裁定）**：请求体里含**非 UTF-8 字节**时，
+    `json.Unmarshal` 照收（Go 不校验字符串的 UTF-8 合法性），落库时 PG 报
+    `无效的 "UTF8" 编码字节顺序 (SQLSTATE 22021)`，接口回 **503**。
+    现象会误导：客户端编码问题被报成「IIP 存储故障」，且 Alertmanager 会一直重试。
+    候选修法：handler 入口校验请求体 UTF-8（`utf8.Valid`），不合法直接 400 并说明编码问题。
+    **属产品行为变更，本轮只记录不动手。** 文档侧已规避并写明「中文别内联在命令行」。
+  - 未验证（如实标注）：本机无 Alertmanager 二进制与 Grafana 实例 ⇒ receiver YAML 只证到
+    「可解析且字段正确」，未证到「Alertmanager 能加载它」；`http_headers` 的实际发送行为同理。
 
 **验收标准**：新 Incident 30 秒内 Slack 收到通知且消息含证据计数；/metrics 指标在压测中可观测（见 M7）。
 
