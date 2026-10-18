@@ -32,6 +32,7 @@ import (
 	"github.com/yu/iip/internal/correlation"
 	"github.com/yu/iip/internal/incident"
 	"github.com/yu/iip/internal/logging"
+	"github.com/yu/iip/internal/metrics"
 	appmw "github.com/yu/iip/internal/middleware"
 	"github.com/yu/iip/internal/notify"
 	"github.com/yu/iip/internal/repository"
@@ -191,7 +192,12 @@ func run() error {
 	}
 
 	// 5) 路由装配
-	r := newRouter(logger, pool, cfg, notifier)
+	//
+	// T6.3：指标集合在装配期构造一次（不是懒加载）。它与 /metrics 是否暴露
+	// 无关 —— 关掉端点只是不注册路由，埋点照常计数，这样「先跑一阵再打开
+	// 端点」能立刻看到历史累计（进程内自启动起算），而不是从打开那一刻起归零。
+	m := metrics.New()
+	r := newRouter(logger, pool, cfg, notifier, m)
 
 	// 6) HTTP 服务
 	srv := &http.Server{
@@ -266,7 +272,16 @@ func buildNotifier(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) 
 }
 
 // newRouter 装配中间件与路由。业务逻辑不得写入此处（AGENTS.md 约束 2）。
-func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config, notifier *notify.Service) http.Handler {
+func newRouter(
+	logger *slog.Logger,
+	pool *pgxpool.Pool,
+	cfg *config.Config,
+	notifier *notify.Service,
+	m *metrics.Metrics,
+) http.Handler {
+	if m == nil {
+		m = metrics.Noop()
+	}
 	r := chi.NewRouter()
 	r.Use(
 		chimw.RequestID,
@@ -314,6 +329,28 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config, noti
 	)
 
 	r.Get("/healthz", handleHealthz(pool))
+
+	// T6.3：自监控端点。与 /healthz 同级，**不受 RequireToken 保护** ——
+	// 那个中间件只拦 /api/v1/* 前缀，本路径天然在保护范围之外。
+	//
+	// 为什么刻意不要求鉴权：Prometheus 抓取时不会带业务 token，
+	// 要求鉴权等于「要么抓不到，要么把 token 写进抓取配置」（后者会把
+	// 一个业务凭据扩散到监控系统，反而多出一处泄漏面）。
+	// 而指标本身不含告警内容：标签全是固定枚举，没有 service/incident_id
+	// 这类业务值（见 internal/metrics 的基数约束）。
+	//
+	// 仍需提醒：暴露到公网时应在反代限制来源网段 —— 进程数、事件速率
+	// 这类量级信息本身也是侦察素材。README 的部署段已写明。
+	if cfg.MetricsEnabled {
+		// r.Handle 而非 r.Get：promhttp 返回 http.Handler 而不是 HandlerFunc。
+		r.Handle("/metrics", m.Handler())
+		logger.Info("自监控端点已启用", slog.String("path", "/metrics"))
+	} else {
+		// 打日志而不是静默：/metrics 404 时「关了」与「路由没注册上」
+		// 在外部看起来一模一样，启动日志是唯一的区分线索。
+		logger.Info("自监控端点已关闭，/metrics 将返回 404",
+			slog.String("env", "IIP_METRICS_ENABLED"))
+	}
 
 	// S4：前端凭据来源。**必须注册在这里且不受鉴权**（见 api.AuthSession 注释）。
 	// 无凭据时也返回 200 + auth_required=false：那是合法状态而非错误。
@@ -364,7 +401,8 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config, noti
 	corrSvc := correlation.NewService(repository.NewIncidents(pool), cfgStore, topo, logger).
 		WithTimeline(lifecycle).
 		WithSuppressions(repository.NewReviews(pool)).
-		WithEvidenceTasks(repository.NewTasks(pool))
+		WithEvidenceTasks(repository.NewTasks(pool)).
+		WithMetrics(m)
 	// M6 T6.1：NEW 档建档成功后发通知。nil 时不注入（默认形态），
 	// 关联路径与 M2 完全一致。
 	if notifier != nil {
@@ -374,11 +412,15 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config, noti
 	// M1：告警接入。此处只有装配——五阶段流水线在 internal/alert，
 	// SQL 在 internal/repository，handler 只负责 HTTP 契约（手册 §4.5）。
 	alertSvc := alert.NewService(repository.NewAlerts(pool), logger)
+	alertSvc.SetMetrics(m)
 	// M2：落库后同步关联（手册 §4.10）。开关关闭时不注入，行为退回 M1。
 	if cfg.CorrelationEnabled {
 		alertSvc.SetCorrelator(corrSvc)
 	}
-	r.Post("/api/v1/alerts/webhook", api.AlertWebhook(alertSvc, cfg.WebhookMaxBytes, logger))
+	// T6.3：webhook 的端到端耗时。挂在这一个路由上而不是全局中间件 ——
+	// 其余端点都是毫秒级只读查询，混进同一张直方图会把 webhook 的 P99 稀释掉。
+	r.With(appmw.WebhookMetrics(m)).
+		Post("/api/v1/alerts/webhook", api.AlertWebhook(alertSvc, cfg.WebhookMaxBytes, logger))
 
 	// M1：告警列表（手册 §3.1 P1）。只读查询，返回最新 100 条、不做 status 过滤。
 	r.Get("/api/v1/alerts", api.AlertList(alertSvc, logger))

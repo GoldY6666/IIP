@@ -169,6 +169,20 @@ type Config struct {
 	// 因此 Load/Validate 阶段对「非空但读不到」直接报错，不留给运行时。
 	EvidenceTLSCAFile string // IIP_EVIDENCE_TLS_CA_FILE，默认空
 
+	// --- T6.3：自监控指标（ADR-026，实现见 internal/metrics）---
+
+	// MetricsEnabled 控制 server 是否暴露 /metrics。默认 true（见 DefaultMetricsEnabled）。
+	//
+	// 关掉时该路径直接 404（不注册），而不是返回 403：
+	// 「关掉」的语义是「不存在这个端点」，让它 404 才能与「打错路径」区分开，
+	// 也避免扫描器一眼看出「这里本该有指标」。
+	MetricsEnabled bool // IIP_METRICS_ENABLED，默认 true
+	// WorkerMetricsAddr 是 worker 指标监听地址。**空 = 关闭 worker 指标**。
+	//
+	// worker 没有 HTTP 服务，故单独监听；端口被占用只记 WARN 不影响采集
+	// （见 cmd/iip-worker 的 startWorkerMetrics）。
+	WorkerMetricsAddr string // IIP_WORKER_METRICS_ADDR，默认 ":9091"
+
 	// --- M5：前端静态托管（手册 §4.3，实现见 m5.go）---
 
 	// WebRoot 是前端产物（vite build 的输出目录）路径。
@@ -300,6 +314,8 @@ func Load(args []string) (*Config, error) {
 		"跳过采集目标 TLS 证书校验（仅限内网自签证书，默认关闭；开启时启动日志打 WARN）")
 	fs.String("evidence-tls-ca-file", DefaultEvidenceTLSCAFile,
 		"校验采集目标服务器证书的 CA 文件路径（PEM），留空=用系统根证书池")
+	// T6.3：自监控指标。默认开 server 的 /metrics，worker 独立监听 :9091。
+	registerMetricsFlags(fs)
 	fs.String("prom-url", "", "Prometheus 查询端点根地址（启用该采集器时必填）")
 	fs.String("loki-url", "", "Loki 查询端点根地址（启用该采集器时必填）")
 	// 空串 = 不开鉴权，故help 里明写这一点，避免「设了变量但没配值」
@@ -398,6 +414,8 @@ func Load(args []string) (*Config, error) {
 	// T6.1：Slack 通知（见 slack.go）。
 	readSlack(k, cfg)
 	readWebhook(k, cfg)
+	// T6.3：自监控指标（见 metrics.go）。
+	readMetrics(k, cfg)
 
 	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
 	//
@@ -454,6 +472,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := validateWebhook(c); err != nil {
+		return err
+	}
+	if err := validateMetrics(c); err != nil {
 		return err
 	}
 	return nil

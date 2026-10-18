@@ -11,6 +11,27 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **自监控 `/metrics`（T6.3 / ADR-026）**：7 个业务指标 + Go 运行时/进程指标，
+  Prometheus 文本格式。`internal/metrics` 是叶子包（只依赖 `client_golang`），
+  每个实例自带**独立注册表**（不用全局默认表：单测会因为重复注册 panic，
+  且两个测试的数值互相污染）。
+  - 接入侧（server）：`iip_alert_ingest_total{result}`、
+    `iip_alert_dedup_total{result}`、`iip_webhook_duration_seconds`、
+    `iip_correlation_score{action}`、`iip_incident_created_total`。
+  - 采集侧（worker）：`iip_evidence_collect_duration_seconds{source}`、
+    `iip_task_retry_total{reason}`。
+  - 不变量 `dedup{hit}+dedup{miss} == ingest{stored}+ingest{duplicate}`；
+    去重命中率用 PromQL 算而不是进程内 Gauge（Gauge 要额外 goroutine 定时重算，
+    且比率的分母窗口与抓取周期一错就对不上）。
+  - **标签纪律**：任何标签都不取事件/告警/服务维度（无界基数会拖垮 Prometheus），
+    `TestLabelNamesAreBounded` 是机器守卫。
+  - 新增直接依赖 `prometheus/client_golang v1.25.0`（间接 6 个模块）。
+- **`/metrics` 端点与 worker 独立监听（T6.3）**：server 的 `/metrics`
+  与 `/healthz` 同级、**不受 `IIP_AUTH_TOKEN` 保护**（Prometheus 抓取不带业务
+  token），`IIP_METRICS_ENABLED=false` 时不注册路由（404，而不是 403）。
+  worker 没有 HTTP 服务，故独立监听 `IIP_WORKER_METRICS_ADDR`（默认 `:9091`，
+  留空关闭）；端口被占用只记 WARN 不影响采集 —— 让监控端口冲突把采集进程拖死
+  是方向反了。compose 给 worker 加了 `expose: 9091`（不发布到宿主机）。
 - **通知去风暴 + 通用出站 webhook（T6.2 / ADR-025）**：同一事件 10 分钟滑动窗口内
   最多 2 条**中间态**更新；终态（resolved/ignored）与重开必发且不消耗配额——
   静默丢掉「已解决」会让 on-call 以为故障还在。被抑制的条目不进队列，

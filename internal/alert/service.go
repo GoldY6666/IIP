@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/yu/iip/internal/metrics"
 )
 
 // outcomeKind 是单条告警的处理归类，与 Result 的四个计数字段一一对应。
@@ -46,6 +48,8 @@ type Service struct {
 	repo       Repository
 	logger     *slog.Logger
 	correlator Correlator
+	// metrics 永不为 nil（未注入时是 metrics.Noop()），故埋点处无需 nil 判断。
+	metrics *metrics.Metrics
 }
 
 // NewService 构造 Service。logger 传 nil 时退化为 slog.Default()，
@@ -54,7 +58,18 @@ func NewService(repo Repository, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{repo: repo, logger: logger}
+	return &Service{repo: repo, logger: logger, metrics: metrics.Noop()}
+}
+
+// SetMetrics 注入自监控指标（M6 T6.3）。传 nil 等价于不采集。
+//
+// 用 setter 而非改造 NewService 签名：与 SetCorrelator 同理 ——
+// 保持 M1 起的所有调用点与测试零改动。
+func (s *Service) SetMetrics(m *metrics.Metrics) {
+	if m == nil {
+		m = metrics.Noop()
+	}
+	s.metrics = m
 }
 
 // SetCorrelator 注入 M2 关联引擎。传 nil 等价于关闭关联。
@@ -89,11 +104,16 @@ func (s *Service) Ingest(ctx context.Context, p *Payload) (Result, error) {
 	for i, raw := range p.Alerts {
 		outcome, stored, err := s.ingestOne(ctx, raw, p.Status)
 		if err != nil {
+			// 存储层故障：这一条连「结论」都没判出来（既不是 duplicate 也不是
+			// invalid），故单独计 error —— 否则失败告警在指标上完全不可见，
+			// 而「接入量突然变少」与「接入量本来就这么少」将无法区分。
+			s.metrics.AlertIngest.WithLabelValues(metrics.IngestError).Inc()
 			return res, fmt.Errorf("处理第 %d 条告警失败: %w", i, err)
 		}
 		if stored != nil {
 			newFiring = append(newFiring, *stored)
 		}
+		s.metrics.AlertIngest.WithLabelValues(ingestResultLabel(outcome.kind)).Inc()
 		res.record(i, outcome)
 	}
 
@@ -163,15 +183,38 @@ func (s *Service) ingestOne(ctx context.Context, raw json.RawMessage, topStatus 
 	return s.persist(ctx, &normalized)
 }
 
+// ingestResultLabel 把单条结论映射成 iip_alert_ingest_total 的 result 取值。
+//
+// stored 同时覆盖「新插入」与「把已有 firing 置为 resolved」：两者都是
+// 库被成功写入，而运维关心的是二分（写进去了 vs 没写）。合并的正当性
+// 由不变量背书 —— dedup{hit,miss} 之和恒等于 ingest{stored,duplicate} 之和。
+func ingestResultLabel(k outcomeKind) string {
+	switch k {
+	case outcomeAccepted, outcomeUpdated:
+		return metrics.IngestStored
+	case outcomeSkipped:
+		return metrics.IngestDuplicate
+	case outcomeRejected:
+		return metrics.IngestInvalid
+	}
+	// 不可达（outcomeKind 只有四个值），但返回 invalid 比 panic 安全：
+	// 指标埋点永远不该成为接入链路的故障点。
+	return metrics.IngestInvalid
+}
+
 // persist 实现手册 §4.4 的分支表：按「入站状态 × 库中最新一条状态」决定动作。
 func (s *Service) persist(ctx context.Context, a *Alert) (itemOutcome, *StoredAlert, error) {
 	latest, err := s.repo.LatestByFingerprint(ctx, a.Fingerprint)
 	if errors.Is(err, ErrNotFound) {
+		s.metrics.AlertDedup.WithLabelValues(metrics.DedupMiss).Inc()
 		return s.persistWithoutHistory(ctx, a)
 	}
 	if err != nil {
+		// 查询失败≠去重判定：这一条既没命中也没落空，不计入 dedup，
+		// 否则 hit+miss 之和会超过实际进入去重判定的条数，比率就失真了。
 		return itemOutcome{}, nil, err
 	}
+	s.metrics.AlertDedup.WithLabelValues(metrics.DedupHit).Inc()
 	return s.persistAgainstHistory(ctx, a, &latest)
 }
 
@@ -234,6 +277,11 @@ func (s *Service) insert(ctx context.Context, a *Alert) (itemOutcome, *StoredAle
 		return itemOutcome{}, nil, err
 	}
 	if !inserted {
+		// 判 miss 之后插入时撞了唯一约束：并发去重兜底真的生效了。
+		// 单独计 race（miss 的子集，不参与 hit+miss 的等式），
+		// 这样「判 miss 却插不进去」的次数不会淹没在正常 miss 里 ——
+		// 它是唯一能证明「两个 webhook 同时到了」的信号。
+		s.metrics.AlertDedup.WithLabelValues(metrics.DedupRace).Inc()
 		s.logger.Warn("插入被唯一约束跳过（并发去重兜底生效）",
 			slog.String("fingerprint", a.Fingerprint))
 		return itemOutcome{kind: outcomeSkipped}, nil, nil

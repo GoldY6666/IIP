@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：v0.1.0 已发布（T7.1–T7.7 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线七项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**如实标注的未交付项**：开发计划 §10 的 M6（Slack 通知 + `/metrics`，T6.1–T6.5）**未开工**；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测编排成一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（最近一轮 `--no-bench`：S0–S5 全 PASS、S6 压测跳过、S7 容器链路因 daemon 缺席 BLOCKED）。真库门禁最近一轮 **979 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
+> **当前阶段：v0.1.0 已发布（T7.1–T7.7 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线七项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**如实标注的未交付项**：开发计划 §10 的 M6 中 **T6.4（Prometheus 抓取配置示例 + Grafana 面板）与 T6.5（操作者文档）未做** —— T6.1（Slack 通知）/ T6.2（去风暴 + 通用 webhook）/ T6.3（`/metrics`）已收口但**未发版**，属 `CHANGELOG [Unreleased]`；K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测编排成一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（最近一轮 `--no-bench`：S0–S5 全 PASS、S6 压测跳过、S7 容器链路因 daemon 缺席 BLOCKED）。真库门禁最近一轮 **1088 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -97,6 +97,48 @@ payload：`{"kind","incident":{"id","title","severity","service","status","start
 "from_status","to_status","actor","alert_count","evidence_count"}`
 （`from_status`/`to_status`/`actor` 仅在状态变更时出现）。两个出口都**不跟随
 重定向**，接收端返回 3xx 会记为发送失败。
+
+**自监控指标 `/metrics`**
+
+默认开启，Prometheus 文本格式（业务指标 + Go 运行时/进程指标）。
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `IIP_METRICS_ENABLED` | `true` | server 是否暴露 `/metrics`；设 `false` 则该路径 **404**（是「不存在」而非「禁止」） |
+| `IIP_WORKER_METRICS_ADDR` | `:9091` | worker 指标监听地址；**留空=关闭**；端口被占用只记 WARN，采集照常 |
+
+两个进程**各暴露一部分**（定义集中在 `internal/metrics`）：
+
+| 指标 | 类型 | 标签 | 进程 |
+|------|------|------|------|
+| `iip_alert_ingest_total` | counter | `result=stored\|duplicate\|invalid\|error` | server |
+| `iip_alert_dedup_total` | counter | `result=hit\|miss\|race` | server |
+| `iip_webhook_duration_seconds` | histogram | 无 | server |
+| `iip_correlation_score` | histogram | `action=new\|review\|merge` | server |
+| `iip_incident_created_total` | counter | 无 | server |
+| `iip_evidence_collect_duration_seconds` | histogram | `source=prometheus\|loki\|k8s\|trace` | worker |
+| `iip_task_retry_total` | counter | `reason=stale_reclaim\|attempt_failed` | worker |
+
+不变量：`dedup{hit} + dedup{miss} == ingest{stored} + ingest{duplicate}`
+（`race` 是 `miss` 的子集，表示「判 miss 之后插入时撞了唯一约束」，不参与等式）。
+去重命中率**用 PromQL 算**，而不是进程内维护一个 Gauge：
+
+```promql
+sum(rate(iip_alert_dedup_total{result=~"hit|race"}[5m]))
+  / sum(rate(iip_alert_dedup_total[5m]))
+```
+
+口径要点：
+
+- **标签纪律**：没有任何标签取事件/告警/服务维度（无界基数会拖垮 Prometheus）。
+  `internal/metrics` 的 `TestLabelNamesAreBounded` 是这条的机器守卫 ——
+  新增标签必须先登记白名单。
+- `/metrics` **不受 `IIP_AUTH_TOKEN` 保护**（Prometheus 抓取不带业务 token）。
+  暴露到公网时请在反向代理限制来源网段：进程数与事件速率本身也是侦察素材。
+- 关闭端点不影响埋点计数（进程内照常累计），但进程重启会归零。
+- worker 的采集耗时**包含失败的采集**：只记成功的会让「某个采集器一直超时」
+  在图上彻底消失。失败次数看 `iip_task_retry_total{reason="attempt_failed"}`。
+- 抓取配置示例与 Grafana 面板属 T6.4（**未做**），本轮只保证指标本身可用。
 
 
 
@@ -338,6 +380,7 @@ flowchart LR
 | 方法 | 路径 | 里程碑 | 说明 | 鉴权 |
 |------|------|--------|------|------|
 | GET | `/healthz` | M0 | 真查库（`SELECT 1`）：200 `ok` / 503 `unavailable` | 否 |
+| GET | `/metrics` | M6 T6.3 | 自监控指标（Prometheus 文本格式）；`IIP_METRICS_ENABLED=false` 时不注册（404） | 否 |
 | GET | `/api/v1/auth/session` | M6 S4 | 前端凭据来源；无凭据返回 200 + `auth_required=false` | 否 |
 | POST | `/api/v1/alerts/webhook` | M1 | Alertmanager 接入；请求体上限 1 MiB（超限 413） | 是 |
 | GET | `/api/v1/alerts` | M1 | 告警列表，默认最新 100 条，`?limit=&offset=` 自动夹紧 | 是 |
@@ -814,7 +857,7 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 | T7.5 compose 生产化 + Helm | **已收口** | 7 服务 resources + 日志轮转；采集器 TLS（CA / insecure 双模式，读不到 CA 启动即失败）；`deploy/helm/iip` 简化版 chart（内置/外置 PG 双轨）。真栈容器链路段待 Docker daemon 恢复后补跑（T7.5 收口报告已如实标注） |
 | T7.6 README + CHANGELOG + v0.1.0 | **已收口** | 本文档重构 + `CHANGELOG.md` + 标签四联动；tag `v0.1.0` 本地已打（push / GitHub Release 待 remote） |
 | T7.7 E2E 一键脚本 | **已收口** | `scripts/verify-e2e.py` 编排 S0–S7 按 M1–M6 验收项 + MVP 总验收出状态；最近一轮 7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED（`--stages s7` 可补跑） |
-| 开发计划 §10 M6（Slack 通知 + `/metrics`） | **未开工** | T6.1–T6.5 全部 `[ ]`：无 Slack adapter、无通知去风暴、无 `/metrics` 端点、无抓取示例、无操作者文档。**v0.1.0 不含通知与自监控指标** |
+| 开发计划 §10 M6（通知 + 自监控） | **部分收口** | **T6.1 / T6.2 / T6.3 已收口**（ADR-024 / 025 / 026）：Slack 通知、去风暴 + 通用出站 webhook、`/metrics` 七指标 + worker 独立监听。**T6.4（Prometheus 抓取配置示例 + Grafana 面板）与 T6.5（操作者文档）未做**，故 v0.1.0 不含通知与自监控指标 —— 这三项属 `[Unreleased]`，未发版 |
 
 ---
 

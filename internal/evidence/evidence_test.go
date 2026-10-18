@@ -22,6 +22,11 @@ type fakeCollector struct {
 	calls int
 	// in 记录收到的输入。
 	in Input
+	// delay 让 Collect 真的耗时，用于验证 CollectAll 测量了 Duration。
+	//
+	// 不用假时钟：耗时是在 CollectAll 内部用 time.Now 量的，
+	// 要证明它真的量到了，只能让被量对象真的花时间。
+	delay time.Duration
 }
 
 func (f *fakeCollector) Source() Source { return f.src }
@@ -29,6 +34,9 @@ func (f *fakeCollector) Source() Source { return f.src }
 func (f *fakeCollector) Collect(_ context.Context, in Input) ([]Evidence, error) {
 	f.calls++
 	f.in = in
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -406,6 +414,50 @@ func TestInputReachesCollectorUnchanged(t *testing.T) {
 	}
 	if c.in.Window != in.Window {
 		t.Errorf("Window = %+v，期望 %+v", c.in.Window, in.Window)
+	}
+}
+
+// TestCollectAllMeasuresDurationIncludingFailures 验证 T6.3 埋点所需的耗时口径。
+//
+// 三条断言各自挡一类错：
+//   - 成功与**失败**的采集都要有非零耗时（失败耗时同样进指标，
+//     否则「某个采集器把整轮拖到超时」在图上会消失）；
+//   - 耗时不能是 0（漏写 Duration 字段的变异会红在这条）。
+//
+// 阈值取 15ms 而实际睡 20ms：给调度抖动留余量，同时与 0 有足够距离 ——
+// 若改成像 >0 这样松的断言，把 Duration 写成 time.Millisecond 之类的
+// 常量偏移也能过。
+func TestCollectAllMeasuresDurationIncludingFailures(t *testing.T) {
+	const nap = 20 * time.Millisecond
+	const floor = 15 * time.Millisecond
+
+	reg := NewRegistry()
+	ok := &fakeCollector{src: "loki", delay: nap, evs: []Evidence{validEvidence("loki", fixedTime())}}
+	bad := &fakeCollector{src: "prometheus", delay: nap, err: errors.New("连接超时")}
+	reg.MustRegister(ok)
+	reg.MustRegister(bad)
+
+	in := Input{IncidentID: 1, Window: Window{Start: fixedTime(), End: fixedTime().Add(time.Hour)}}
+	_, results := CollectAll(context.Background(), reg, in)
+
+	if len(results) != 2 {
+		t.Fatalf("结果条目 %d 条，期望 2 条", len(results))
+	}
+	// Collectors() 按来源排序：loki 在 prometheus 之前。
+	if results[0].Source != "loki" || results[1].Source != "prometheus" {
+		t.Fatalf("结果顺序 %q/%q，期望 loki/prometheus", results[0].Source, results[1].Source)
+	}
+	if results[0].Err != nil {
+		t.Fatalf("loki 不该失败: %v", results[0].Err)
+	}
+	if results[0].Duration < floor {
+		t.Errorf("成功采集耗时 %v，期望 ≥ %v（Duration 没被测量）", results[0].Duration, floor)
+	}
+	if results[1].Err == nil {
+		t.Fatal("prometheus 应失败")
+	}
+	if results[1].Duration < floor {
+		t.Errorf("失败采集耗时 %v，期望 ≥ %v（失败也要计入耗时）", results[1].Duration, floor)
 	}
 }
 

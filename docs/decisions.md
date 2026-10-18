@@ -571,6 +571,7 @@
 | ADR-023 | T7.2 索引调优：建 `tasks` 事件表达式索引 + 删 `alerts` labels GIN | 已实施（0009；EXPLAIN 实测双重证据：GIN 的 14 个分区副本 `idx_scan` 全 0 = 零读者；tasks 两条消费查询全表扫且无保留期。Q3「join 加分区键」变体实测更慢/持平，**记录否决**以防重做） |
 | ADR-024 | T6.1 Slack 通知：默认关闭 + 异步 best-effort + 失败静默丢弃 | 已实施（`internal/notify` 叶子包 + 两处 hook；真库真栈探针 PASS，含竞态修复与标题去重；T6.2 的范围边界已在 ADR 内划清） |
 | ADR-025 | T6.2 通知去风暴（滑动窗口 2 条/10 分钟 + 终态白名单）+ 通用出站 webhook | 已实施（终态/重开必发由禹裁定；档位固定常量；两个 sink 拒重定向；变异 5 处全红，真栈探针 4/4 条数断言） |
+| ADR-026 | T6.3 自监控 `/metrics`：每实例独立注册表 + 无界标签禁令 + worker 独立监听 | 已实施（禹裁定官方 client_golang / 计数器+PromQL / 独立监听；比率不落 Gauge；变异 11/11 全红，真栈探针 6 阶段 PASS，真库 1088 PASS/1 SKIP/0 FAIL） |
 
 ---
 
@@ -956,6 +957,115 @@ ADR-025：T6.2 通知去风暴与通用出站 webhook —— 滑动窗口、终�
 
 ---
 
+ADR-026：T6.3 自监控 `/metrics` —— 独立注册表、比率不落 Gauge、worker 独立监听
+
+- **Status**: 已实施（T6.3；`internal/metrics` + 三处注入 + 两处监听）
+- **Date**: 2026-10-18
+- **来源**: docs/IIP开发计划.md §10 T6.3「自监控 `/metrics`：`alert_ingest_total`、
+  `webhook_duration_seconds`、`dedup_hit_ratio`、`correlation_score_bucket`、
+  `incident_created_total`、`evidence_collect_duration_seconds`、`task_retry_total`」；
+  禹 2026-10-18 批准方案并裁定三项：**官方 client_golang**、**计数器 + PromQL 算比率**、
+  **worker 加独立监听**。
+- **Background**:
+  计划给的 7 个指标名里有三个是**形态问题**而不是「写几行计数」：
+  ① `dedup_hit_ratio` 叫 ratio，但比率在 Prometheus 里不该由进程算；
+  ② `correlation_score_bucket` 隐含直方图，而分数值域是 [0,1] 不是耗时；
+  ③ 谁来暴露 —— worker 是纯后台进程，**没有任何 HTTP 端点**。
+  另有一条不比技术选型次要的：指标若默认关闭，出问题时才发现没开、改配置要重启，
+  于是「自监控」在真正需要的时刻恰好缺席。这与通知类开关的方向必须相反。
+- **Options**:
+  ① 客户端库：(a) 官方 `prometheus/client_golang`；(b) 零依赖手写 exposition。
+  ② 比率形态：(a) Gauge 由定时器重算；(b) 计数器 + PromQL 查询时算。
+  ③ worker 暴露：(a) 不暴露（worker 指标随日志走）；(b) 复用 server 的端点；
+     (c) worker 独立监听一个只读端口。
+  ④ 注册表：(a) 全局 `prometheus.DefaultRegisterer`；(b) 每实例独立 Registry。
+  ⑤ 默认开关：(a) 与通知一致，默认关；(b) 默认开。
+- **Decision**（禹 2026-10-18 批准 ①②③，④⑤ 为实施时按既有纪律裁定）:
+  ① **(a) 官方库**；② **(b) 计数器 + PromQL**；③ **(c) 独立监听 :9091**；
+  ④ **(b) 独立注册表**；⑤ **(b) 默认开**。
+- **Consequences**:
+  - **比率为什么不能落 Gauge**：Gauge 要有东西定时去重算，那就多一个 goroutine、
+    多一个要关的循环、多一处「窗口与抓取周期不匹配」的错法（抓取 15s 一次、
+    Gauge 每 60s 重算 ⇒ 读到的是 60s 前的窗口）。计数器只增不改，
+    比率交给 PromQL：`sum(rate(dedup{result=~"hit|race"}[5m])) / sum(rate(dedup[5m]))`。
+    代价是「打开 /metrics 就能看到比率」这件事没有了，需要会写查询。
+  - **独立注册表是硬要求，不是洁癖**：全局默认表是进程单例，单测里每构造一个
+    Service 就注册一次，第二轮直接 `panic: duplicate metrics collector registration`；
+    就算不 panic，两个用例的数值也会互相污染，断言只能退化成「大于 0」。
+    `TestHandlerServesBusinessMetrics` 专抓「误用 `promhttp.Handler()`（绑全局表）
+    ⇒ 业务指标一条都不在 /metrics 上」这个看起来在工作、实际什么也测不到的形态。
+  - **`Noop()` 不是空实现，而是「不会被任何人暴露的一组指标」**：
+    未注入指标的服务拿到的是它，埋点照常计数，只是没有端点采集。
+    收益是**埋点侧零 nil 分支** —— 若返回 nil，每处埋点都要写 `if m != nil`，
+    漏写一处就是运行期 panic，且只在「恰好没配指标」的部署里出现。
+  - **标签基数是无界风险，已用测试封住**：任何标签都不许取
+    incident_id / alert_id / fingerprint / service / path 维度（随业务量线性增长，
+    最终把 Prometheus 自己拖死）。`TestLabelNamesAreBounded` 是正向白名单 +
+    反向黑名单双查：新增标签必须先登记，登记时就必须回答「这个值有上界吗」。
+  - **口径不变量（可断言，比分别断言四个数更能抓漏埋点）**：
+    `dedup{hit} + dedup{miss} == ingest{stored} + ingest{duplicate}`。
+    `race` 是 `miss` 的**子集**（判 miss 之后插入时撞唯一约束），
+    单独列出是因为「两个 webhook 同时到了」只有它能证明；但因为它与 miss 重合，
+    **不参与**上面的等式。
+  - **`stored` 同时覆盖「新插入」与「置 resolved」**：两者都是库被成功写入，
+    而运维关心的是二分（写进去了 vs 没写）。合并的正当性由上面的不变量背书。
+  - **`/metrics` 不受 `IIP_AUTH_TOKEN` 保护**：RequireToken 只拦 `/api/v1/*`，
+    该路径天然在保护范围外。刻意不为它开鉴权 —— Prometheus 抓取不带业务 token，
+    要求鉴权只有两种结果：抓不到，或把业务凭据扩散到监控系统（反而多一处泄漏面）。
+    代价必须说清：**指标里没有告警内容，但「进程数 / 事件速率」本身是侦察素材**，
+    暴露公网时应在反代限制来源网段（README 部署段已写明）。
+  - **关闭端点 ≠ 不埋点**：`IIP_METRICS_ENABLED=false` 只是不注册路由（404，
+    而不是 403 ——「关闭」的语义是「不存在这个端点」，403 会让扫描器看出
+    「这里本该有指标」）。计数照常累计，但这只在本进程内有效，重启归零。
+  - **worker 独立监听的代价**：两个进程各有一份注册表 ⇒ **同一个指标名不会在
+    两个进程同时出现**，T6.4 的 scrape 配置因此需要**两个 target**。
+    这是刻意的：若复用 server 的端点，就得让 worker 往 server 推指标，
+    而「server 里没有采集数据」与「采集挂了」将无法区分。
+  - **worker 端口被占用只 WARN 不退出**：指标是旁路能力，让监控端口冲突
+    把采集进程拖死是方向反了（那时连证据都不采了）。判据是
+    `TestStartWorkerMetricsOccupiedPortDoesNotFail`。
+  - **端口取 9091 而非 9090**：9090 是 Prometheus 自己的端口，本机开发时
+    常常同时跑着 Prometheus，撞端口会让 worker 指标静默不可用。
+  - **新增依赖（如实记录）**：`prometheus/client_golang v1.25.0`
+    直接引入，连带 `client_model` 等 6 个间接模块。M2 的「不新增依赖」是
+    **M2 阶段的验收项**，不适用于 M6；但引入前确认过可拉取（沙箱内 `go get` 成功）。
+  - **已知取舍（不做）**：不做 exemplar / OpenTelemetry 导出；不按路径给
+    webhook 耗时打标签（本项目只有一个 webhook 端点，加标签只会在将来加第二个
+    端点时炸基数）；worker 不暴露接入类指标（两个进程的注册表刻意不共享）。
+- **Related ADRs**: ADR-025（去风暴的抑制计数「T6.3 出 metrics 后再议」——
+  本轮**未**把抑制次数升级为指标，仍只有 INFO 日志，因为抑制条数与
+  `dedup` 的口径不同、混进同一张表会让人误读；留作 T6.4 的选项）、
+  ADR-020（数量类断言只做下界/不绑会漂移的总数）。
+- **Evidence**:
+  - 单测：`internal/metrics` 6 例（族集合精确相等、运行时族在位、
+    标签白名单+黑名单、数值落点、`Noop` 共享且非 nil、`Handler` 走真实 HTTP
+    曝光路径）；埋点侧 `alert` 6 例 / `correlation` 4 例 / `worker` 5 例 /
+    `middleware` 3 例 / `config` 3 例 / `cmd/iip-server` 3 例 /
+    `cmd/iip-worker` 4 例 / `evidence`（Duration 口径）1 例。
+  - **变异 11/11 全红**（`D:\_iip_setup\_mut_t63.py`，报告 `_mut_t63.txt`）：
+    ① miss/hit 判反；② duplicate 计成 stored；③ 存储故障不计 error；
+    ④ 分数记在抑制降级之前；⑤ 失败的采集不记耗时；⑥ 顺序调用而非 defer
+    （panic 请求漏样本）；⑦ `Duration` 恒 0；⑧ 忽略 `MetricsEnabled`；
+    ⑨ 去掉空地址检查；⑩ 不注册 Go 运行时收集器；⑪ `Handler` 误用全局注册表。
+    每条只在**指定用例**上跑，且还原后校验字节数一致。
+  - **真栈探针**（`D:\_iip_setup\_probe_metrics.py`，报告 `_probe_metrics.txt`）：
+    真 PG + 真 server + 真 worker + 假 Prometheus，六阶段全 PASS：
+    S1 3 条告警（2 同指纹）后逐行核对 `stored=2 / duplicate=1 / miss=2 / hit=1 /
+    incident_created=2 / webhook_duration_count=3 / score{new}=2`；
+    S2 开鉴权后 `/metrics` 200 而 `/api/v1/alerts` 无 token 401（**前半句单独测是恒绿的**，
+    故必须先证明鉴权生效）；S3 `IIP_METRICS_ENABLED=false` → 404；
+    S4 worker `:9091` 可抓且 `iip_evidence_collect_duration_seconds{source="prometheus"}`
+    **只在真采到证据后**才出现（假 Prometheus 实收 12 次查询）；
+    S5 worker 的 `/metrics` 不含 server 侧指标（注册表确实独立）；
+    S6 两个进程都优雅退出（退出码 0）。
+    **探针自身的两处假红已记录**：初次把鉴权头写成 `Authorization`（实为
+    `X-IIP-Token`）⇒ 带凭据也 401，这说明 S2 的那半句确实有鉴别力。
+  - 全量真库回归：**1088 PASS / 1 SKIP / 0 FAIL**（`_t63_regression_v.txt`，
+    143.6s；唯一 SKIP 是既有的 `TestHandlerAllowsSymlinkedRoot`，Windows 无
+    建符号链接权限）。lint `0 issues`。
+
+---
+
 ## 悬而未决项（OPEN）
 
 > 出现「定不下来／先放一放／等外部条件」时在此登记。只追加 + 就地关闭。
@@ -987,7 +1097,7 @@ ADR-025：T6.2 通知去风暴与通用出站 webhook —— 滑动窗口、终�
 | 2026-10-07 | M5 补登记 | **OPEN-M5-8**：容器内无头浏览器截图 | 手册 §八 判据 4 的验证手段 | — | 原被镜像源阻塞（本机四条源全不通） | — | **RESOLVED**（2026-10-05） | 重启 Docker Desktop 后实测：`--profile app` 起全部服务，无头浏览器对compose 映射的 8080 截图成功，**颜色种类 1198**（阈值 ≥4；纯白/纯黑失败页只有 1 种）。判据 4 由此达成 |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-9**：`evidence.confidence` 仍全空（OPEN-M4-1 延续） | M4 手册把它列为「待 M5 处理的能力缺口」，但 M5 的判据 1/2/3 **不依赖**它 | 归入 M6 的 S1（需先有 RCA 才有能力评估） | 无 | M6 S1 完成后 | **RESOLVED**（2026-10-11 核对关闭） | 与 `OPEN-M4-1` 同源同批关闭：M6 S1（`F2`）+ S1-b（`F3`）已交付 `internal/rca/` 并接进真链路（`internal/worker/processor.go:250` 调 `rca.Assign`），宿主真库 10 条断言全绿，前端四档展示在位。**本行此前记「延至 M6 S1」但未在 M6 完成时关闭**，2026-10-11 核对后关闭　｜⚠️ 同 `OPEN-M4-1`：关闭的是「能力缺口」，「给不出依据时留空」这条约束不变 |
 | 2026-10-07 | M5 补登记 | **OPEN-M5-10**：判据 3 只验到「URL 合法且能发起连接」 | **没有验证面板上真的能看到这条查询的结果** —— 那需要真实 Prometheus/Grafana 实例 | 容器链路（判据 4）已覆盖部署形态 | 需真实 Grafana/Prometheus 实例 | V1.1 若接真实面板 | **OPEN**（V1.0 内可接受） | 口径已写入 `docs/M5-交付详细报告.md` §3 与 §6.2，**不修饰为「已验证」** |
-| 2026-10-07 | M6 新登记 | **OPEN-M6-1**：`main.go` 340 行 / `config.go` 410 行，超 300 行约束且**较 M5 收尾时进一步加剧** | 2026-10-07 现查实测值。**M6 S4 给这两个文件各加了约 20 行**（`AuthToken` 配置项 + `RequireToken` 挂载 + `/auth/session` 端点）⇒ OPEN-M5-7 的超限不是停滞而是**在长大** | 按M2 起的既有做法：**只拆本里程碑新增的部分**，不顺手重构既有装配代码 | 无外部阻塞，纯排期 | 后续里程碑把两个文件拆到 300 以内 | **OPEN** | 登记此条的目的是让「超限加剧」这件事**可追溯** —— 否则下一个读 M5 报告的人会以为还是318/352 那两个数 |
+| 2026-10-07 | M6 新登记 | **OPEN-M6-1**：`main.go` 340 行 / `config.go` 410 行，超 300 行约束且**较 M5 收尾时进一步加剧** | 2026-10-07 现查实测值。**M6 S4 给这两个文件各加了约 20 行**（`AuthToken` 配置项 + `RequireToken` 挂载 + `/auth/session` 端点）⇒ OPEN-M5-7 的超限不是停滞而是**在长大** | 按M2 起的既有做法：**只拆本里程碑新增的部分**，不顺手重构既有装配代码 | 无外部阻塞，纯排期 | 后续里程碑把两个文件拆到 300 以内 | **OPEN** | 登记此条的目的是让「超限加剧」这件事**可追溯** —— 否则下一个读 M5 报告的人会以为还是318/352 那两个数　｜**2026-10-18 复测（T6.3 收口时实测）**：`main.go` **485 行** / `config.go` **616 行**，`internal/worker/processor.go` 也已到 **483 行**（该文件不在原条目范围内，一并登记）。T6.3 自身只各加约 14–16 行；`config.go` 从 410 涨到 616 主要是 T6.1–T6.3 的**字段注释**（字段必须在结构体内，flag/read/validate 已按 `slack.go` / `webhook.go` / `metrics.go` 分文件）。**仍 OPEN** |
 | 2026-10-05 | M5 补登记 | **OPEN-M5-1**：UI 部署形态无访问控制，`deploy/README.md` 只能以「V1.0 仅供内网 / 演示环境」标注作为唯一防护 | M5 手册 §八 裁定①（S3 不做鉴权）时留的欠账：当时没有登录页也没有 token，UI 一旦端口可达即全开放。**该条目此前只写在 `IIP-M5详细开发手册.md` 正文与 §八 前言，未进本登记册** —— 而 M6 手册 §〇第 4 条与 §2.1 的 S4 都直接引用 `OPEN-M5-1`，构成「引用了一个登记册里不存在的条目」 | 延至 M6 S4 处置：环境变量注入静态 token + 请求头校验，**默认关**（未配即完全不开鉴权，保证 M5 既有 `compose --profile app up` 用法不变） | 无外部阻塞，纯实现 | M6 的 S4 完成且 `deploy/README.md` 的「仅供内网」标注可移除时 | **RESOLVED**（2026-10-05） | 由 M6 S4（F6 批次）关闭：`IIP_AUTH_TOKEN` 环境变量注入 → `X-IIP-Token` 请求头用 `crypto/subtle.ConstantTimeCompare` 校验；新增轻量会话端点 `GET /api/v1/auth/session` 作为 token 下发途径（因 `web/src/uiconfig.ts` 明确约定「注入内容不含任何密钥」，不能借 `__IIP_UI__` 下发）；豁免 `/healthz`（容器 healthcheck 依赖且不可能带自定义头）与 `/api/v1/auth/session` 自身（否则前端取不到 token 即死锁）。真二进制验收 17 PASS / 0 FAIL，变异测试确认判据有鉴别力。`deploy/README.md` 的「仅供内网」标注**保留**（本条关闭的是「无访问控制」，不是「可以公网暴露」）—— 静态 token 只挡误连，不等于多因素认证 |
 | 2026-10-07 | M6 S1 登记 | **OPEN-M6-2**：k8s 与 trace 两类证据在当前判据下**恒为「无法评估」**，模板「部署变更与指标突变」永远不会被触发 | 2026-10-07 实测采集器写入的 Metadata 键：k8s 写 `occurrences`/`matched`/`rollout_ok`/`replicas`/`ready`，trace 不写任何可比字段；两者都**没有 `change_ratio`**，而 `Assess` 只认 `change_ratio` | **保持现状**（留空符合手册 §4.3 第 2 条「给不出依据的仍留空」），不为凑覆盖率给它们硬编一个强度值。代价是deployment 类假设在 k8s 证据上无法触发，这一点必须如实告知使用者，不能装作模板都可用| 无（不需要外部条件，是一笔明确的取舍） | 给 k8s 采集器补一个可比的强度字段（如 rollout 失败比例的变化倍数）后 | **OPEN（2026-10-07 部分细化）** | 已由 k8s Warning 事件侧补上可信 `change_ratio`：`k8s.go` 对 events 只发一次请求、时间过滤在客户端做，故基线窗口数据本就在手里，拆成两桶是纯客户端改动（新增 `internal/collectors/k8s_baseline.go`，写 `matched`/`matched_before`/`change_ratio`，`matched_before==0` 时改写 `novelty` 不给假倍数）。**本条不关闭**：① rollout 侧 K8s API 不保留历史副本数，确实给不出，已改为写 `baseline` 说明键（落`Assess` 第①步而非第②步，让 basis 说清「K8s 没有历史数据」而不是「采集器忘了写」）；② trace 侧完全未处理。模板「部署变更与指标突变」现已可由 Warning 事件侧触发，但触发依据是**事件窗口倍数**而非「发布变更本身的强度」。判据有效性由变异测试证明（`D:\_iip_setup\_m62_mut.py`，正向 6/6 变红、反向 5/5 全绿、还原 sha256 一致） |
 | 2026-10-07 | M6 新登记 | **OPEN-M6-3**：k8s 采集器默认不注册，`change_ratio` 补齐后**在默认部署里零可观测变化** | `IIP_EVIDENCE_K8S_ENABLED` 默认 false（偏差 B1，理由见 `k8s.go` 文件头：仓库零 K8s 依赖，无 kubeconfig / RBAC / compose 服务）⇒ `verify-func.py` 与 `verify-images.py` 都跑不到这条路径 | **不为验收而打开开关**。接入是部署侧的事（用户自带集群 + kubeconfig），写一个接不上任何真实集群却「看起来在工作」的采集器比不写更危险 | 需真实 K8s 集群 + kubeconfig + RBAC 授权 | 用户接入真实集群后，在容器链路里观察到 deployment 类证据的 `change_ratio` 非空且随数据变化 | **OPEN** | 登记此条是为了让「本次改动未被任何端到端链路验过」这件事**可追溯** —— 否则下一个读报告的人会以为 k8s 路径已实测。现有证据只有 mock server 单测 + 变异测试 |

@@ -19,6 +19,7 @@ import (
 
 	"github.com/yu/iip/internal/evidence"
 	"github.com/yu/iip/internal/incident"
+	"github.com/yu/iip/internal/metrics"
 	"github.com/yu/iip/internal/rca"
 	"github.com/yu/iip/internal/task"
 )
@@ -108,6 +109,9 @@ type Processor struct {
 	logger    *slog.Logger
 	cfg       Config
 
+	// metrics 永不为 nil（未注入时为 metrics.Noop()），见 SetMetrics。
+	metrics *metrics.Metrics
+
 	// now 是可注入时钟；nil 时取 time.Now().UTC()。
 	now func() time.Time
 }
@@ -136,7 +140,20 @@ func NewProcessor(
 		timeline:  timeline,
 		logger:    logger,
 		cfg:       cfg.withDefaults(),
+		metrics:   metrics.Noop(),
 	}
+}
+
+// SetMetrics 注入自监控指标（M6 T6.3）。
+//
+// 用 setter 而不是加构造参数：NewProcessor 已有 7 个参数，再塞一个会让
+// 每个既有调用点与测试都得改，而指标是纯旁路能力，本不该影响装配形态。
+// 传 nil 兜底为 Noop —— 否则下一次 RunOnce 就是 nil 解引用。
+func (p *Processor) SetMetrics(m *metrics.Metrics) {
+	if m == nil {
+		m = metrics.Noop()
+	}
+	p.metrics = m
 }
 
 // RunOnce 执行一轮：回收超时任务 → 领取一批 → 逐条执行。
@@ -154,6 +171,10 @@ func (p *Processor) RunOnce(ctx context.Context) (int, error) {
 			slog.String("error", err.Error()),
 			slog.Duration("stale_after", p.cfg.StaleAfter))
 	} else if n > 0 {
+		// 回收条数按「本次回收了几个任务」累加，不是按「回收了几次」：
+		// 一次 tick 里回收 12 个与回收 1 个是完全不同的信号
+		//（前者说明有批 worker 一起崩了），而这个计数正是用来看这个的。
+		p.metrics.TaskRetry.WithLabelValues(metrics.RetryStaleReclaim).Add(float64(n))
 		p.logger.Warn("回收了超时未完成的任务",
 			slog.Int64("reclaimed", n),
 			slog.Duration("stale_after", p.cfg.StaleAfter))
@@ -227,6 +248,7 @@ func (p *Processor) processOne(ctx context.Context, t *task.Task) error {
 		Service:    target.Service,
 		Window:     win,
 	})
+	p.observeCollectorDurations(results)
 	p.logCollectorResults(incidentID, results)
 
 	// 「全部采集器都失败」才判任务失败（手册 §4.3）。
@@ -292,8 +314,16 @@ func (p *Processor) fail(ctx context.Context, t *task.Task, cause error) error {
 		// 连「标记失败」都失败（多半是这行已被超时回收）。
 		// 返回原始原因：调用方看到的应该是「采集失败」这个真问题，
 		// 而不是「标记失败失败」这个派生问题。
+		//
+		// 这里**不**计 attempt_failed：标记失败意味着这次失败没被记录下来，
+		// 把它算进重试计数会让「失败次数」与任务行的 attempts 对不上，
+		// 而那个不一致正是排查重试风暴时唯一可信的对照。
 		return fmt.Errorf("%w（且标记失败也失败: %v）", cause, err)
 	}
+	// 进死信的那次也算 attempt_failed：它确实执行失败了一次，
+	// 「最后一次失败」与「前两次失败」对容量规划同样有意义。
+	// 「是否进死信」由日志与 task 状态表达，不需要在指标上再分一档。
+	p.metrics.TaskRetry.WithLabelValues(metrics.RetryAttemptFailed).Inc()
 	p.logger.Warn("采集任务失败，已安排重试或进死信",
 		slog.Int64("task_id", t.ID),
 		slog.Int("attempts", updated.Attempts),
@@ -309,6 +339,21 @@ func (p *Processor) fail(ctx context.Context, t *task.Task, cause error) error {
 			slog.String("last_error", updated.LastError))
 	}
 	return cause
+}
+
+// observeCollectorDurations 把每个采集器的耗时记进直方图（T6.3）。
+//
+// 失败的那些**也记**：CollectAll 对失败的调用同样计时，而「某个采集器
+// 一直超时」恰恰是最该被看到的形态 —— 只记成功的会把这条线索整段丢掉，
+// 表现出来就是「证据突然变少，但所有耗时指标都很健康」。
+//
+// 按索引取址而非 range 拷贝：CollectorResult 带切片与 error，
+// 复制一份纯属浪费（gocritic rangeValCopy）。
+func (p *Processor) observeCollectorDurations(results []evidence.CollectorResult) {
+	for i := range results {
+		r := &results[i]
+		p.metrics.EvidenceDuration.WithLabelValues(string(r.Source)).Observe(r.Duration.Seconds())
+	}
 }
 
 // logCollectorResults 逐采集器记录结果。

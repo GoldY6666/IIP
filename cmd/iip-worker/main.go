@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -25,6 +27,7 @@ import (
 	"github.com/yu/iip/internal/db"
 	"github.com/yu/iip/internal/evidence"
 	"github.com/yu/iip/internal/logging"
+	"github.com/yu/iip/internal/metrics"
 	"github.com/yu/iip/internal/partition"
 	"github.com/yu/iip/internal/repository"
 	"github.com/yu/iip/internal/store"
@@ -34,6 +37,14 @@ import (
 const (
 	heartbeatInterval = 60 * time.Second // 心跳日志间隔
 	drainTimeout      = 15 * time.Second // drain 等待 in-flight 的上限
+
+	// metricsShutdownTimeout 是关闭指标监听的上限（T6.3）。
+	// 取 3s：它只服务 Prometheus 抓取，没有业务请求，
+	// 快速关掉不会丢任何东西。
+	metricsShutdownTimeout = 3 * time.Second
+	// metricsReadHeaderTimeout 是指标端点的读头超时。
+	// 只读端点也该有上限：没有它，一个只发一半头的连接能一直占着。
+	metricsReadHeaderTimeout = 5 * time.Second
 )
 
 // version 由构建时注入：-ldflags "-X main.version=v0.0-m0"。
@@ -86,6 +97,17 @@ func run() error {
 		logger,
 	)
 
+	// T6.3：自监控指标。worker 没有 HTTP 服务，故单独监听一个只读端口
+	// （理由见 internal/config/metrics.go 的 DefaultWorkerMetricsAddr）。
+	//
+	// 起不来只 WARN 不退出：指标是旁路能力，让「监控端口被占」
+	// 把采集进程拖死是方向反了 —— 那时连证据都不采了。
+	m := metrics.New()
+	proc.SetMetrics(m)
+	if srv := startWorkerMetrics(logger, cfg.WorkerMetricsAddr, m); srv != nil {
+		defer shutdownWorkerMetrics(srv)
+	}
+
 	// T7.1（ADR-022）：分区维护器。挂在 worker 而不是 server：server 是
 	// 请求路径（webhook 插入有 23514 重试兜底），补建/清理这类周期性
 	// 旁路职责应由后台进程承担。三个参数全部来自配置，默认值见 config。
@@ -109,6 +131,57 @@ func run() error {
 
 	p := newPoller(logger, proc, maint, cfg.PartitionMaintenanceInterval)
 	return p.loop(ctx, cfg.WorkerPoll)
+}
+
+// startWorkerMetrics 在独立端口上暴露 /metrics（T6.3）。
+//
+// 返回 nil 表示**未启用**（地址为空）或**起不来**（端口被占等），
+// 两种情形调用方都只需跳过 defer，采集流程不受影响。
+//
+// 先 net.Listen 再 Serve，而不是直接 ListenAndServe：
+// 后者的错误只出现在 goroutine 里，启动流程早已继续 —— 日志末尾一行 WARN
+// 极容易被忽略，而「以为指标在跑、其实一条没抓」是自监控最坏的死法。
+// 显式 Listen 让端口冲突在启动阶段就摆到台面上。
+func startWorkerMetrics(logger *slog.Logger, addr string, m *metrics.Metrics) *http.Server {
+	if strings.TrimSpace(addr) == "" {
+		logger.Info("worker 指标端点未启用（IIP_WORKER_METRICS_ADDR 为空）")
+		return nil
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		logger.Warn("worker 指标监听失败，/metrics 不可用（采集不受影响）",
+			slog.String("addr", addr),
+			slog.String("error", err.Error()))
+		return nil
+	}
+	// srv.Addr 记的是**实际**监听地址（端口 0 时由内核分配），
+	// 便于日志与用例拿到真实端口；Serve 本身用的是 ln。
+	srv := &http.Server{
+		Addr:              ln.Addr().String(),
+		Handler:           m.Handler(),
+		ReadHeaderTimeout: metricsReadHeaderTimeout,
+	}
+	go func() {
+		logger.Info("worker 指标端点已启用",
+			slog.String("addr", srv.Addr),
+			slog.String("path", "/metrics"))
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// 走到这里说明监听已经建立、后来坏了（如 fd 耗尽）。
+			// 仍不退出：指标坏掉不该连带停掉采集。
+			logger.Warn("worker 指标服务异常退出", slog.String("error", err.Error()))
+		}
+	}()
+	return srv
+}
+
+// shutdownWorkerMetrics 关闭指标监听；失败只记不返，退出路径不该被它拖住。
+func shutdownWorkerMetrics(srv *http.Server) {
+	if srv == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), metricsShutdownTimeout)
+	defer cancel()
+	_ = srv.Shutdown(ctx)
 }
 
 // buildRegistry 按配置装配采集器注册表。

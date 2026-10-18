@@ -263,7 +263,18 @@ iip/
   - **滑动窗口而非固定窗口**：固定窗口在边界会漏掉已发消息（t0 与 t0+9m59 各一条后，t0+10m 起算的新窗口可再发 2 条 ⇒ 10 分 2 秒内 4 条）；`TestLimiterWindowIsSlidingNotFixed` 专抓这条，变异成固定窗口后该用例红。
   - **两个 sink 拒绝重定向**：实测默认跟随会把请求体与 `Authorization` 头发给第三方（变异验证时「第三方」收到 2 次请求）。
   - 判据：限流 6 例 + 通用 webhook 5 例 + 配置用例；变异 5 处全红；真栈探针一条告警 + 四次流转，两出口均 4 条（mitigated 被抑制、resolved 必发）、日志无 token、退出码 0。
-- [ ] T6.3 自监控 `/metrics`：`alert_ingest_total`、`webhook_duration_seconds`、`dedup_hit_ratio`、`correlation_score_bucket`（直方图）、`incident_created_total`、`evidence_collect_duration_seconds`、`task_retry_total`（1.5d）
+- [x] T6.3 自监控 `/metrics`：`alert_ingest_total`、`webhook_duration_seconds`、`dedup_hit_ratio`、`correlation_score_bucket`（直方图）、`incident_created_total`、`evidence_collect_duration_seconds`、`task_retry_total`（1.5d）
+  - 2026-10-18 实施完成：`internal/metrics`（叶子包，7 个仪器 + 每实例**独立注册表**）+ 三处注入（`alert.Service` / `correlation.Service` / `worker.Processor`，`nil` 兜底为 `Noop`）+ server `/metrics` 端点 + worker 独立监听（默认 `:9091`）。决策记录 **ADR-026**。
+  - **三个裁定**（禹 2026-10-18）：① 用官方 `prometheus/client_golang`（非手写 exposition）；② 比率**不落 Gauge**，改「计数器 + PromQL」；③ worker **加独立监听**。实施时另定：注册表**不用全局默认表**（单测会重复注册 panic 且数值互相污染）、server 指标**默认开**（与通知类开关方向相反：指标不出站、不含告警内容，默认关的代价是线上才发现没开）。
+  - **与计划原文的三处偏差（如实记录）**：
+    ① `alert_ingest_total` 等统一加 `iip_` 前缀（避免与业务系统同名指标撞车）；
+    ② `dedup_hit_ratio` **拆为** `iip_alert_dedup_total{result=hit|miss|race}` —— 比率由 PromQL 算，且新增 `race`（判 miss 后插入撞唯一约束 = 并发去重兜底真的生效，它是唯一能证明「两个 webhook 同时到了」的信号）；
+    ③ `correlation_score_bucket` 落地为 `iip_correlation_score{action}` 直方图，桶按**分数值域** 0.1 步长给，不用耗时默认桶。
+  - **不变量**：`dedup{hit}+dedup{miss} == ingest{stored}+ingest{duplicate}`（`race` 是 miss 子集，不参与等式）。这条比分别断言四个数更能抓漏埋点。
+  - **标签纪律**：任何标签都不取事件/告警/服务维度（无界基数），`TestLabelNamesAreBounded` 是正向白名单 + 反向黑名单的机器守卫。
+  - **端点契约**：`/metrics` 与 `/healthz` 同级、**不受 `IIP_AUTH_TOKEN` 保护**（Prometheus 不带业务 token）；`IIP_METRICS_ENABLED=false` 时不注册路由（404 而非 403）。worker 端口被占用**只 WARN 不退出**（指标是旁路，不该拖死采集）；compose 给 worker 加 `expose: 9091`（不发布到宿主机）。
+  - 判据：新包 6 例 + 埋点侧 29 例；**变异 11/11 全红**；真栈探针（真 PG + 真 server + 真 worker + 假 Prometheus）**6 阶段全 PASS**（含「worker 指标只在真采到证据后出现」与「两个注册表确实独立」）；全量真库 **1088 PASS / 1 SKIP / 0 FAIL**；lint `0 issues`。
+  - **未做**：抓取配置示例与 Grafana 面板（T6.4）；抑制次数升级为指标（仍只有 INFO 日志，理由见 ADR-026 的 Related ADRs）。
 - [ ] T6.4 部署侧 Prometheus 抓取配置示例 + 基础面板 JSON（0.5d）
 - [ ] T6.5 操作者文档《5 分钟接入 Alertmanager》（0.5d）
 

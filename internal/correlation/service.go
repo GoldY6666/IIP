@@ -9,6 +9,7 @@ import (
 
 	"github.com/yu/iip/internal/alert"
 	"github.com/yu/iip/internal/incident"
+	"github.com/yu/iip/internal/metrics"
 )
 
 // Result 是单条告警的关联结论。
@@ -38,6 +39,8 @@ type Service struct {
 	evidenceTasks EvidenceEnqueuer
 	// notifier 为 nil 时不发通知（M2/M3/M4 行为，M6 T6.1 挂上）。
 	notifier Notifier
+	// metrics 永不为 nil（未注入时为 metrics.Noop()），见 metrics.go。
+	metrics *metrics.Metrics
 	// now 是可注入时钟；nil 时取 time.Now().UTC()，让「留痕时间」可被精确断言。
 	now func() time.Time
 }
@@ -47,7 +50,13 @@ func NewService(incidents IncidentStore, cfgStore ConfigStore, topo *Topology, l
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{incidents: incidents, config: cfgStore, topo: topo, logger: logger}
+	return &Service{
+		incidents: incidents,
+		config:    cfgStore,
+		topo:      topo,
+		logger:    logger,
+		metrics:   metrics.Noop(),
+	}
 }
 
 // CorrelateAlerts 对一批「新落库的告警」做关联（webhook persist 成功后调用）。
@@ -150,6 +159,9 @@ func (s *Service) correlateOne(
 		action = ActionNew
 	}
 
+	// 记最终分数（抑制降级之后，见 metrics.go 的说明）。
+	s.observeScore(action, bestScore)
+
 	switch action {
 	case ActionMerge:
 		if err := s.link(ctx, bestIncident, v, &bestScore, false); err != nil {
@@ -182,6 +194,10 @@ func (s *Service) correlateOne(
 		if err != nil {
 			return Result{}, fmt.Errorf("新建事件失败: %w", err)
 		}
+		// 只数真正建出来的事件（CreateIncident 成功之后）：
+		// 放在 error 提前返回之前会让「建失败」也算进事件数，
+		// 而那个数字正是用来看「告警风暴有没有被正确聚合」的。
+		s.metrics.IncidentCreated.Inc()
 		// NEW 档写「事件创建」而不是「告警合入」：这条告警是事件的起因，
 		// 语义上不同于「并入一个已存在的事件」，前端要能区分两者。
 		s.appendTimeline(ctx, incident.NewAlertFiredEntry(inc.ID, v.ID, v.Fingerprint, s.nowUTC()), "create")

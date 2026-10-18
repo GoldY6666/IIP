@@ -345,6 +345,13 @@ type CollectorResult struct {
 
 	// DropReason 说明丢弃原因（第一条）。
 	DropReason error
+
+	// Duration 是本次采集调用的耗时（含超时与失败的那些）。
+	//
+	// 由 CollectAll 测量而不是让采集器自己报：超时/失败时采集器根本没机会
+	// 返回任何东西，而「失败也耗时」恰恰是排查「谁把整轮拖慢了」的关键。
+	// 在本层测还能保证口径一致 —— 各处自己计时，有人算上解析、有人只算 HTTP。
+	Duration time.Duration
 }
 
 // CollectAll 依次调用注册表里的每个采集器，**单个失败不影响其余**。
@@ -358,8 +365,11 @@ func CollectAll(ctx context.Context, reg *Registry, in Input) ([]Evidence, []Col
 	all := make([]Evidence, 0, len(collectors))
 
 	for _, c := range collectors {
+		// 计时包住整个 Collect 调用（含超时等待）：失败耗时同样是有效信息，
+		// 只给成功的那些计时会让「某个采集器把整轮拖到超时」在指标上消失。
+		started := time.Now()
 		got, err := c.Collect(ctx, in)
-		res := CollectorResult{Source: c.Source(), Err: err}
+		res := CollectorResult{Source: c.Source(), Err: err, Duration: time.Since(started)}
 		if err == nil {
 			// 单条非法证据不该拖垮整个采集器：跳过它，其余照收。
 			for _, e := range got {

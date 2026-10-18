@@ -327,10 +327,19 @@ services:
         condition: service_healthy
       loki:
         condition: service_healthy
-    # worker 无监听端口，无法用端口/HTTP 探活。
-    # 它靠 polling 循环持续查库，进程活着即正常工作，
-    # 因此健康判定退化为「进程是否仍在运行」——由 restart 策略兜底。
-    # 这里显式不配 healthcheck，避免制造一个无意义的假探针。
+    # T6.3：worker 的指标端口。用 expose 而不是 ports ——
+    # 后者会把端口发布到宿主机，等于默认把「进程数/任务重试速率」这类
+    # 侦察素材暴露给宿主网络。要抓取时由 compose 网络内的 Prometheus
+    # 直连 `iip-worker:9091`；本机调试需要外部访问时再临时加 ports。
+    #
+    # 与 `IIP_WORKER_METRICS_ADDR` 默认值（:9091）配套，改一处必须改另一处。
+    expose:
+      - "9091"
+    # 仍然**不配 healthcheck**：worker 的指标端点只服务 Prometheus，
+    # 不是业务探针；镜像为 distroless（无 sh/curl/wget），凑一个「假探针」
+    # 只会得到恒 healthy 的噪声。存活判定仍由 restart 策略兜底。
+    # 注意「worker 无监听端口」这句话自 T6.3 起**不再成立**（它有 :9091），
+    # 但它依然没有业务 HTTP 端口 —— 两者的区别正是这里不配 HTTP 探针的理由。
 
 volumes:
   postgres_data:

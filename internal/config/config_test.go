@@ -116,6 +116,29 @@ func mergeT62(base Config) Config {
 	return base
 }
 
+// t63Defaults 返回 T6.3 自监控指标字段的默认取值（ADR-026）。
+//
+// 与其余 *Defaults 同一理由：用例里不内联这些字段，避免漏写后
+// 以零值参与比较、失败信息却只说「配置不匹配」。
+func t63Defaults() Config {
+	return Config{
+		MetricsEnabled:    DefaultMetricsEnabled,
+		WorkerMetricsAddr: DefaultWorkerMetricsAddr,
+	}
+}
+
+// mergeT63 把 T6.3 字段的默认值合并进 base。
+//
+// 哨兵用 MetricsEnabled 的零值（false）：默认是 true，故「未书写」
+// 与「默认」正好互补。要测「关掉指标」的用例请走 metrics_test.go ——
+// 本表把 false 当作「未书写」，那样写在表里会静默失效。
+func mergeT63(base Config) Config {
+	d := t63Defaults()
+	base.MetricsEnabled = d.MetricsEnabled
+	base.WorkerMetricsAddr = d.WorkerMetricsAddr
+	return base
+}
+
 // t71Defaults 返回 T7.1 分区维护字段的默认取值集合（ADR-022）。
 //
 // 沿 m4Defaults / m5Defaults 的同一理由：集中列举，避免用例里逐个内联
@@ -453,6 +476,10 @@ func TestLoad_DefaultsAndOverrides(t *testing.T) {
 			// T6.2 同理：NotifyWebhookTimeout 默认 5s 非零。
 			if want.NotifyWebhookTimeout == 0 {
 				want = mergeT62(want)
+			}
+			// T6.3 同理：MetricsEnabled 默认 true、WorkerMetricsAddr 默认 :9091。
+			if !want.MetricsEnabled {
+				want = mergeT63(want)
 			}
 			if *got != want {
 				t.Fatalf("配置不匹配\n got=%+v\nwant=%+v", *got, want)

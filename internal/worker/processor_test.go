@@ -30,12 +30,18 @@ type fakeCollector struct {
 	evs  []evidence.Evidence
 	err  error
 	seen []evidence.Input // 记录收到的输入，供断言窗口/服务名
+
+	// delay 让 Collect 真的耗时，用于验证采集耗时真的进了指标（T6.3）。
+	delay time.Duration
 }
 
 func (f *fakeCollector) Source() evidence.Source { return f.src }
 
 func (f *fakeCollector) Collect(_ context.Context, in evidence.Input) ([]evidence.Evidence, error) {
 	f.seen = append(f.seen, in)
+	if f.delay > 0 {
+		time.Sleep(f.delay)
+	}
 	return f.evs, f.err
 }
 
@@ -52,6 +58,10 @@ type fakeStore struct {
 	completed []int64             // 记录被标记成功的任务 id
 	cursorSet map[int64]time.Time // 记录写入的游标
 	failed    []int64
+
+	// reclaimed 是 ReclaimStale 的返回值，用于验证回收条数被累加进指标（T6.3）。
+	// 默认 0，故不影响既有用例。
+	reclaimed int64
 }
 
 func newFakeStore() *fakeStore {
@@ -124,7 +134,11 @@ func (f *fakeStore) Fail(_ context.Context, id int64, _ time.Duration, maxAttemp
 	return task.Task{ID: id, Status: status, Attempts: maxAttempts, LastError: lastErr}, nil
 }
 
-func (f *fakeStore) ReclaimStale(context.Context, time.Duration) (int64, error) { return 0, nil }
+func (f *fakeStore) ReclaimStale(context.Context, time.Duration) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reclaimed, nil
+}
 
 func (f *fakeStore) LastWindowEnd(context.Context, int64) (time.Time, error) { return time.Time{}, nil }
 
