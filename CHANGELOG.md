@@ -11,6 +11,25 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **HTTP 入口加固：三个 JSON 入口收成一个 `readBody`（T6.6 / ADR-027）**。
+  这次不是加功能，是**修掉两个一直在的语义缺陷**：
+  - `POST /api/v1/incidents/{id}/comments` 把「请求体超限」报成 **400
+    「不是合法 JSON 或含未知字段」**。原因：`decodeStrict` 直接
+    `json.NewDecoder(r.Body)` 读流，`MaxBytesReader` 的超限错误被 `Decode`
+    一并返回后落到同一个错误分支。另两个入口都有 413 用例，**唯独它没有**，
+    所以从 M3 起就没被发现。现三个入口统一 **413**。
+  - **非 UTF-8 请求体（GBK 等）从 503 变成 400**，且报在**解码之前**。
+    改之前 `encoding/json` 不校验字符串的 UTF-8 合法性，非法字节一路进到
+    PG 才被 `SQLSTATE 22021` 拒掉 ⇒ 接口回 **503（存储不可用）**，
+    「客户端编码错了」被报成「IIP 存储坏了」，运维会去查 PG。现回
+    **400** 并给出编码提示，日志记 `first_invalid_offset`（第一个坏字节偏移）。
+  - 不变量：**同一类坏输入在任何 JSON 入口得到同一状态码与同一文案**。
+    判据是 3 入口 × 2 类坏输入的矩阵（`internal/api/body_test.go`），
+    加一个「合法 UTF-8 不能被误杀」的反面用例；变异 5/5 全红。
+  - **不改任何体积上限**，`bytes.NewReader` 不复制 body，内存峰值不变；
+    ADR-010 的 `DisallowUnknownFields` 原样保留。
+  - **本改动不阻止 Alertmanager 重试**（它对任何非 2xx 都重试），
+    价值是**正确诊断**而非抑制风暴；限流与 CORS 未做，理由见 Known limitations。
 - **接入指南 + 可执行验收（T6.5）**：`docs/接入指南-Alertmanager.md` 是操作侧文档
   （receiver 配置 → 手发验证 → 数据/指标/收尾三处确认 → payload 契约 → 排错表 →
   通用 HTTP 源 → checklist），与 M1 手册的开发侧契约互相引用。
@@ -104,6 +123,13 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Changed
 
+- **非 UTF-8 请求体：503 → 400（T6.6 / ADR-027，产品行为变更）**。此前
+  GBK 等非 UTF-8 编码的请求体会一路走到落库，PG 回 `SQLSTATE 22021`，
+  接口报 **503（存储不可用）**；现三个 JSON 入口在解码前统一挡成
+  **400** 并提示编码问题。**对调用方是可见的行为变更**：原先拿到 503 的
+  客户端现在拿到 400 —— 这不是回归，是原先把客户端错误报成了服务端故障。
+  正确修法仍然是把请求体换成 UTF-8（命令行内联中文极易被终端按本地代码页
+  转码，用 `--data-binary @file` 或纯 ASCII 更稳）。
 - **M0 烟测规则停用（T6.4）**：`deploy/prometheus/rules/highlatency.yml` 改名为
   `highlatency.yml.example`。里面两条规则是 M0 用来验证「Prometheus → Alertmanager →
   webhook」链路的**恒真假规则**；链路自 M1 起就是真的了，于是它们每 4 小时往
@@ -127,12 +153,23 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Known limitations
 
-- **非 UTF-8 请求体被报成 503（T6.5 发现，未改，待裁定）**：`json.Unmarshal` 不校验
-  字符串的 UTF-8 合法性，故 GBK 等编码的请求体能通过解析，直到落库时 PG 报
-  `无效的 "UTF8" 编码字节顺序 (SQLSTATE 22021)`，接口回 **503（存储不可用）**。
-  表现为「客户端编码错了」却报成「IIP 存储坏了」，且 Alertmanager 会按失败一直重试。
-  候选修法：handler 入口 `utf8.Valid(body)` 不合法直接 **400** 并说明编码问题。
-  属产品行为变更，本轮只记录；文档侧已规避（中文别内联在命令行，用 `-d @file`）。
+- **告警入口不做限流（T6.6 裁定，ADR-027）**：给 `/api/v1/alerts/webhook` 加
+  速率限制，在**风暴**这个它唯一需要被用上的场景里会起反作用 ——
+  429 会触发 Alertmanager 退避重试，于是**最新的告警**被排在退避队列后面，
+  而风暴中最贵的恰恰是最新告警的时延。兜底交给上游：Alertmanager 自带
+  `group_wait`/`group_interval` 与重试；入口侧只做「体量上限 + 编码校验 + 落库幂等」
+  三件事。若将来必须限流，正确位置是**反代/网关**（可返回 `Retry-After`），
+  不是应用内。
+- **不开 CORS（T6.6 裁定，ADR-027）**：UI 与 API 由同一个进程同源提供
+  （8080 静态托管 + `/api/v1/*`），没有任何跨源需求。默认开
+  `Access-Control-Allow-Origin: *` 是安全倒退 —— 会把当前「同源才可调用」
+  这个隐式防护直接拆掉。将来若做前后端分离部署，按**白名单来源**加，
+  且必须和 `IIP_AUTH_TOKEN` 一起评估。
+- **非 UTF-8 请求体已修但只覆盖 JSON 入口（T6.6 / ADR-027）**：三个 JSON
+  入口在解码前校验 UTF-8；非 JSON 入口（`/healthz`、`/metrics`、静态文件）
+  不读请求体，无需校验。`multipart`/表单入口目前不存在，若将来新增，
+  **必须走同一个 `readBody`** —— `body_test.go` 的 `jsonEntries()` 是唯一的
+  维护点，加新入口时漏加进去，矩阵判据就管不到它。
 - **T7.1 分区只增不减**：保留期清理删行不删分区（FK 对象级依赖使 DROP 分区
   不可行），空分区长期保留；磁盘回收依赖 VACUUM。空分区顺带为历史月
   回填/重放留位，是有意取舍。

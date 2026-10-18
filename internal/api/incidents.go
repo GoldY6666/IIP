@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -235,8 +236,14 @@ func parseIncidentID(w http.ResponseWriter, r *http.Request, logger *slog.Logger
 
 // decodeStrict 解析严格 JSON 请求体（未知字段拒绝，ADR-010）。
 func decodeStrict(w http.ResponseWriter, r *http.Request, logger *slog.Logger, dst any, what string) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, incidentBodyMaxBytes)
-	dec := json.NewDecoder(r.Body)
+	// 先读字节再解码（而不是直接 Decode 流）：否则 MaxBytesReader 的超限错误
+	// 会被 Decode 一并返回，最终映射成「不是合法 JSON 或含未知字段」——
+	// 体量问题被报成语法问题，看日志的人会去改 JSON 而不是看 body 有多大。
+	body, ok := readBody(w, r, incidentBodyMaxBytes, logger)
+	if !ok {
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		logger.Warn(what+"请求体解析失败",

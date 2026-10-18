@@ -139,12 +139,20 @@ M0 已为 M1 铺好的接缝，以及 M1 需要补的动作：
 | 全部重复（已存在 firing） | **200** | `{"accepted":0,"skipped":1,...}` | **重复不是错误**，不能返 409/500 |
 | 部分单条非法 | **200** | `{...,"rejected":2,"errors":[...]}` | 合法条目照常落库，整批不失败 |
 | 请求体非 JSON / JSON 畸形 | 400 | `{"error":"..."}` | |
+| 请求体不是合法 UTF-8 | 400 | `{"error":"请求体不是合法的 UTF-8：…"}` | M6 T6.6 补：`encoding/json` 不校验字符串的 UTF-8 合法性，非法字节会一路到 PG 才以 22021 报错，届时已伪装成 503「存储不可用」。故在**解码之前**拦（ADR-027） |
 | 请求体超过大小上限 | 413 | `{"error":"payload too large"}` | 上限 `IIP_WEBHOOK_MAX_BYTES`（默认 1048576） |
 | `alerts` 为空数组 | 200 | `{"accepted":0,...}` | Alertmanager 的空 group 属正常，不作错误 |
 | 数据库不可用 | **503** | `{"error":"storage unavailable"}` | 故意的：非 2xx 会触发 Alertmanager 重试 |
 | 方法不对 | 405 | — | chi 默认 |
 
 **幂等要求**：同一 payload 重复投递任意次，结果必须一致（表内行数与内容不变），且始终 200。**这是硬要求**——Alertmanager 在超时/非 2xx 时会重试。
+
+**入口统一走 `readBody`（M6 T6.6，ADR-027）**：任何需要读 JSON 请求体的 handler
+都必须调用 `internal/api/body.go` 的 `readBody(w, r, maxBytes, logger)`，不要自己写
+`io.ReadAll` / `json.NewDecoder(r.Body)`。前者会漏掉 UTF-8 校验，后者会把
+`MaxBytesReader` 的超限错误并进 `Decode` 的返回里（413 变 400）。**新入口除了接入
+`readBody`，还要把用例加进 `body_test.go` 的 `jsonEntries()`** —— 那是矩阵判据唯一的
+维护点，漏加就等于没被覆盖。
 
 **超时**：handler 内 `context.WithTimeout(r.Context(), 5*time.Second)`。
 

@@ -572,6 +572,7 @@
 | ADR-024 | T6.1 Slack 通知：默认关闭 + 异步 best-effort + 失败静默丢弃 | 已实施（`internal/notify` 叶子包 + 两处 hook；真库真栈探针 PASS，含竞态修复与标题去重；T6.2 的范围边界已在 ADR 内划清） |
 | ADR-025 | T6.2 通知去风暴（滑动窗口 2 条/10 分钟 + 终态白名单）+ 通用出站 webhook | 已实施（终态/重开必发由禹裁定；档位固定常量；两个 sink 拒重定向；变异 5 处全红，真栈探针 4/4 条数断言） |
 | ADR-026 | T6.3 自监控 `/metrics`：每实例独立注册表 + 无界标签禁令 + worker 独立监听 | 已实施（禹裁定官方 client_golang / 计数器+PromQL / 独立监听；比率不落 Gauge；变异 11/11 全红，真栈探针 6 阶段 PASS，真库 1088 PASS/1 SKIP/0 FAIL） |
+| ADR-027 | T6.6 三个 JSON 入口收成一个 `readBody`：非法 UTF-8 在解码前挡成 400，超限统一 413 | 已实施（修掉两个活缺陷：incidents 入口 413 被吞成 400、非 UTF-8 一路走到 PG 才爆成 503；矩阵判据 3 入口 × 2 类坏输入 + 反面用例；变异 5/5 全红。**同批裁定不做限流、不做 CORS**，理由写入 `deploy/README.md` 与 CHANGELOG Known limitations） |
 
 ---
 
@@ -1063,6 +1064,64 @@ ADR-026：T6.3 自监控 `/metrics` —— 独立注册表、比率不落 Gauge�
   - 全量真库回归：**1088 PASS / 1 SKIP / 0 FAIL**（`_t63_regression_v.txt`，
     143.6s；唯一 SKIP 是既有的 `TestHandlerAllowsSymlinkedRoot`，Windows 无
     建符号链接权限）。lint `0 issues`。
+
+---
+
+ADR-027：三个 JSON 入口收成一个 `readBody`，非法 UTF-8 在解码前挡成 400
+
+- **Background**: T6.6 做 HTTP 入口加固时把三个 JSON 入口的读取逻辑并排看了一遍
+  （`alert_webhook.go` 的 `readBody`、`correlation_config.go` 的内联块、
+  `incidents.go` 的 `decodeStrict`），发现它们的差异不是「重复代码」而是
+  **错误语义不一致**：
+  - **413 被吞成 400（活缺陷）**：`decodeStrict` 直接 `json.NewDecoder(r.Body)`
+    读流，`http.MaxBytesReader` 的超限错误被 `Decode` 一并返回，随后统一映射成
+    「请求体不是合法 JSON 或含未知字段」⇒ 体量问题被报成语法问题。另外两个入口
+    都有 413 用例，**唯独这个入口没有**，所以它一直没被发现。
+  - **非法 UTF-8 一路走到写库才爆（活缺陷）**：三个入口都不校验 UTF-8。
+    Go 的 `encoding/json` 按规范应当拒绝非法字节，实际上它只把字节原样留在
+    `string` 里；直到 PG 以 `SQLSTATE 22021` 拒掉，接口回 **503
+    「storage unavailable」** —— 客户端编码错误被报成服务端存储故障，运维会去查 PG。
+    该缺陷最初由 T6.5 的真栈验收暴露（`verify-onboarding.py` 里命令行内联中文被
+    MINGW 按 GBK 转码，PG 回 22021）。
+- **Decision**: 收成 `internal/api/body.go` 的单一 `readBody(w, r, maxBytes, logger)
+  ([]byte, bool)`，三个入口全部接入；`decodeStrict` 改为「先读字节 → 
+  `bytes.NewReader` → `json.Decoder`」，保住 ADR-010 的 `DisallowUnknownFields`。
+  三层检查的**顺序固定**：① `MaxBytesReader` 先设上限（不能「先 ReadAll 再判长度」，
+  那样上限本身成了内存打满入口）；② `ReadAll` 的其他错误 → 400 + 日志；
+  ③ UTF-8 合法性 → 400，且**必须在解码之前**。日志记 `first_invalid_offset`，
+  让人不必猜「整段哪里坏了」。
+- **不变量（判据抓的就是这条）**: 同一类坏输入在**任何** JSON 入口都得到
+  同一状态码与同一文案。它抓的不是今天的三个入口，而是「以后加第四个入口又各写
+  一套」—— `body_test.go` 的 `jsonEntries()` 是唯一需要人维护的地方。
+- **Consequences**:
+  - 413 在 incidents 入口恢复；非 UTF-8 从「503 存储不可用」变成
+    「400 + 指明编码问题」，**根因与故障层对上**。
+  - **不改任何上限值**（webhook 1 MiB / correlation config / incident body 原值）；
+    `bytes.NewReader` 不复制 body，内存峰值不变。
+  - **不阻止 Alertmanager 重试**。它对任何非 2xx 都会重试，所以本次改动的价值是
+    **正确诊断**，不是「抑制风暴」。这一点必须写清楚，否则会被当成限流方案。
+  - **不做限流**（与本次同批裁定）：告警入口限流会让风暴中最关键的告警延后
+    （429 触发 Alertmanager 退避重试，反而把新告警一起推后）。
+  - **不做 CORS**：UI 与 API 同源（8080 静态托管），默认开 CORS 是安全倒退。
+  - 两条「不做」的理由同时写进 `deploy/README.md` 与 `CHANGELOG` 的
+    Known limitations，避免下一个人把它当成遗漏。
+- **Related ADRs**: ADR-010（`DisallowUnknownFields` 必须保留，因此用
+  `bytes.NewReader` 而非 `json.Unmarshal`）、ADR-011（告警接入层兜底策略；
+  本次是**新增一类兜底**，不推翻既有五项）、ADR-012（入参指针化，`readBody`
+  签名按此写）。
+- **Evidence**:
+  - 单测 `internal/api/body_test.go`：413 矩阵（3 入口）、非 UTF-8 矩阵（3 入口）、
+    合法 UTF-8 反面用例、`firstInvalidUTF8` 五组偏移。**反面用例是必需的** ——
+    少了它，「一律 400」也能让上面两条矩阵全绿。
+  - **变异 5/5 全红**（`D:\_iip_setup\_mut_t66.py`）：① 去掉 UTF-8 校验；
+    ② `readBody` 一律拒绝（反向用例必须红）；③ 把 incidents 改回读流 Decode
+    （即原缺陷复现；变异体必须同时删掉 `bytes` import，否则是编译失败而非判据变红
+    —— 这一点已记录，编译失败不能算判据有鉴别力）；④ 413 改 400；⑤ 只让
+    单个入口跳过 UTF-8 校验。
+  - 真库全量回归：**1103 PASS / 0 FAIL / 1 SKIP**（`_t66_regression_final.txt`，
+    RC=0，PG 端口已停干净；唯一 SKIP 是既有的 `TestHandlerAllowsSymlinkedRoot`）。
+    较 T6.3 的 1088 恰好多 **15** = 新增 4 个用例 + 11 个子用例，
+    数字对得上说明「矩阵真的跑了」而不是被跳过了。lint `0 issues`、`fmt --diff` 干净。
 
 ---
 

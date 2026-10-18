@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 
@@ -66,15 +64,9 @@ func CorrelationConfigPut(store CorrelationConfigStore, logger *slog.Logger) htt
 			return
 		}
 
-		r.Body = http.MaxBytesReader(w, r.Body, correlationConfigMaxBytes)
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				writeError(w, logger, http.StatusRequestEntityTooLarge, msgPayloadTooLarge)
-				return
-			}
-			writeError(w, logger, http.StatusBadRequest, msgReadBodyFailed)
+		// 读取业务统一交给 readBody（413 / 400 / 非 UTF-8 的语义与其余入口一致）。
+		body, ok := readBody(w, r, correlationConfigMaxBytes, logger)
+		if !ok {
 			return
 		}
 

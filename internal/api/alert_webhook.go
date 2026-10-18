@@ -8,8 +8,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -37,6 +35,14 @@ const (
 
 	// msgReadBodyFailed 是「请求体既非超限也非 JSON 问题」时的兜底说明。
 	msgReadBodyFailed = "读取请求体失败"
+
+	// msgPayloadNotUTF8 说明「字节层面就不对」，而不是「JSON 语法不对」。
+	//
+	// 这两种错误在客户端看来都是"我发的东西被拒了"，但处置方向完全不同：
+	// 前者要去查编码（终端/脚本/文件编码），后者要去查 json 拼装。
+	// 故不能合并成一句"invalid payload"。
+	msgPayloadNotUTF8 = "请求体不是合法的 UTF-8：请以 UTF-8 编码发送" +
+		"（命令行内联非 ASCII 字符常被终端按本地代码页如 GBK 转码）"
 )
 
 // AlertIngestor 是 handler 所需的最小能力，定义在**消费方**（本包，而非 alert 包）。
@@ -100,33 +106,6 @@ func AlertWebhook(ingestor AlertIngestor, maxBytes int64, logger *slog.Logger) h
 
 		writeJSON(w, logger, http.StatusOK, result)
 	}
-}
-
-// readBody 读取请求体并施加大小上限；返回 false 表示已写出错误响应。
-//
-// 用 http.MaxBytesReader 而非先 io.ReadAll 再判断长度：前者在超限处即停止读取，
-// 不会先把超大体积读进内存——否则"限制大小"本身就成了一次内存打满攻击的入口。
-func readBody(w http.ResponseWriter, r *http.Request, maxBytes int64, logger *slog.Logger) ([]byte, bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			logger.Warn("告警 webhook 请求体超限",
-				slog.Int64("limit_bytes", maxBytes),
-				slog.String("peer_addr", appmw.PeerAddr(r)))
-			writeError(w, logger, http.StatusRequestEntityTooLarge, msgPayloadTooLarge)
-			return nil, false
-		}
-		// 上游中途断开连接等：客户端已收不到响应，但仍要留日志。
-		logger.Warn("读取告警 webhook 请求体失败",
-			slog.String("error", err.Error()),
-			slog.String("peer_addr", appmw.PeerAddr(r)))
-		writeError(w, logger, http.StatusBadRequest, msgReadBodyFailed)
-		return nil, false
-	}
-	return body, true
 }
 
 // writeJSON 写出 JSON 响应。
