@@ -452,6 +452,41 @@ iip/
   - **回归**：全量真库 **1103 PASS / 0 FAIL / 1 SKIP**，与拆分前**逐位一致**
     （用例数没变 = 纯移动的强证据）；`go build ./...` rc=0、`gofmt` 干净、lint 0 issues。
   - **不声称的**：存量 44 个文件仍未达标，基线只保证「不会更糟」。
+- [x] T7.9（**计划外新增**）把 M6 剩下的两条腿纳入一键回归：S8 通知链路 / S9 接入指南（0.5d）
+  - 2026-10-18 实施完成，决策记录 **ADR-029**。立项理由：T6.1/T6.2 的真栈收消息
+    判据此前是**一次性探针**（`_probe_t61.py`），探针删掉后回归里只剩单测；
+    T6.5 的 `verify-onboarding.py` 写好了却在 `M_MAP` 里记着「尚未编排进本 E2E」。
+    「M6 已收口」这句话里有一块是**靠记忆背书的**。**验过 ≠ 有判据；有判据 ≠ 在回归里。**
+  - **S8 = `scripts/verify-notify.py`**（真 PG 5437 + 真 server 8091 + 假出口 8899）：
+    9 条判据覆盖 NEW 档两出口各 1 条 → acknowledged → investigating（窗口第 2 条）→
+    mitigated 被去风暴抑制 → **resolved 配额满仍必发** → 出口带 `Bearer` 且日志无明文 →
+    优雅退出。**脚本自身变异 3/3 全红**（去风暴失效 / 删终态白名单 / Slack 出口漏装）。
+  - **S9 = `verify-onboarding.py`**：rc=2（本机缺 bash/curl，文档命令没执行过）映射
+    **BLOCKED**，不冒充通过；S9 端口**只预检 8090**——该脚本允许沿用已在 5434 的 PG，
+    把 5434 放进预检会在「复用成功」时先报「端口被占用」（假红）。
+  - **编排器补一条纪律**：阶段开跑前**删掉上一轮的报告**。脚本若崩在写报告之前，
+    旧文件会让 detail 显示「判据 9 PASS」——**把一次失败说成满分**。现在宁可显示
+    「rc=1（无计数）」。这一条正是接线变异 W1 逼出来的。
+  - **接线变异 5/5 全红**（`D:\_iip_setup\_mut_e2e.py`）：W1 命令换失败替身 →
+    FAIL 且 rc=1 且陈旧报告已清；W2 rc_map 把 0 判红 → 绿脚本也让阶段红；
+    W3 报告路径写错 → PASS 但**不虚报**计数；W4 rc=2 → BLOCKED、`--strict` rc=1；
+    W5 真降级 → FAIL 且日志留 `[DEGRADED]`。还原后两个脚本 sha256 逐位一致。
+  - **顺带修一个误导性结论**：无 bash/curl 的机器上，`verify-onboarding.py` 原先会同时
+    报 DEGRADED 与 FAIL，然后输出「文档与实现已经不一致」。实际上命令压根没执行，
+    下游检查（`count=0`、指标 `None`）只是没数据。现改为
+    「先解决降级再谈一致性」——**否则读报告的人会去改对的实现**。S0 提前把
+    bash/curl 列为 warn_only 检查。
+  - **不做的事**：不为了凑一个好看的数字去改 S9 的输出格式（`PASS n / FAIL m /
+    DEGRADED k`），让它被 `extract_counts` 认成 SKIP；DEGRADED 不是 SKIP。
+  - **全量一轮实测**（S0–S9，2026-10-18，362s）：S0 PASS(4s) / S1 PASS(25s) /
+    S2 PASS(106s，20 包) / S3 PASS(43s，89/0/0) / S4 PASS(31s，vitest 180 +
+    playwright 9) / S5 PASS(77s，33/0/0) / S6 PASS(58s，6/6) / S7 **BLOCKED**(2s，
+    daemon 缺席) / S8 PASS(11s，9/0/0) / S9 PASS(7s，13 判据)。
+    汇总结论 `PASS-WITH-BLOCKED`，退出码 0。
+  - **全量首轮抓到的假红（S4）**：报 `SAFE_DELETE_BULK_CONFIRM_REQUIRED count=329`
+    —— playwright 开跑时清 `web/test-results`，那里积了 329 个 trace/截图，
+    被沙箱批量删除守卫拒掉，**一条用例都没跑**。看着像产品回归，实为环境守卫。
+    修法：S4 开跑前用 Python 清两个派生物目录；复跑同参数 PASS 并落盘取证。
 
 **验收标准（= MVP 总验收）**：
 

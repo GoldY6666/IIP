@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：v0.1.0 已发布（T7.1–T7.7 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线八项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）/ T7.8（单文件 ≤300 行门禁 + 技术债收口）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**开发计划 §10 的 M6 五项已全部收口**：T6.1（Slack 通知）/ T6.2（去风暴 + 通用 webhook）/ T6.3（`/metrics`）/ T6.4（抓取配置 + 规则 + Grafana 面板）/ T6.5（[接入指南](docs/接入指南-Alertmanager.md) + 可执行验收），另加一项**计划外**加固 T6.6（HTTP 入口统一 `readBody`：非 UTF-8 → 400、超限统一 413，ADR-027），但**均未发版**，属 `CHANGELOG [Unreleased]`；**如实标注的未交付项**：K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共五条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测编排成一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（最近一轮 `--no-bench`：S0–S5 全 PASS、S6 压测跳过、S7 容器链路因 daemon 缺席 BLOCKED）。真库门禁最近一轮 **1103 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
+> **当前阶段：v0.1.0 已发布（T7.1–T7.9 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线九项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）/ T7.8（单文件 ≤300 行门禁 + 技术债收口）/ T7.9（M6 全量纳入回归：S8 通知链路 / S9 接入指南）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**开发计划 §10 的 M6 五项已全部收口**：T6.1（Slack 通知）/ T6.2（去风暴 + 通用 webhook）/ T6.3（`/metrics`）/ T6.4（抓取配置 + 规则 + Grafana 面板）/ T6.5（[接入指南](docs/接入指南-Alertmanager.md) + 可执行验收），另加一项**计划外**加固 T6.6（HTTP 入口统一 `readBody`：非 UTF-8 → 400、超限统一 413，ADR-027），但**均未发版**，属 `CHANGELOG [Unreleased]`；**如实标注的未交付项**：K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共七条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）、`verify-notify.py`（通知链路真栈，T6.1/T6.2，ADR-029 新增）、`verify-onboarding.py`（接入指南代码块原文实跑，T6.5）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测 + 通知 + 接入指南编排成 S0–S9 一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（含 S8/S9 的全量一轮 2026-10-18 已跑：S0–S6 / S8 / S9 **PASS**，S7 容器链路因 daemon 缺席 **BLOCKED**，汇总结论 `PASS-WITH-BLOCKED`、无红；M1–M6 验收项全部 PASS，MVP 总验收 2 PASS + 1 BLOCKED）。真库门禁最近一轮 **1103 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -436,11 +436,14 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | `verify-runtime` | 宿主机全栈验证：真实 PG 从零建库 → 迁移 → 探活 → 心跳 → 退出 |
 | `check-binaries` | 交叉编译 linux/amd64 并校验真静态链接（distroless 前提） |
 | `run-local` | 无 Docker 的本地全栈启动（绿色版 PG + server + Vite） |
-| `verify-e2e` | **E2E 一键回归**（T7.7）：编排 S0–S7，按 M1–M6 验收项 + MVP 总验收出总报告；透传 `--stages s2,s3` / `--summary` / `--strict` |
+| `verify-e2e` | **E2E 一键回归**（T7.7）：编排 S0–S9，按 M1–M6 验收项 + MVP 总验收出总报告；透传 `--stages s2,s3` / `--summary` / `--strict` |
+| `verify-notify` | 通知链路真栈验收（T6.1/T6.2，E2E 的 S8）：两出口送达 / 去风暴 / 终态必发 / token 不外泄 |
+| `verify-onboarding` | 接入指南可执行验收（T6.5，E2E 的 S9）：文档代码块原文在真栈跑一遍 |
+| `check-file-size` | 单文件 ≤ 300 行门禁：存量记基线，只减不增（静态，秒级） |
 
 查看全部任务：`make help` 或 `pwsh -File scripts/tasks.ps1 list`。
 
-### 验证脚本：五条链路 + 一个一键编排，别混用
+### 验证脚本：各条链路 + 一个一键编排，别混用
 
 | 脚本 | 链路 | 前置 | 报告 |
 |------|------|------|------|
@@ -449,7 +452,9 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | `scripts/verify-images.py` | 容器链路（偏部署形态与镜像内容物） | Docker daemon | `_verify_images.txt` |
 | `scripts/check-binaries.py` | 镜像内容物（交叉编译 + ELF 解析） | 无 | 控制台 |
 | `scripts/fault_drill.py` | **故障演练**（T7.4）：真 kill worker / 真停 PG / Redis 缺席，验恢复行为 | Go 工具链 + 绿色版 PostgreSQL + 5436/8083 空闲 | `_fault_drill.txt` |
-| `scripts/verify-e2e.py` | **一键回归**（T7.7）：把上面各链路 + 真库测试 + UI + 压测编排成 S0–S7，按 M1–M6 验收项与 MVP 总验收逐项出状态 | 见各阶段（S7 需 Docker daemon，缺席记 BLOCKED 不判红） | `_verify_e2e.txt` + `scripts/_e2e/*.json` |
+| `scripts/verify-notify.py` | **通知链路真栈**（T6.1/T6.2）：真 PG + 真 server + 假出口，验两 sink 送达、去风暴、终态必发、token 不外泄 | Go 工具链 + 5437/8091/8899 空闲 | `_verify_notify.txt` |
+| `scripts/verify-onboarding.py` | **接入指南可执行**（T6.5）：文档代码块原文落 `.sh` 执行，断言 `accepted/skipped/updated/rejected` 与 5 个状态码 | Go 工具链 + Git Bash + curl + 5434/8090 | 控制台（本机无 bash/curl 记 DEGRADED） |
+| `scripts/verify-e2e.py` | **一键回归**（T7.7）：把上面各链路 + 真库测试 + UI + 压测编排成 S0–S9，按 M1–M6 验收项与 MVP 总验收逐项出状态 | 见各阶段（S7 需 Docker daemon，缺席记 BLOCKED 不判红；S9 缺 bash/curl 记 BLOCKED） | `_verify_e2e.txt` + `scripts/_e2e/*.json` |
 
 `verify-func.py` 默认用 **5434 / 8082**，`fault_drill.py` 用 **5436 / 8083**（独立 PGDATA），
 与 `verify-runtime.py` 错开，几条链路可并存而不互相抢占。
@@ -457,16 +462,17 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 **E2E 一键回归**（T7.7）把回归变成一条命令，并按开发计划的验收项出总账：
 
 ```bash
-python scripts/verify-e2e.py                 # 一把跑完 S0-S7 并汇总（完整环境）
+python scripts/verify-e2e.py                 # 一把跑完 S0-S9 并汇总（完整环境）
 python scripts/verify-e2e.py --stages s2,s3  # 只跑真库测试 + 业务闭环（分批）
 python scripts/verify-e2e.py --summary       # 汇总已有阶段结果，不出总报告
 python scripts/verify-e2e.py --dry-run       # 只看阶段计划与端口，不执行
 ```
 
-八个阶段：S0 前置（工具链/端口/仓库状态）→ S1 静态（二进制 + 标签四联动 +
-helm + compose config + 干净克隆构建）→ S2 真库全量测试（含 M2 Replay）→
-S3 业务闭环 → S4 UI（vitest + playwright）→ S5 故障演练 → S6 压测 →
-S7 容器链路。汇总报告逐项标注 **M1–M6 验收项**与 **MVP 总验收三项**的状态；
+十个阶段：S0 前置（工具链/端口/仓库状态）→ S1 静态（二进制 + 标签四联动 +
+helm + compose config + 干净克隆构建 + 单文件 ≤300 行门禁）→ S2 真库全量测试
+（含 M2 Replay）→ S3 业务闭环 → S4 UI（vitest + playwright）→ S5 故障演练 →
+S6 压测 → S7 容器链路 → S8 通知链路（真栈 9 判据）→ S9 接入指南可执行。
+汇总报告逐项标注 **M1–M6 验收项**与 **MVP 总验收三项**的状态；
 环境缺条件（如 Docker daemon 不在）的阶段记 BLOCKED 并给出补救命令，
 `--strict` 下 BLOCKED 也判红（CI 用）。每阶段结果独立落
 `scripts/_e2e/<id>.json`，支持分多次调用跑完再 `--summary`。
@@ -865,9 +871,10 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 | T7.4 故障演练 | **已收口** | `scripts/fault_drill.py` **33/33 PASS**：真 kill worker → ReclaimStale 回收（attempts=2）；真停 PG 25s → 不重启进程自动重连 + 队列不丢；Redis 缺席 = 默认形态（依赖闭包静态证明） |
 | T7.5 compose 生产化 + Helm | **已收口** | 7 服务 resources + 日志轮转；采集器 TLS（CA / insecure 双模式，读不到 CA 启动即失败）；`deploy/helm/iip` 简化版 chart（内置/外置 PG 双轨）。真栈容器链路段待 Docker daemon 恢复后补跑（T7.5 收口报告已如实标注） |
 | T7.6 README + CHANGELOG + v0.1.0 | **已收口** | 本文档重构 + `CHANGELOG.md` + 标签四联动；tag `v0.1.0` 本地已打（push / GitHub Release 待 remote） |
-| T7.7 E2E 一键脚本 | **已收口** | `scripts/verify-e2e.py` 编排 S0–S7 按 M1–M6 验收项 + MVP 总验收出状态；最近一轮 7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED（`--stages s7` 可补跑） |
+| T7.7 E2E 一键脚本 | **已收口** | `scripts/verify-e2e.py` 编排 S0–S9 按 M1–M6 验收项 + MVP 总验收出状态（S8/S9 由 ADR-029 追加）；最近一轮 7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED（`--stages s7` 可补跑）、S8/S9 单独重跑均 PASS |
 | T7.8 单文件规模门禁 + 技术债收口 | **已收口**（ADR-028） | `scripts/check-file-size.py` + `file-size-baseline.txt`（五条判据、变异 5/5 全红，接入 `tasks.ps1 check-file-size` 与 E2E S1）；偿清登记在册的 3 个文件 （main.go 485→264、config.go 616→212、processor.go 483→253，纯同包移动）。**存量 44 个文件仍超限，已登记基线且只减不增** —— 不是「债已还清」 |
-| 开发计划 §10 M6（通知 + 自监控） | **全部收口** | **T6.1 / T6.2 / T6.3 / T6.4 / T6.5 全部完成**（ADR-024 / 025 / 026）：Slack 通知、去风暴 + 通用出站 webhook、`/metrics` 七指标 + worker 独立监听、抓取配置 + 记录/告警规则 + Grafana 面板 + 静态核对 `verify-observability.py`、[接入指南](docs/接入指南-Alertmanager.md) + `verify-onboarding.py`（文档代码块原文在真栈跑）。五项均属 `[Unreleased]`，v0.1.0 不含 |
+| T7.9 M6 全量纳入回归 | **已收口**（ADR-029） | 新增 S8 `verify-notify.py`（真栈 9 判据，脚本变异 3/3 全红）+ S9 `verify-onboarding.py`（13 判据，rc=2 记 BLOCKED）；编排器补「开跑前删旧报告」「S4 先清 playwright 产物」两条纪律。**接线变异 5/5 全红**；全量一轮 S0–S9 无红（S7 因 daemon 缺席 BLOCKED） |
+| 开发计划 §10 M6（通知 + 自监控） | **全部收口** | **T6.1 / T6.2 / T6.3 / T6.4 / T6.5 全部完成**（ADR-024 / 025 / 026）：Slack 通知、去风暴 + 通用出站 webhook、`/metrics` 七指标 + worker 独立监听、抓取配置 + 记录/告警规则 + Grafana 面板 + 静态核对 `verify-observability.py`、[接入指南](docs/接入指南-Alertmanager.md) + `verify-onboarding.py`（文档代码块原文在真栈跑）。五项均属 `[Unreleased]`，v0.1.0 不含。**已全量纳入一键回归（ADR-029）**：S8 = `verify-notify.py`（真栈 9 判据：两 sink 送达 / 去风暴 / 终态必发 / token 不外泄）、S9 = `verify-onboarding.py`（接入指南代码块原文实跑；缺 bash/curl 记 BLOCKED 不冒充通过） |
 | 计划外加固 T6.6（HTTP 入口） | **已收口**（ADR-027） | 三个 JSON 入口收成一个 `readBody`，修掉两个一直在的语义缺陷：`incidents/{id}/comments` 的超限请求报 400 而非 413（该入口从未有 413 用例，故从 M3 起未被发现）、非 UTF-8 请求体走到 PG 才爆成 503（现为 400，日志带 `first_invalid_offset`）。判据是 3 入口 × 2 类坏输入的矩阵 + 「合法 UTF-8 不被误杀」反面用例，变异 5/5 全红。**同批裁定不做限流、不做 CORS**，理由见 `deploy/README.md` 与 CHANGELOG Known limitations |
 
 ---

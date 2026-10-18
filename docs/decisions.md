@@ -574,6 +574,7 @@
 | ADR-026 | T6.3 自监控 `/metrics`：每实例独立注册表 + 无界标签禁令 + worker 独立监听 | 已实施（禹裁定官方 client_golang / 计数器+PromQL / 独立监听；比率不落 Gauge；变异 11/11 全红，真栈探针 6 阶段 PASS，真库 1088 PASS/1 SKIP/0 FAIL） |
 | ADR-027 | T6.6 三个 JSON 入口收成一个 `readBody`：非法 UTF-8 在解码前挡成 400，超限统一 413 | 已实施（修掉两个活缺陷：incidents 入口 413 被吞成 400、非 UTF-8 一路走到 PG 才爆成 503；矩阵判据 3 入口 × 2 类坏输入 + 反面用例；变异 5/5 全红。**同批裁定不做限流、不做 CORS**，理由写入 `deploy/README.md` 与 CHANGELOG Known limitations） |
 | ADR-028 | 单文件 ≤ 300 行做成「基线只减不增」门禁（关闭 OPEN-M5-7 / OPEN-M6-1） | 已实施（拆 3 个：main.go 485→264 + router.go、config.go 616→212 + 三个分文件、processor.go 483→253 + 两个分文件；存量 44 个登记基线；`check-file-size.py` 五条判据 + 变异 5/5 全红，接入 `tasks.ps1` 与 E2E S1。**基线≠还清**：44 个存量仍欠，只是不再增长） |
+| ADR-029 | M6 全量纳入 E2E 回归：新增 S8 通知链路（真栈 9 判据）/ S9 接入指南可执行，并补「开跑前删旧报告」「rc=2→BLOCKED」两条编排纪律 | 已实施（S8 `verify-notify.py` 9/9 + 脚本变异 3/3，S9 `verify-onboarding.py` 13 PASS/0 DEGRADED；编排接线变异 5/5 全红，含「陈旧报告不许冒充本轮满分」「降级时不许给『文档与实现不一致』的错误结论」） |
 
 ---
 
@@ -1206,6 +1207,67 @@ ADR-028：单文件 ≤ 300 行做成「基线只减不增」门禁，并偿清�
     目录。每条都断言「rc=1 **且** 输出命中期望关键字」—— 只判 rc 不够，崩在解析异常上
     也是 rc=1，那不是判据生效。还原后字节级 sha 一致且基线复归绿。
   - 真库全量回归与 E2E S1 结果见 `_t78_regression.txt` / `_e2e_s1_t78.txt`。
+
+---
+
+ADR-029：M6 全量纳入 E2E 回归（新增 S8 通知链路 / S9 接入指南），并给编排器补两条纪律
+
+- **Background**: T6.1/T6.2 的通知链路当时用一次性探针（`_probe_t61.py`）验过真栈
+  收消息，**但探针没入库**——探针一删，那半条判据就没了，回归里只剩单测。
+  T6.5 同理：`verify-onboarding.py` 写好了，却在 `M_MAP` 里记着「尚未编排进本 E2E」。
+  于是「M6 已收口」这句话里有一块是**靠记忆背书的**，而不是靠能重跑的东西。
+  这与 ADR-028 的教训同源：**验过 ≠ 有判据；有判据 ≠ 在回归里**。
+- **Decision**: 把 M6 剩下的两半接进编排器，并顺手修掉编排器本身的两个坑。
+  1. **S8 = `scripts/verify-notify.py`**（真 PG 5437 + 真 server 8091 + 假出口 8899，
+     9 条判据）：NEW 档两出口各 1 条 → acknowledged → investigating（窗口第 2 条）
+     → mitigated 被去风暴抑制 → resolved 配额满仍必发 → 出口带 `Bearer` 且日志无明文。
+  2. **S9 = `scripts/verify-onboarding.py`**（沿用 5434 的 PG + server 8090）：
+     把接入指南里的 5 个代码块**原文落成 .sh 再执行**。rc=2 = DEGRADED（本机缺
+     bash/curl，文档命令没执行过）⇒ 映射 **BLOCKED**，不冒充通过。
+  3. **开跑前删旧报告**：脚本若在写报告前就崩了，留着上一轮的文件会让 detail 显示
+     「判据 9 PASS」——**把一次失败说成满分**。现在宁可显示「rc=1（无计数）」。
+  4. **S9 端口只预检 8090**：该脚本允许沿用已在 5434 的 PG，把 5434 放进预检会在
+     「复用成功」时先报「端口被占用」——典型的假红。
+- **Consequences**:
+  - `M_MAP` 里 T6.1/T6.2 由 `["s2"]`（只剩单测）改为 `["s2", "s8"]`；T6.5 从
+    `[]` + 「未编排」改为 `["s9"]`。**备注为空**是有意的：汇总在有备注时不显示
+    覆盖阶段列，写了备注反而看不出它依赖 s9。
+  - 无 bash/curl 的机器上 S9 仍会红（确实没验过），但结论文案已从「文档与实现
+    已经不一致」改为「先解决降级再谈一致性」——**降级时下游检查拿不到数据，
+    那些 FAIL 不能算产品缺陷**，否则读报告的人会去改对的实现。S0 提前把
+    bash/curl 列为 warn_only 检查。
+  - S9 的 detail 只有 `rc=`，没有判据计数：该脚本输出的是
+    `PASS n / FAIL m / DEGRADED k`，与 `extract_counts` 认的两种格式都不同。
+    **不为了凑一个好看的数字去改脚本输出格式**——那会让 DEGRADED 被算进 SKIP。
+  - S8 与 S0 的端口总检现在包含 5437/8091/8090；S8 与其它阶段的端口不重叠，
+    可单独重跑（`--stages s8`，约 11s）。
+  - **S4 先清 playwright 产物再跑**：全量首轮 S4 红，报错是工作区的
+    `SAFE_DELETE_BULK_CONFIRM_REQUIRED count=329` —— playwright 开跑时要 `rm`
+    `web/test-results`，而那里已积了 329 个 trace/截图，被沙箱的批量删除守卫拒掉，
+    **一条用例都没跑**。现在阶段开跑前用 Python 清 `test-results` /
+    `playwright-report` 两个确定是派生物的目录（`shutil.rmtree`），不再触发守卫。
+    判据：清理前 S4 FAIL（重跑 playwright 复现同一条报错），清理后同参数 PASS
+    （vitest 14 文件/180 用例、playwright 9 passed + 真 server `http_request` 痕迹）。
+- **Related ADRs**: ADR-022（真栈探针的取舍）、ADR-024（通知去风暴语义）、
+  ADR-028（同一类教训：文档里的东西不是门禁）。
+- **Evidence**:
+  - `verify-notify.py` 真栈 **9/9 PASS**，报告落盘 `scripts/_verify_notify.txt`
+    （`PASS=9 FAIL=0 SKIP=0`）；**脚本自身变异 3/3 全红**（去风暴失效 / resolved
+    白名单删除 / Slack 出口漏装），还原后复归 9/9。
+  - **编排接线变异 5/5 全红**（`D:\_iip_setup\_mut_e2e.py`）：W1 命令换失败替身
+    → 阶段 FAIL 且 rc=1、且陈旧报告已清；W2 rc_map 把 0 判红 → 绿脚本也让阶段红；
+    W3 报告路径写错 → PASS 但**不虚报**「判据 9 PASS」；W4 rc=2 → BLOCKED，
+    `--strict` 下 rc=1；W5 真降级 → FAIL 且日志留 `[DEGRADED]`、结论文案正确。
+    每条断言「rc 符合预期 **且** 命中文案」，还原后两个脚本 sha256 逐位一致。
+  - S9 首跑 8s 就 PASS，按「快 PASS 必须取证」读了 `scripts/_e2e/s9.log`：
+    `PASS 13 / FAIL 0 / DEGRADED 0`，13 条判据真的跑了（不是空转）。
+  - **全量一轮 S0–S9（2026-10-18，362s + S4 重跑 31s）**：S0 PASS(4s) /
+    S1 PASS(25s，21 子检查) / S2 PASS(106s，20 包) / S3 PASS(43s，89/0/0) /
+    S4 PASS(31s，vitest 180 + playwright 9) / S5 PASS(77s，33/0/0) /
+    S6 PASS(58s，6/6) / S7 **BLOCKED**(2s，daemon 缺席，10 静态 PASS + 3 环境 FAIL) /
+    S8 PASS(11s，9/0/0) / S9 PASS(7s，13 判据)。汇总
+    **PASS-WITH-BLOCKED**（无红，1 阶段缺环境未实证），M1–M6 全部 PASS
+    （N/A 两项：CI 三色因 remote 空、M5 人工 UX 计时），MVP 总验收 2 PASS + 1 BLOCKED。
 
 ---
 

@@ -11,6 +11,31 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **M6 全量纳入一键回归：新增 S8 通知链路 / S9 接入指南（ADR-029）**。
+  此前 M6 有两条腿**只活在记忆里**：T6.1/T6.2 的真栈收消息判据是
+  一次性探针（探针一删就没了，回归里只剩单测），T6.5 的专项脚本写好了
+  但没编排进 E2E（`M_MAP` 里明写着「尚未编排」）。现在两者都入库：
+  - `scripts/verify-notify.py`（S8，真 PG 5437 + 真 server 8091 + 假出口 8899）
+    9 条判据：NEW 档两出口各 1 条 → acknowledged → investigating（窗口第 2 条）
+    → mitigated 被去风暴抑制 → **resolved 配额满仍必发** → 出口带 `Bearer`
+    且日志无明文 → 优雅退出。脚本自身变异 3/3 全红（去风暴失效 / 删终态白名单 /
+    Slack 出口漏装）。
+  - `scripts/verify-onboarding.py` 挂成 S9：rc=2（本机缺 bash/curl，文档命令
+    没执行过）映射 **BLOCKED**，不冒充通过。
+  - 编排器补两条纪律：① **开跑前删旧报告** —— 脚本崩在写报告之前时，
+    上一轮的「判据 9 PASS」会被当成本轮结论，**把失败说成满分**；
+    ② S9 端口只预检 8090，不预检 5434（该脚本允许沿用已运行的 PG，
+    预检会在「复用成功」时先报「端口被占用」）。
+  - 编排接线变异 5/5 全红（`D:\_iip_setup\_mut_e2e.py`），含「陈旧报告不许
+    冒充本轮满分」「降级时不许给出『文档与实现不一致』的错误结论」。
+  - 顺带修掉一个**假红**：全量首轮 S4 红在 `SAFE_DELETE_BULK_CONFIRM_REQUIRED
+    count=329` —— playwright 开跑时清理 `web/test-results`（已积 329 个
+    trace/截图）被沙箱的批量删除守卫拦下，**一条用例都没跑**，看着像产品回归。
+    现在 S4 开跑前用 Python 清两个派生物目录，同参数复跑 PASS
+    （vitest 14 文件/180 用例、playwright 9 passed + 真 server 请求痕迹）。
+  - **含 S8/S9 的全量一轮**（S0–S9）：**无红**，S0–S6 / S8 / S9 PASS，
+    S7 容器链路因 Docker daemon 缺席 **BLOCKED**（不判红、也不冒充通过）；
+    汇总结论 `PASS-WITH-BLOCKED`，M1–M6 验收项全部 PASS，MVP 总验收 2 PASS + 1 BLOCKED。
 - **单文件规模门禁 + 技术债收口（T7.8 / ADR-028，关闭 OPEN-M5-7 / OPEN-M6-1）**。
   「单文件 ≤ 300 行」写在 `docs/IIP-M1详细开发手册.md` §4，但它在 M2–M6 之间
   **从未被任何脚本检查过** —— 于是 `main.go` 从 318 涨到 485、`config.go` 从 352

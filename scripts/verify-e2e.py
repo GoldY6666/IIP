@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """T7.7 E2E 回归编排器 —— M1-M6 验收项 + MVP 总验收一键化。
 
-**这个脚本是什么**：把仓库里已经存在的验证资产（6 条链路 + 2 类测试）
+**这个脚本是什么**：把仓库里已经存在的验证资产（各条验证链路 + 2 类测试）
 编排成一条命令可跑的回归，并按开发计划的 M1-M6 验收项 / MVP 总验收
 逐项给出状态。它**不重复实现任何判据**——每个阶段的判据仍归各脚本
 所有（verify-func 的 90 条、fault_drill 的 33 条……），本脚本只负责：
@@ -60,6 +60,11 @@ STAGE_PORTS = {
     "s5": [5436, 8083],
     "s6": [5435, 8083],
     "s7": [5432, 8080],
+    "s8": [5437, 8091],
+    # 只预检 HTTP 端口：verify-onboarding.py 允许沿用已在 5434 运行的 PG
+    # （它自己会 pg_isready 判断），把 5434 放进预检会在「复用成功」时
+    # 先报「端口被占用」——典型的假红。
+    "s9": [8090],
 }
 
 # ---------------------------------------------------------------- 工具发现
@@ -257,6 +262,14 @@ def run_script_stage(sid, title, cmd, timeout, ports, rc_map,
                      "或重跑本阶段前先确认无 iip 相关进程" % p)
     log_path = os.path.join(E2E_DIR, "%s.log" % sid)
     os.makedirs(E2E_DIR, exist_ok=True)
+    # 先删上一轮的报告：脚本若在写报告前就崩了，留着旧文件会让本阶段的
+    # detail 显示「判据 9 PASS / 0 FAIL」——把一次失败说成满分。
+    # 宁可显示「rc=1（无判据计数）」，也不让陈旧数字冒充本轮结论。
+    if report and os.path.isfile(report):
+        try:
+            os.remove(report)
+        except OSError:
+            pass
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
@@ -315,6 +328,15 @@ def stage_s0():
     sub("前端包管理器", bool(pkg),
         "%s (%s)" % (pkg, pkg_path) if pkg
         else "pnpm/npm 都找不到（S4 将 BLOCKED）", warn_only=True)
+    # S9 要把接入指南里的代码块原样实跑：缺 bash/curl 时那几条只能记
+    # DEGRADED（文档命令没执行过），提前在这里说出来，别让人到 S9 才猜。
+    sh_ok = shutil.which("bash") and shutil.which("curl")
+    sub("bash + curl（S9 实跑文档命令）", bool(sh_ok),
+        "都已找到" if sh_ok
+        else "缺 %s（S9 的文档命令将降级，不是通过）"
+        % "/".join(x for x, v in (("bash", shutil.which("bash")),
+                                  ("curl", shutil.which("curl"))) if not v),
+        warn_only=True)
     chrome = find_chrome()
     sub("Chrome（playwright 用）", bool(chrome),
         chrome or "找不到（S4 将 BLOCKED）", warn_only=True)
@@ -582,7 +604,7 @@ def stages():
                    {0: "PASS", 1: "FAIL", 5: "FAIL"},
                    os.path.join(_HERE, "_verify_func.txt"),
                    "S3 业务闭环", 900)),
-        "s4": ("S4 UI（vitest 单测 + playwright 6 specs）", stage_s4),
+        "s4": ("S4 UI（vitest 单测 + playwright 6 spec 文件）", stage_s4),
         "s5": ("S5 故障演练（D1/D2/D3，33 判据）",
                script_stage(
                    "s5",
@@ -608,6 +630,25 @@ def stages():
                    {0: "PASS", 2: "BLOCKED", 3: "FAIL", 1: "FAIL"},
                    os.path.join(REPO, "_verify_images.txt"),
                    "S7 容器链路", 1800)),
+        "s8": ("S8 通知链路（真栈：去风暴 / 终态必发 / 两出口，9 判据）",
+               script_stage(
+                   "s8",
+                   [PY, os.path.join("scripts", "verify-notify.py")],
+                   STAGE_PORTS["s8"],
+                   {0: "PASS", 1: "FAIL"},
+                   os.path.join(_HERE, "_verify_notify.txt"),
+                   "S8 通知链路", 600)),
+        # T6.5 的专项脚本：rc=2 是 DEGRADED（本机没有 bash/curl，文档命令
+        # 压根没执行过）——那是环境缺条件，不是通过，也不是产品缺陷，
+        # 所以映射为 BLOCKED。把它写成 PASS 就是替「没验过」背书。
+        "s9": ("S9 接入指南可执行（文档代码块原文实跑，T6.5）",
+               script_stage(
+                   "s9",
+                   [PY, os.path.join("scripts", "verify-onboarding.py")],
+                   STAGE_PORTS["s9"],
+                   {0: "PASS", 1: "FAIL", 2: "BLOCKED"},
+                   None,
+                   "S9 接入指南可执行", 600)),
     }
     return reg
 
@@ -696,10 +737,17 @@ def stage_s4():
         + (" | " + persist("vitest", out) if rc == 0 else ""))
 
     # 2) playwright E2E（真 PG + 真 server，stack.mjs 自建自收）
+    # 先自己清掉上一轮的产物。playwright 每次开跑会 rm test-results/，而工作区
+    # 若积了上百个 trace/截图，沙箱的「批量删除守卫」会直接拒（实测
+    # SAFE_DELETE_BULK_CONFIRM_REQUIRED count=329）⇒ 表现为 playwright 红，
+    # 看着像产品回归，实际一条用例都没跑。清产物用 Python（不受那个守卫管），
+    # 只删两个确定是派生物的目录。
+    for junk in ("test-results", "playwright-report"):
+        shutil.rmtree(os.path.join(REPO, "web", junk), ignore_errors=True)
     rc, out = run_cmd(pkgmgr_argv(pkg_path, ["run", "test:e2e"]),
                       cwd=os.path.join(REPO, "web"),
                       timeout=600, env_extra=env_extra)
-    sub("playwright E2E（6 specs）", "pass" if rc == 0 else "fail",
+    sub("playwright E2E（6 spec 文件）", "pass" if rc == 0 else "fail",
         "rc=%d %s" % (rc, "" if rc == 0 else out[-300:])
         + (" | " + persist("playwright", out) if rc == 0 else ""))
 
@@ -741,14 +789,14 @@ M_MAP = [
     # 计划 §10 的 M6（T6.1–T6.6）已全部收口。**此前的写法是 `([], "未开工")`** ——
     # 那段文字在 T6.1 落地当天就过期了，却一直躺在总验收表里，让汇总报告
     # 与人读的 README/CHANGELOG 直接矛盾。现按「实际被哪一阶段证明」逐项拆分：
-    # 单测类挂在 S2（真库全量测试会跑它们），静态类挂在 S1；
+    # 单测类挂在 S2（真库全量测试会跑它们），静态类挂在 S1，真栈收消息
+    # 类挂在 S8（verify-notify.py：真 PG + 真 server + 假出口）；
     # 没有编排进 E2E 的，宁可写空列表 + 原因，也不给它一个假的 PASS。
-    ("M6", "通知去风暴 / 终态必发 / 两个 sink 拒重定向（T6.1/T6.2）单测", ["s2"],
-     "真栈收消息判据曾用一次性探针验过，未入库 ⇒ 本 E2E 只覆盖单测那一半"),
+    ("M6", "通知去风暴 / 终态必发 / 两个 sink 拒重定向（T6.1/T6.2）", ["s2", "s8"],
+     ""),
     ("M6", "`/metrics` 指标族、标签上界、worker 独立注册表（T6.3）单测", ["s2"], ""),
     ("M6", "观测配置与代码定义一致（T6.4，静态）", ["s1"], ""),
-    ("M6", "接入指南代码块原文可执行（T6.5）", [],
-     "有专项脚本 verify-onboarding.py（真 PG + 真 server），尚未编排进本 E2E"),
+    ("M6", "接入指南代码块原文可执行（T6.5）", ["s9"], ""),
     ("M6", "非 UTF-8 → 400 / 超限 → 413 入口矩阵（T6.6）单测", ["s2"], ""),
 ]
 

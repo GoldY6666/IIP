@@ -202,6 +202,18 @@ function Invoke-VerifyOnboarding {
     python scripts/verify-onboarding.py @TaskArgs
 }
 
+function Invoke-VerifyNotify {
+    <#
+    T6.1/T6.2 通知链路的真栈验收（E2E 的 S8）：真 PG + 真 server + 假出口，
+    断言两个 sink 都送达、状态变更去风暴（窗口内 2 条）、终态 resolved 必发、
+    出口带 Bearer 而日志不留明文。单测只能证明 HTTP 层语义，收消息这一半
+    必须在真栈上看见。
+    端口 5437 / 8091 / 8899，需与其它链路错开。
+    #>
+    Write-Host '[tasks] verify-notify' -ForegroundColor Cyan
+    python scripts/verify-notify.py @TaskArgs
+}
+
 function Invoke-List {
     Write-Host 'IIP 本地任务（PowerShell 等价物）：' -ForegroundColor Green
     @(
@@ -229,7 +241,8 @@ function Invoke-List {
         '  run-local     无 Docker 的本地全栈启动（绿色版 PG + server + Vite）',
         '  verify-e2e    E2E 一键回归（M1-M6 验收 + MVP 总验收；可透传 --stages s2,s3 / --summary / --strict）',
         '  verify-observability 核对 Grafana 面板 / Prometheus 规则与代码里的指标定义是否一致（静态，不需 Docker）',
-        '  verify-onboarding 从接入指南抽代码块原文，在真栈上跑一遍（真 PG + 真 server，需启动数据库）'
+        '  verify-onboarding 从接入指南抽代码块原文，在真栈上跑一遍（真 PG + 真 server，需启动数据库）',
+        '  verify-notify 通知链路真栈验收：两出口送达 / 去风暴 / 终态必发 / token 不外泄（5437/8091/8899）',
         '  check-file-size 单文件 <= 300 行门禁：存量记基线，只减不增（静态，秒级）'
     ) | ForEach-Object { Write-Host $_ }
 }
@@ -260,10 +273,11 @@ switch ($Task.ToLowerInvariant()) {
     'verify-e2e'   { Invoke-VerifyE2E }
     'verify-observability' { Invoke-VerifyObservability }
     'verify-onboarding' { Invoke-VerifyOnboarding }
+    'verify-notify' { Invoke-VerifyNotify }
     'check-file-size' { Invoke-CheckFileSize }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding/check-file-size）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding/verify-notify/check-file-size）"
         exit 1
     }
 }
