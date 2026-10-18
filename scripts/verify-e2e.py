@@ -416,7 +416,7 @@ def check_tag_consistency():
                      "detail": "取不到最新 tag（跳过对齐检查）"})
         return ("PASS", "%d 处一致 = %s（未与 git tag 对齐：无 tag）"
                 % (n_loc, common), subs)
-    tag = out.strip()
+    tag = out.strip().splitlines()[0].strip() if out.strip() else ""
     tag_ver = tag[1:] if tag.startswith("v") else tag
     if tag_ver != common:
         subs.append({"name": "git tag 对齐", "status": "fail",
