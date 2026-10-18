@@ -4,13 +4,36 @@
 （节标题用英文以便工具解析，正文中文）。
 版本号与 git tag、镜像标签、Helm chart `appVersion` 保持一致（四处联动，见 README「发布」节）。
 
-**如实声明**：本仓库当前无 git remote，下列 tag 均为本地 tag；
-GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limitations）。
+**如实声明**：remote 已配置为 `github.com/GoldY6666/IIP`，但于 2026-10-18 核实
+该仓库**为空仓库（零提交）** —— 下列 tag 在写这份 CHANGELOG 时均为本地 tag，
+首次推送由维护者本机执行（沙箱无法连 `github.com:443`）。推送前 GitHub Release
+与 CI 执行状态一律视为「未发生」（见各版本 Known limitations）。
 
 ## [Unreleased]
 
+（暂无 —— v0.2.0 已发布）
+
+## [0.2.0] - 2026-10-18
+
+自 v0.1.0 起的第二个发布版。**无破坏性变更**，按 semver 定 minor：
+新增通知链路、自监控与两项计划外加固，另把 M6 全量纳入一键回归。
+因新增能力较多且 `verify-e2e.py` 阶段数从 8 扩到 10（S0–S9），补丁号
+不足以表达范围，故走 minor。
+
 ### Added
 
+- **发版工具 `scripts/bump-version.py`（本轮新增）**。发版要改 16 处标签，
+  手工改必然漏（T7.6 时 `Makefile` 曾连续两代停在 `0.0-m1` 而无人发现）。
+  - `--check` 只报告 / `--write` 真改后**自证重扫** / `--tag` 只打印 tag 命令
+    （不代跑）；目标版本由 `--to` 或 `--bump {major,minor,patch}` 推算，
+    **不让调用者手打**。
+  - 位置清单从 `verify-e2e.py` 抽到 `scripts/tag_locs.py`，**判据与脚本共用
+    同一份**（两份清单必然漂移）。
+  - 只替换捕获组，行内注释里的历史版本号不被连带改掉。
+  - **修掉一条真实会漏改的判据**：「没有改动可做」原先只比权威处，
+    于是「权威处已手改成新版本、另 3 处仍停在旧版本」被误判为无事可做
+    —— 本次 v0.2.0 发版就撞上这一幕。现改为看**各处**是否都已是目标值。
+  - 变异 6/6 全红（`D:\_iip_setup\_mut_bump.py`），还原后 16 处 sha256 逐位一致。
 - **M6 全量纳入一键回归：新增 S8 通知链路 / S9 接入指南（ADR-029）**。
   此前 M6 有两条腿**只活在记忆里**：T6.1/T6.2 的真栈收消息判据是
   一次性探针（探针一删就没了，回归里只剩单测），T6.5 的专项脚本写好了
@@ -247,6 +270,15 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
   （`python scripts/verify-e2e.py --stages s7`）。
 - E2E 汇总的判据计数取自各阶段自己的报告文件，阶段超时/崩溃时计数可能
   是上一轮的旧值——以阶段状态（FAIL/BLOCKED）为准，计数仅作参考。
+  （编排器已在每个脚本阶段开跑前删旧报告，剩下的风险是「阶段自身超时
+  且没写出任何报告」，那时显示 0/0 而不是旧值。）
+- **本版仍未在 GitHub 上推送过**：`ci.yml` 的三 job（backend / frontend / e2e）
+  至今没有任何一次真实执行记录；v0.2.0 的证据全部来自本机沙箱内的等价复现。
+  首次推送后的第一轮 CI 结果仍是未知数（历史教训：`ci.yml` 静态审查后仍
+  修掉过四处硬伤，「看着对」不等于「跑得通」）。
+- **容器链路（S7）仍未实证**：本机 Docker daemon 不可用，镜像构建后的
+  `compose up` 与计时为 BLOCKED；镜像标签 `0.2.0` 只经过交叉编译 +
+  ELF 静态解析，未经容器实跑。
 
 ## [0.1.0] - 2026-10-14
 
@@ -342,8 +374,9 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 - **无通知能力**：开发计划 §10 的 M6（T6.1–T6.5：Slack adapter、通知去风暴、
   通用出站 webhook）**未开工**。v0.1.0 不会向任何外部系统推送事件通知。
+  （已于 v0.2.0 补齐。）
 - **无自监控指标**：`/metrics` 端点（T6.3）与 Prometheus 抓取示例（T6.4）未做，
-  压测可观测性目前靠 `ingest_bench.py` 客户端侧统计。
+  压测可观测性目前靠 `ingest_bench.py` 客户端侧统计。（已于 v0.2.0 补齐。）
 - **K8s / trace 采集器未接真实后端**：默认关闭（偏差 B1）；mock server 单测 +
   变异测试覆盖，**没有任何端到端链路跑过真实集群/链路后端路径**（OPEN-M6-3）。
 - **confidence 的已知边界**：给不出依据的证据留空（k8s rollout 侧与 trace
@@ -352,10 +385,11 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 - **关联候选限额的残留边界**（R7）：新告警的最佳匹配若是**非种子**老成员，
   仍可能漏合并（窗口更窄，待 V1.1 用真实反馈数据复查）。
 - **告警表未分区、JSONB 索引未调优**（T7.1 / T7.2 未做）：数据量增长后的
-  查询性能余量未验证。
-- **CI 未在 GitHub 上执行过**：仓库无 git remote，`.github/workflows/ci.yml`
-  （backend / frontend / e2e 三 job）从未真正跑过；现有证据为本地等价复现
-  （`-race` 容器内 PASS、lint rc=0、`pnpm test:unit` 本机 PASS）。
+  查询性能余量未验证。（已于 v0.2.0 补齐：0008 按月分区、0009 索引调优。）
+- **CI 未在 GitHub 上执行过**：`.github/workflows/ci.yml`（backend / frontend /
+  e2e 三 job）从未真正跑过（发布时仓库无 remote；2026-10-18 核实 remote 已配置
+  但仓库为空、尚未推送）；现有证据为本地等价复现（`-race` 容器内 PASS、
+  lint rc=0、`pnpm test:unit` 本机 PASS）。**该限制在 v0.2.0 仍未解除。**
 - **真库测试宿主侧 1 条 SKIP**：`TestHandlerAllowsSymlinkedRoot` 在 Windows
   无管理员权限时 SKIP（`SeCreateSymbolicLink` 权限）；Linux 容器侧 SKIP=0。
   与真库无关，属平台权限可接受项。
@@ -364,8 +398,10 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
   `verify-images.py` 全链路待 daemon 恢复后补跑（T7.5 报告已如实标注）。
 - **`main.go` / `config.go` 超 300 行约束**（OPEN-M6-1，340 / 410 行）：
   自 M2 起存在，按既有策略只拆本里程碑新增部分，未做整体重构。
+  （已于 v0.2.0 偿清并存量基线化，见 ADR-028。）
 - **手册 M6 的 `v0.0-m6` tag 未打**：其交付报告明示「不宣布全部完成」
   （宿主 SKIP=1 + 上述 OPEN 项）；功能已随 v0.1.0 发布。
 
-[Unreleased]: 本地 git 对比（无 remote，无可比对外链接）
-[0.1.0]: 本地 tag `v0.1.0`（指向 T7.6 提交）
+[Unreleased]: 尚未推送，暂无对外链接
+[0.2.0]: 本地 tag `v0.2.0`（指向发版提交）；推送后为 `https://github.com/GoldY6666/IIP/compare/v0.1.0...v0.2.0`
+[0.1.0]: 本地 tag `v0.1.0`（指向 T7.6 提交）；推送后为 `https://github.com/GoldY6666/IIP/releases/tag/v0.1.0`

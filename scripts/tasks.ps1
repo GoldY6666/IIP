@@ -4,9 +4,9 @@
 .DESCRIPTION
     Makefile 的同名目标 PowerShell 版本，供 Windows 未安装 make 时使用。
     用法：
-        pwsh -File scripts/tasks.ps1 run-server
-        pwsh -File scripts/tasks.ps1 test
-        pwsh -File scripts/tasks.ps1 list
+        powershell -File scripts/tasks.ps1 run-server
+        powershell -File scripts/tasks.ps1 test
+        powershell -File scripts/tasks.ps1 list
     依赖版本与命令依据 docs/IIP-M0详细开发计划.md §2 T0.1。
 #>
 
@@ -22,11 +22,12 @@ param(
 
     # 镜像标签：与 Makefile 的 IMAGE_TAG、deploy/docker-compose.yml、
     # scripts/verify-images.py 的 IIP_TAG、Helm chart 的 appVersion 四处联动。
-    # 2026-10-14 T7.6 起随发版切到 0.1.0（此前 Makefile 侧曾停滞在 0.0-m1）。
-    [string]$ImageTag = '0.1.0',
+    # 当前版本由 scripts/bump-version.py 统一维护（16 处，判据在 E2E S1）；
+    # 别手改这里 —— 单改一处只会让 S1 红。
+    [string]$ImageTag = '0.2.0',
 
     # 任务自有参数的透传口：verify-e2e 需要 --stages/--summary/--strict 等，
-    # 而 $Task 是位置参数，额外开关走这里（pwsh -File scripts/tasks.ps1 verify-e2e --stages s2,s3）。
+    # 而 $Task 是位置参数，额外开关走这里（powershell -File scripts/tasks.ps1 verify-e2e --stages s2,s3）。
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$TaskArgs = @()
 )
@@ -214,6 +215,23 @@ function Invoke-VerifyNotify {
     python scripts/verify-notify.py @TaskArgs
 }
 
+function Invoke-BumpVersion {
+    <#
+    发版工具：统一改 16 处版本标签（权威值 = Makefile 的 IMAGE_TAG）。
+    别手打版本号逐个改 —— 手工改必然漏，而漏掉的那处只会让 S1 判据红，
+    它不会告诉你该改哪儿。
+
+      powershell -File scripts/tasks.ps1 bump-version                    # 只检查
+      powershell -File scripts/tasks.ps1 bump-version --write --bump minor
+      powershell -File scripts/tasks.ps1 bump-version --write --to 0.3.0
+      powershell -File scripts/tasks.ps1 bump-version --tag              # 只打印 tag 命令
+
+    --write 改完会自己重扫自证；某处匹配 0 次或多次都会当场报错。
+    #>
+    Write-Host '[tasks] bump-version' -ForegroundColor Cyan
+    python scripts/bump-version.py @TaskArgs
+}
+
 function Invoke-List {
     Write-Host 'IIP 本地任务（PowerShell 等价物）：' -ForegroundColor Green
     @(
@@ -243,7 +261,8 @@ function Invoke-List {
         '  verify-observability 核对 Grafana 面板 / Prometheus 规则与代码里的指标定义是否一致（静态，不需 Docker）',
         '  verify-onboarding 从接入指南抽代码块原文，在真栈上跑一遍（真 PG + 真 server，需启动数据库）',
         '  verify-notify 通知链路真栈验收：两出口送达 / 去风暴 / 终态必发 / token 不外泄（5437/8091/8899）',
-        '  check-file-size 单文件 <= 300 行门禁：存量记基线，只减不增（静态，秒级）'
+        '  check-file-size 单文件 <= 300 行门禁：存量记基线，只减不增（静态，秒级）',
+        '  bump-version  发版工具：统一改 16 处版本标签（--check / --write --bump minor / --tag）'
     ) | ForEach-Object { Write-Host $_ }
 }
 
@@ -273,11 +292,12 @@ switch ($Task.ToLowerInvariant()) {
     'verify-e2e'   { Invoke-VerifyE2E }
     'verify-observability' { Invoke-VerifyObservability }
     'verify-onboarding' { Invoke-VerifyOnboarding }
-    'verify-notify' { Invoke-VerifyNotify }
+    'verify-notify'  { Invoke-VerifyNotify }
+    'bump-version'   { Invoke-BumpVersion }
     'check-file-size' { Invoke-CheckFileSize }
     'list'         { Invoke-List }
     default {
-        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding/verify-notify/check-file-size）"
+        Write-Error "未知任务: $Task（可用: list/deps/compose-up/compose-down/run-server/run-worker/test/lint/migrate-up/migrate-down/web-dev/build/tidy/pg-up/pg-down/image-build/image-ls/app-up/app-down/verify-images/verify-runtime/check-binaries/run-local/verify-e2e/verify-observability/verify-onboarding/verify-notify/check-file-size/bump-version）"
         exit 1
     }
 }

@@ -2,7 +2,7 @@
 
 IIP 是一个开源的事件智能平台，为**自托管可观测性栈**设计：把海量异构告警自动关联聚合为可操作的事件（Incident），并为每个事件自动收集可追溯的证据链，最终生成可解释的根因假设与修复建议。
 
-> **当前阶段：v0.1.0 已发布（T7.1–T7.9 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线九项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）/ T7.8（单文件 ≤300 行门禁 + 技术债收口）/ T7.9（M6 全量纳入回归：S8 通知链路 / S9 接入指南）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**开发计划 §10 的 M6 五项已全部收口**：T6.1（Slack 通知）/ T6.2（去风暴 + 通用 webhook）/ T6.3（`/metrics`）/ T6.4（抓取配置 + 规则 + Grafana 面板）/ T6.5（[接入指南](docs/接入指南-Alertmanager.md) + 可执行验收），另加一项**计划外**加固 T6.6（HTTP 入口统一 `readBody`：非 UTF-8 → 400、超限统一 413，ADR-027），但**均未发版**，属 `CHANGELOG [Unreleased]`；**如实标注的未交付项**：K8s / trace 采集器未接真实后端（默认关闭）；CI 因仓库无 remote 从未在 GitHub 上跑过。**验证链路共七条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）、`verify-notify.py`（通知链路真栈，T6.1/T6.2，ADR-029 新增）、`verify-onboarding.py`（接入指南代码块原文实跑，T6.5）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测 + 通知 + 接入指南编排成 S0–S9 一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（含 S8/S9 的全量一轮 2026-10-18 已跑：S0–S6 / S8 / S9 **PASS**，S7 容器链路因 daemon 缺席 **BLOCKED**，汇总结论 `PASS-WITH-BLOCKED`、无红；M1–M6 验收项全部 PASS，MVP 总验收 2 PASS + 1 BLOCKED）。真库门禁最近一轮 **1103 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
+> **当前阶段：v0.2.0 已发布（T6.x 通知与自监控 + T7.1–T7.9 加固线全部收口）**。M0–M5 已收口（tag `v0.0-m0` ~ `v0.0-m5`）；手册 M6（证据深化与遗留缺口收口）S1–S5 已交付、DoD 3 于 2026-10-12 闭环（`v0.0-m6` tag 按报告决定未打，原因见「M6 验收状态」）；T7 硬化线九项全部收口：T7.1（alerts 按月分区 + retention）/ T7.2（索引调优）/ T7.3（压测）/ T7.4（故障演练）/ T7.5（compose 生产化 + Helm）/ T7.6（README + CHANGELOG + 发版）/ T7.7（E2E 一键回归）/ T7.8（单文件 ≤300 行门禁 + 技术债收口）/ T7.9（M6 全量纳入回归：S8 通知链路 / S9 接入指南）——其中 T7.5 与 T7.7 的**容器链路段**待 Docker daemon 恢复后补跑（BLOCKED，不判红）。**开发计划 §10 的 M6 五项已全部收口**：T6.1（Slack 通知）/ T6.2（去风暴 + 通用 webhook）/ T6.3（`/metrics`）/ T6.4（抓取配置 + 规则 + Grafana 面板）/ T6.5（[接入指南](docs/接入指南-Alertmanager.md) + 可执行验收），另加一项**计划外**加固 T6.6（HTTP 入口统一 `readBody`：非 UTF-8 → 400、超限统一 413，ADR-027）。上述 T6.x 六项**均已随 v0.2.0 发布**（`CHANGELOG [0.2.0]`，无破坏性变更）；**如实标注的未交付项**：K8s / trace 采集器未接真实后端（默认关闭）；CI 从未在 GitHub 上跑过（remote 已配置为 `github.com/GoldY6666/IIP`，但仓库为空、尚未推送）。**验证链路共七条**：`verify-func.py`（业务闭环）、`verify-images.py`（容器链路）、`verify-runtime.py`（宿主机全栈）、`check-binaries.py`（镜像内容物）、`fault_drill.py`（故障演练，T7.4 新增）、`verify-notify.py`（通知链路真栈，T6.1/T6.2，ADR-029 新增）、`verify-onboarding.py`（接入指南代码块原文实跑，T6.5）；T7.7 起 `verify-e2e.py` 把各链路 + 真库测试 + UI + 压测 + 通知 + 接入指南编排成 S0–S9 一键回归，按 M1–M6 验收项与 MVP 总验收出总报告（含 S8/S9 的全量一轮 2026-10-18 已跑：S0–S6 / S8 / S9 **PASS**，S7 容器链路因 daemon 缺席 **BLOCKED**，汇总结论 `PASS-WITH-BLOCKED`、无红；M1–M6 验收项全部 PASS，MVP 总验收 2 PASS + 1 BLOCKED）。真库门禁最近一轮 **1103 PASS / 1 SKIP / 0 FAIL**（含子用例；SKIP 为 Windows symlink 权限，Linux 容器侧 SKIP=0，属可接受项）；`golangci-lint` v2 rc=0。完整变更见 [`CHANGELOG.md`](CHANGELOG.md)，已知限制见其「Known limitations」节。
 
 规格权威源：**[`docs/IIP-M0详细开发计划.md`](docs/IIP-M0详细开发计划.md)**（M0 技术规格以它为准）。架构与数据模型见 [`docs/IIP-V1.0-技术设计文档.md`](docs/IIP-V1.0-技术设计文档.md)。M1 的开发依据见 **[`docs/IIP-M1详细开发手册.md`](docs/IIP-M1详细开发手册.md)**。项目协作约束见 [`AGENTS.md`](AGENTS.md)。
 
@@ -20,7 +20,7 @@ make deps
 
 ```powershell
 # Windows 未装 make 时用等价脚本
-pwsh -File scripts/tasks.ps1 deps
+powershell -File scripts/tasks.ps1 deps
 ```
 
 作用：`go mod download` 拉 Go 依赖 + 在 `web/` 执行 `pnpm install` 拉前端依赖。
@@ -32,7 +32,7 @@ make compose-up
 ```
 
 ```powershell
-pwsh -File scripts/tasks.ps1 compose-up
+powershell -File scripts/tasks.ps1 compose-up
 ```
 
 作用：`docker compose -f deploy/docker-compose.yml up -d`，拉起 postgres / redis / prometheus / alertmanager / loki 五个容器。等约 30 秒让 healthcheck 变绿，然后确认：
@@ -52,7 +52,7 @@ make run-server
 
 ```powershell
 $env:IIP_PG_URL = "postgres://postgres:dev@localhost:5432/iip?sslmode=disable"
-pwsh -File scripts/tasks.ps1 run-server
+powershell -File scripts/tasks.ps1 run-server
 ```
 
 新开一个终端验证：
@@ -440,8 +440,9 @@ Makefile 与 `scripts/tasks.ps1` 提供同名任务（三方合约：README ↔ 
 | `verify-notify` | 通知链路真栈验收（T6.1/T6.2，E2E 的 S8）：两出口送达 / 去风暴 / 终态必发 / token 不外泄 |
 | `verify-onboarding` | 接入指南可执行验收（T6.5，E2E 的 S9）：文档代码块原文在真栈跑一遍 |
 | `check-file-size` | 单文件 ≤ 300 行门禁：存量记基线，只减不增（静态，秒级） |
+| `bump-version` | **发版工具**：`--check` 报告 16 处标签是否一致 / `--write --bump minor` 真改并自证 / `--tag` 打印 tag 命令 |
 
-查看全部任务：`make help` 或 `pwsh -File scripts/tasks.ps1 list`。
+查看全部任务：`make help` 或 `powershell -File scripts/tasks.ps1 list`。
 
 ### 验证脚本：各条链路 + 一个一键编排，别混用
 
@@ -526,7 +527,7 @@ M1 的完成定义见 `docs/IIP-M1详细开发手册.md` §八。当前状态（
 | 迁移 up → down → up 三连通过；新索引就位 | **PASS** | `migrations/migrate_test.go` 真库实跑 up→down-all→up，每步均断言版本号与 `uq_alerts_fingerprint_firing` 存在性（不只看命令返回码） |
 | 第二条同指纹 firing 的 INSERT 被 DB 拒绝（或静默跳过） | **PASS** | 裸 INSERT 实得 SQLSTATE 23505；生产语句 `ON CONFLICT … DO NOTHING` 影响 0 行；resolved 历史行不受该索引约束 |
 | `go build` / `go vet` / `go test ./...` / `gofmt -l` 全 rc=0 | **PASS**（四项） | build / vet / test / gofmt 均 rc=0 |
-| `golangci-lint run` | **PASS**（2026-10-01 修复至 rc=0；原为 FAIL） | 2026-10-01 在**本表对应的 M1 终点提交 `a0ca8a5`** 上用同版本 v1.61.0 实跑得 **rc=1、1 项**（`internal/api/alert_list.go:77` gocritic ifElseChain）。即 M1 当时「lint 全绿、7 项已修」的说法**不成立**——该列表切片引入此项后 lint 再未执行过（本机 CLI 未装），「由 CI 覆盖」亦从未兑现（仓库无 remote）；到 M2 终点累计 **17 项**。**已于 2026-10-01 逐项修复至 rc=0**（M3 前置 L1）：四类 17 项全部按类修掉，唯一配置改动是 gocritic `hugeParam` 阈值 80 → 128 B（**阈值收敛，未加排除规则、未用 nolint**）。方案见 `docs/decisions.md` ADR-012；证据 `D:\_iip_setup\_lint_m3_final.txt`（`LINT_RC=0`，v1.61.0） |
+| `golangci-lint run` | **PASS**（2026-10-01 修复至 rc=0；原为 FAIL） | 2026-10-01 在**本表对应的 M1 终点提交 `a0ca8a5`** 上用同版本 v1.61.0 实跑得 **rc=1、1 项**（`internal/api/alert_list.go:77` gocritic ifElseChain）。即 M1 当时「lint 全绿、7 项已修」的说法**不成立**——该列表切片引入此项后 lint 再未执行过（本机 CLI 未装），「由 CI 覆盖」亦从未兑现（仓库至今未推送过）；到 M2 终点累计 **17 项**。**已于 2026-10-01 逐项修复至 rc=0**（M3 前置 L1）：四类 17 项全部按类修掉，唯一配置改动是 gocritic `hugeParam` 阈值 80 → 128 B（**阈值收敛，未加排除规则、未用 nolint**）。方案见 `docs/decisions.md` ADR-012；证据 `D:\_iip_setup\_lint_m3_final.txt`（`LINT_RC=0`，v1.61.0） |
 | 纯函数包行覆盖率 ≥ 90% | **PASS** | `internal/alert` 91.2%。初测仅 51%——Service 分支只有跨包集成用例触达，而 Go 的 `-cover` 不计入，故按手册 §4.5 补 `service_test.go`（假仓储）覆盖 7 个去重分支 |
 | 重复 payload 投递 → 表内不增行，HTTP 200 | **PASS** | 端到端实跑 6 步完整生命周期，HTTP 计数与库内行数逐一核对 |
 | resolved 投递 → 原行 `status='resolved'` 且 `ends_at` 非空，不新增行 | **PASS** | 同上，含「重新起火后再次 resolved」场景 |
@@ -796,7 +797,7 @@ SYN **静默丢包**，`TimeoutError` 也属 `OSError`——「没人监听」�
 | UI 无鉴权 | **已由 M6 S4 关闭** | OPEN-M5-1。M5 阶段的部署形态无任何访问控制，当时靠 `deploy/README.md` 的「仅供内网」标注兜。**该标注在 S4 之后仍保留** —— 静态 token 只挡误连，不等于可公网暴露 |
 | `evidence.confidence` | **全部为空** | OPEN-M5-9（OPEN-M4-1 延续）。需先有 RCA 才有能力评估，已排入 M6 的 S1 |
 | 单文件超 300 行 | **登记的三个已还清，存量 44 个挂账** | OPEN-M5-7 / OPEN-M6-1 **已由 ADR-028 关闭**：main.go 485→264、config.go 616→212、processor.go 483→253，并补上一直缺的门禁（基线只减不增）。**44 个存量文件仍未达标**（`k8s_test.go` 1246、`loki.go` 551 等），明细见 `scripts/file-size-baseline.txt` |
-| CI 的 `pnpm test` job | **本地等价已复现，CI 侧未验证** | OPEN-M5-4。仓库**无 git remote** ⇒ `.github/workflows/ci.yml` 从未在 GitHub 上跑过 |
+| CI 的 `pnpm test` job | **本地等价已复现，CI 侧未验证** | OPEN-M5-4。remote 已配置（`github.com/GoldY6666/IIP`）但仓库为空、尚未推送 ⇒ `.github/workflows/ci.yml` 从未在 GitHub 上跑过 |
 | 组件覆盖率 | **明确不追数字** | OPEN-M5-5。`EvidenceList.tsx` 44%、其余 5 个为 0。把覆盖率设成门禁阈值会诱导「为凑数字写测试」 |
 
 ### 真库 SKIP=0 的消除方式（须如实说明）
@@ -857,7 +858,7 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 | K8s 采集器默认不注册 | **OPEN**（OPEN-M6-3） | 偏差 B1：仓库零 K8s 依赖，无 kubeconfig / RBAC。接入是部署侧的事，**不为验收打开开关**；现有证据只有 mock 单测 + 变异测试 |
 | `Assign` 跨轮不重算 | **OPEN**（OPEN-M6-4） | 幂等是故意的（避免后批证据悄悄改掉前批结论）。覆盖度偏低属已知取舍，非缺陷 |
 | `main.go` / `config.go` 超 300 行 | **OPEN**（OPEN-M6-1） | 340 / 410 行，自 M2 起存在且随里程碑加剧。按既有做法只拆本里程碑新增部分 |
-| CI 在 GitHub 上执行 | **无法验证** | 仓库无 git remote，`ci.yml` 从未在 GitHub 跑过（本地等价复现：`-race` 容器内 PASS、lint rc=0） |
+| CI 在 GitHub 上执行 | **无法验证** | remote 已配置但仓库为空、从未推送，`ci.yml` 从未在 GitHub 跑过（本地等价复现：`-race` 容器内 PASS、lint rc=0）；v0.2.0 仍未解除 |
 
 ---
 
@@ -870,29 +871,42 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 | T7.3 压测（1 万条） | **已收口** | **6/6 判据 PASS**：吞吐 346 条/s、折算单条 p95=45.6ms < 200ms、零丢失、rejected=0；M2 Replay 指标无退化（1.0000/1.0000）。残留边界：候选限额下「新告警最佳匹配为非种子老成员」仍可能漏合并（窄，待 V1.1 复查） |
 | T7.4 故障演练 | **已收口** | `scripts/fault_drill.py` **33/33 PASS**：真 kill worker → ReclaimStale 回收（attempts=2）；真停 PG 25s → 不重启进程自动重连 + 队列不丢；Redis 缺席 = 默认形态（依赖闭包静态证明） |
 | T7.5 compose 生产化 + Helm | **已收口** | 7 服务 resources + 日志轮转；采集器 TLS（CA / insecure 双模式，读不到 CA 启动即失败）；`deploy/helm/iip` 简化版 chart（内置/外置 PG 双轨）。真栈容器链路段待 Docker daemon 恢复后补跑（T7.5 收口报告已如实标注） |
-| T7.6 README + CHANGELOG + v0.1.0 | **已收口** | 本文档重构 + `CHANGELOG.md` + 标签四联动；tag `v0.1.0` 本地已打（push / GitHub Release 待 remote） |
+| T7.6 README + CHANGELOG + v0.1.0 | **已收口** | 本文档重构 + `CHANGELOG.md` + 标签四联动；tag `v0.1.0` 本地已打（push / GitHub Release 待首次推送） |
 | T7.7 E2E 一键脚本 | **已收口** | `scripts/verify-e2e.py` 编排 S0–S9 按 M1–M6 验收项 + MVP 总验收出状态（S8/S9 由 ADR-029 追加）；最近一轮 7 阶段 PASS、S7 容器链路因 daemon 缺席 BLOCKED（`--stages s7` 可补跑）、S8/S9 单独重跑均 PASS |
 | T7.8 单文件规模门禁 + 技术债收口 | **已收口**（ADR-028） | `scripts/check-file-size.py` + `file-size-baseline.txt`（五条判据、变异 5/5 全红，接入 `tasks.ps1 check-file-size` 与 E2E S1）；偿清登记在册的 3 个文件 （main.go 485→264、config.go 616→212、processor.go 483→253，纯同包移动）。**存量 44 个文件仍超限，已登记基线且只减不增** —— 不是「债已还清」 |
 | T7.9 M6 全量纳入回归 | **已收口**（ADR-029） | 新增 S8 `verify-notify.py`（真栈 9 判据，脚本变异 3/3 全红）+ S9 `verify-onboarding.py`（13 判据，rc=2 记 BLOCKED）；编排器补「开跑前删旧报告」「S4 先清 playwright 产物」两条纪律。**接线变异 5/5 全红**；全量一轮 S0–S9 无红（S7 因 daemon 缺席 BLOCKED） |
-| 开发计划 §10 M6（通知 + 自监控） | **全部收口** | **T6.1 / T6.2 / T6.3 / T6.4 / T6.5 全部完成**（ADR-024 / 025 / 026）：Slack 通知、去风暴 + 通用出站 webhook、`/metrics` 七指标 + worker 独立监听、抓取配置 + 记录/告警规则 + Grafana 面板 + 静态核对 `verify-observability.py`、[接入指南](docs/接入指南-Alertmanager.md) + `verify-onboarding.py`（文档代码块原文在真栈跑）。五项均属 `[Unreleased]`，v0.1.0 不含。**已全量纳入一键回归（ADR-029）**：S8 = `verify-notify.py`（真栈 9 判据：两 sink 送达 / 去风暴 / 终态必发 / token 不外泄）、S9 = `verify-onboarding.py`（接入指南代码块原文实跑；缺 bash/curl 记 BLOCKED 不冒充通过） |
-| 计划外加固 T6.6（HTTP 入口） | **已收口**（ADR-027） | 三个 JSON 入口收成一个 `readBody`，修掉两个一直在的语义缺陷：`incidents/{id}/comments` 的超限请求报 400 而非 413（该入口从未有 413 用例，故从 M3 起未被发现）、非 UTF-8 请求体走到 PG 才爆成 503（现为 400，日志带 `first_invalid_offset`）。判据是 3 入口 × 2 类坏输入的矩阵 + 「合法 UTF-8 不被误杀」反面用例，变异 5/5 全红。**同批裁定不做限流、不做 CORS**，理由见 `deploy/README.md` 与 CHANGELOG Known limitations |
+| 开发计划 §10 M6（通知 + 自监控） | **全部收口** | **T6.1 / T6.2 / T6.3 / T6.4 / T6.5 全部完成**（ADR-024 / 025 / 026）：Slack 通知、去风暴 + 通用出站 webhook、`/metrics` 七指标 + worker 独立监听、抓取配置 + 记录/告警规则 + Grafana 面板 + 静态核对 `verify-observability.py`、[接入指南](docs/接入指南-Alertmanager.md) + `verify-onboarding.py`（文档代码块原文在真栈跑）。五项**已随 v0.2.0 发布**（v0.1.0 不含）。**已全量纳入一键回归（ADR-029）**：S8 = `verify-notify.py`（真栈 9 判据：两 sink 送达 / 去风暴 / 终态必发 / token 不外泄）、S9 = `verify-onboarding.py`（接入指南代码块原文实跑；缺 bash/curl 记 BLOCKED 不冒充通过） |
+| 计划外加固 T6.6（HTTP 入口） | **已收口**（ADR-027），v0.2.0 发布 | 三个 JSON 入口收成一个 `readBody`，修掉两个一直在的语义缺陷：`incidents/{id}/comments` 的超限请求报 400 而非 413（该入口从未有 413 用例，故从 M3 起未被发现）、非 UTF-8 请求体走到 PG 才爆成 503（现为 400，日志带 `first_invalid_offset`）。判据是 3 入口 × 2 类坏输入的矩阵 + 「合法 UTF-8 不被误杀」反面用例，变异 5/5 全红。**同批裁定不做限流、不做 CORS**，理由见 `deploy/README.md` 与 CHANGELOG Known limitations |
 
 ---
 
-## 发布（v0.1.0）
+## 发布（当前 v0.2.0）
 
-版本形态：git tag `v0.1.0` + 镜像 `iip-server:0.1.0` / `iip-worker:0.1.0` +
-Helm chart `appVersion: 0.1.0`。四处标签（compose / Makefile `IMAGE_TAG` /
-`verify-images.py` 的 `IIP_TAG` / chart）**必须同步**——这是 M2 起就有的纪律，
-本次发布已由脚本判据锁定（见「T7.6 收口记录」）。
+版本形态：git tag `v0.2.0` + 镜像 `iip-server:0.2.0` / `iip-worker:0.2.0` +
+Helm chart `appVersion: 0.2.0`。**16 处标签必须同步**（含 compose / Makefile
+`IMAGE_TAG` / `verify-images.py` 的 `IIP_TAG` / chart / `tasks.ps1`，以及三处
+写在注释与 `--help` 里的默认值）——位置清单在 `scripts/tag_locs.py`，
+E2E 的 S1 阶段与发版脚本**共用同一份**，不再靠人肉 grep。
+
+**不要手打版本号改标签**，用发版脚本（它改完会自证重扫，漏改直接报错）：
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0：首个公开发布版"   # 指向 T7.6 提交
-git push origin v0.1.0                            # 需先有 remote（本仓库当前没有）
-make image-build                                  # 本机构建 0.1.0 镜像
+python scripts/bump-version.py --check              # 只报告：16 处是否一致
+python scripts/bump-version.py --write --bump minor # 真改（--to 0.3.0 亦可）
+python scripts/bump-version.py --tag                # 只打印 tag 命令，不代跑
 ```
 
-**如实声明**：本仓库当前**无 git remote**，`git push` 与 GitHub Release
-尚未执行；CI（`.github/workflows/ci.yml`）因此从未在 GitHub 上跑过，
-「CI 绿」目前只有本地等价复现证据。完整变更与已知限制见
-[`CHANGELOG.md`](CHANGELOG.md)。
+发布步骤（`--tag` 输出的命令由维护者执行）：
+
+```bash
+git tag -a v0.2.0 -m "IIP v0.2.0：通知链路 + 自监控 + 全量回归"   # 指向发版提交
+git push origin v0.2.0
+make image-build                                    # 本机构建 0.2.0 镜像
+```
+
+**如实声明（2026-10-18 核实）**：remote 已配置为
+`https://github.com/GoldY6666/IIP.git`，但该仓库**为空（零提交）**——
+`v0.1.0` 与 `v0.2.0` 在推送前都是**本地 tag**，`git push` 与 GitHub Release
+尚未执行；CI（`.github/workflows/ci.yml`）因此一次都没在 GitHub 上跑过，
+「CI 绿」目前只有本地等价复现证据。首次推送后的第一轮 CI 结果是未知数。
+完整变更与已知限制见 [`CHANGELOG.md`](CHANGELOG.md)。

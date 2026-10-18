@@ -1,30 +1,96 @@
 # 推送到 GitHub —— 操作指引
 
-> 生成时间：2026-10-11
-> 仓库：`https://github.com/GoldY6666/IIP`（当前为**空仓库**，从未推送过）
-> 状态：**本地已 100% 就绪，等你在本机执行一次推送**
+> 生成时间：2026-10-11；**2026-10-18 更新：改为「分两次推送」，并补 v0.2.0**
+> 仓库：`https://github.com/GoldY6666/IIP`
+> 状态：**本地已就绪，等你在本机执行两次 push（顺序不能反）**
 
 ---
 
-## 一、当前状态（推送前已核验）
+## 零、2026-10-18 复核结论（先读这段）
 
-| 项 | 值 |
-|---|---|
-| 本地仓库路径 | `D:\Documents\qwen-agent\iip` |
-| 分支 | `main` |
-| 提交数 | 以 `git rev-list --count HEAD` 为准（§九 漂移守卫） |
-| HEAD | 同上，`git log --oneline -1` |
-| 工作树 | **完全干净**（无未提交改动） |
-| 仓库体积 | **1.33 MiB**（已 `git gc` 压成单个 pack，1048 个对象） |
-| remote | `https://github.com/GoldY6666/IIP.git`（**已确认无 token 残留**） |
-| 远程分支 | `[]` —— 空仓库，确认从未推过 |
+| 项 | 结论 | 依据 |
+|---|---|---|
+| remote 是否存在 | **存在**：`origin → https://github.com/GoldY6666/IIP.git` | `git remote -v` |
+| 远程仓库状态 | **存在但是空的（零提交）** | `git ls-remote` 返回 0 行；HTTP 200 |
+| 本地 tag | `v0.0-m1` … `v0.0-m5`、`v0.1.0`、`v0.2.0`（**均为本地 tag**） | `git tag --list` |
+| 当前代码版本 | **0.2.0**（16 处标签一致） | `python scripts/bump-version.py --check` |
 
-> **为什么强调体积**：`git gc` 把3.95 MiB 松散对象压成了 1.33 MiB 单个 pack。
-> 这样推送只需传一个 pack 而不是1048 次请求，**在你本机网络上会快很多、也不易中断**。
+> README / CHANGELOG 里原先写的「仓库无 git remote」是**过期说法**，已在本轮改为
+> 「remote 已配置但仓库为空、尚未推送」。写文档时说的是当时的事实，事实变了就要改。
 
 ---
 
-## 二、⚠️ 推送前请先决定：仓库要不要设为私有
+## 一、为什么要分两次推
+
+`v0.1.0` 不是 HEAD，它指向历史提交 `a6c184a`（94 个提交处）；`v0.2.0` 指向最新提交。
+一次性推 `main` 会把两个 tag 一起带上去，但**Release 页只能「先 v0.1.0 后 v0.2.0」
+才能讲出一个可信的时间线** —— 而且 GitHub 的 Release 一旦发错顺序，
+「上一个版本」链接就指错了。分两次更稳，也更好核对。
+
+| 步骤 | 推什么 | 推完仓库里应该有 |
+|---|---|---|
+| **第 1 次** | 到 `v0.1.0` 为止的历史 + `v0.1.0` tag | 94 个提交、1 个 tag |
+| **第 2 次** | `main` 到 HEAD + `v0.2.0` tag | 全部提交、2 个 tag |
+
+---
+
+## 二、第 1 次推送：到 v0.1.0
+
+```bash
+cd D:/Documents/qwen-agent/iip
+
+# ① 只推到 v0.1.0 那个提交（用 refspec，不会把 main 提前推上去）
+git push origin a6c184a:refs/heads/main
+# ② 推 v0.1.0 标签（annotated tag 单独推）
+git push origin v0.1.0
+```
+
+核对（应输出 `a6c184ac69dcc9740551b899b71bd50f23cb16e4`）：
+
+```bash
+git ls-remote origin refs/heads/main
+git ls-remote origin refs/tags/v0.1.0
+```
+
+> 若你想让 `main` 从一开始就指向最新、Release 只按 tag 建，也可以跳过①的 refspec，
+> 直接在第 1 次就 `git push -u origin main` —— **两条路都行**，区别只在于
+> 「远程 main 什么时候变成最新」。上面这条是更保守的做法。
+
+---
+
+## 三、第 2 次推送：main + v0.2.0
+
+```bash
+cd D:/Documents/qwen-agent/iip
+
+git push -u origin main        # 补齐 v0.1.0 之后的全部提交
+git push origin v0.2.0         # 推 v0.2.0 标签
+```
+
+核对：
+
+```bash
+git rev-parse main origin/main     # 两个哈希相同 = main 推成功
+git ls-remote origin refs/tags/    # 应列出 v0.0-m1..m5 / v0.1.0 / v0.2.0
+```
+
+---
+
+## 四、两个 GitHub Release
+
+正文**直接复制 `docs/release-v0.2.0.md` 里分隔线之间的内容**（该文件顶部写了用法）。
+
+| 顺序 | tag | 标题 | 备注 |
+|---|---|---|---|
+| 1 | `v0.1.0` | `IIP v0.1.0 — 首个公开发布版` | 正文用 `CHANGELOG.md` 的 `## [0.1.0]` 节；**必须保留 Known limitations** |
+| 2 | `v0.2.0` | `IIP v0.2.0 — 通知链路、自监控与全量回归` | 正文用 `docs/release-v0.2.0.md` |
+
+> Release Notes 里**不要**写「CI 绿」。`ci.yml` 一次都没在 GitHub 上跑过，
+> 首跑结果未知（见 §六）。发版稿里已经如实写了这一条，别在发布时手动删掉。
+
+---
+
+## 五、⚠️ 推送前请先决定：仓库要不要设为私有
 
 **当前 `GoldY6666/IIP` 是 `public`（公开）**，任何人都能看到。
 
@@ -42,68 +108,19 @@
 
 > ⚠️ **公开过的内容即使改回私有，也可能已被缓存或被爬虫抓走** —— 所以要在**推送之前**决定。
 
----
-
-## 三、方式一：GitHub Desktop（推荐，最省事）
-
-你的本机网络不受沙箱出口限制，这是最可靠的路径。
-
-1. 打开 **GitHub Desktop**
-2. 菜单 **File → Add Local Repository…**
-3. 路径填：`D:\Documents\qwen-agent\iip`
-   > ⚠️ **注意选父目录**，不要选 `D:\Documents\qwen-agent\iip\IIP`
-   > （那个同名空目录已被 `.gitignore` 拦住，但**添加仓库时仍要选对**）
-4. 点 **Add Repository**
-5. 左栏会显示全部 commit（数量以 `git rev-list --count HEAD` 为准），顶部有 **"Push origin"** 按钮
-6. 点 **Push origin**
-7. 首次会弹登录窗：用 `GoldY6666` + 你的 PAT
-   > PAT 需含 **Contents: Read and write** + **Workflows: Read and write**
-   > （`Workflows` 权限已加好；缺它 GitHub 会拒绝，因为仓库里有 `.github/workflows/ci.yml`）
-
-> **如果 Desktop 仓库列表里还留着那个空的 `IIP` 仓库**，先在
-> `Repository → Remove` 移除，避免推错地方。
+> 已做的公开前自查（2026-10-18）：`.env.example` / `secret-pg.yaml` 均为模板或 **dev 默认值**；
+> `git log -S` 扫私钥与 `ghp_` 无命中；`git grep` 扫 AWS / OpenAI / Slack token 无命中。
+> LICENSE 为 Apache-2.0。
 
 ---
 
-## 四、方式二：命令行（本机 PowerShell 或 Git Bash）
-
-```powershell
-cd D:\Documents\qwen-agent\iip
-git push -u origin main
-```
-
-弹出登录窗时填 `GoldY6666` + PAT。
-
-**若不想每次输密码**，先设置凭据助手：
-
-```bash
-git config --global credential.helper manager
-```
-
-然后照常 `git push`，第一次弹窗填一次即可。
-
----
-
-## 五、推完请验证（两条命令）
-
-```bash
-# ① 应输出 "main -> main" 或 "Everything up-to-date"（此时是真的了）
-git push -u origin main
-
-# ② 看本地记录的远程 HEAD 是否与本地一致
-git rev-parse main origin/main
-#    两个哈希相同 = 推送成功
-```
-
----
-
-## 六、推送成功后会发生什么
+## 六、推送后会怎样
 
 GitHub 收到 `.github/workflows/ci.yml` 后会**自动跑第一次 CI**，包含三个 job：
 
 | job | 做什么 | 预期耗时 |
 |---|---|---|
-| `lint` | `golangci-lint v1.61.0` | ~2 min |
+| `lint` | `golangci-lint` v2（Go 1.26.9 工具链） | ~3 min |
 | `backend` | Go 单测 + **真库集成测试**（本次已修：补 `services.postgres` + `IIP_TEST_PG_URL`） | ~10 min |
 | `e2e` | Playwright 前端 + 真进程 E2E（本次已修：删与 `stack.mjs` 抢 5434 的 service 容器） | ~5 min |
 
@@ -114,11 +131,15 @@ GitHub 收到 `.github/workflows/ci.yml` 后会**自动跑第一次 CI**，包�
 > （详见 `docs/M6-交付详细报告.md` §4.1）。
 > **静态审查不等于跑过**，首跑结果有不确定性：
 
-> ⚠️ **最可能的一个坑**：`golangci-lint v1.61.0`（2024-09）构建时的 Go 版本
-> 低于 `go.mod` 声明的 `go 1.23` ⇒ 报
+> ⚠️ **已修掉的那个坑（留档，别再踩回去）**：原先固定 `golangci-lint v1.61.0`
+> （2024-09），它构建时的 Go 版本低于 `go.mod` 的 `go 1.26` ⇒ 会报
 > 「the Go language version used to build golangci-lint is lower than the targeted Go version」。
-> **真出现时的修法是升 `golangci-lint` 到 v1.x 最新版（如 v1.64.x，配置格式不变），
-> 不是降 `go.mod` 的 go 版本。**
+> 现已迁到 **action v9 + golangci-lint v2**（见 `ci.yml` 第 93–107 行的注释）。
+> **若真报同类错误，修法是升 lint 版本，不是降 `go.mod` 的 go 版本。**
+
+> ⚠️ **首跑最可能出问题的地方（我的判断，未经实证）**：`backend` job 的真库测试
+> 依赖 `services.postgres` 与 `IIP_TEST_PG_URL` 对齐；`e2e` job 依赖 runner 上装好
+> Chrome。这两处只做过静态审查 —— **静态审查不等于跑过**。
 
 ---
 
@@ -127,7 +148,7 @@ GitHub 收到 `.github/workflows/ci.yml` 后会**自动跑第一次 CI**，包�
 ### 1. 登记 `OPEN-M5-4` 关闭
 
 `OPEN-M5-4` 登记的是「`vitest`/`jsdom`/Testing Library 是新增 devDependency，
-需在 CI 加 `pnpm test` job 才算进门禁」，此前因**仓库无 remote** 而无法验证。
+需在 CI 加 `pnpm test` job 才算进门禁」，此前因**仓库从未推送**而无法验证。
 
 推送 + CI 首跑（尤其是 `frontend` 的 `vitest` 真的在 runner 上跑起来）完成后，
 这条才可以**就地关闭**。文件：`docs/decisions.md` 登记册。
@@ -156,9 +177,10 @@ GitHub 收到 `.github/workflows/ci.yml` 后会**自动跑第一次 CI**，包�
 
 ## 九、本文档的漂移守卫（改本文前先读）
 
-**本文写了两个会随提交变化的数字：提交数与 HEAD。**
+**本文不写提交数与 HEAD**（2026-10-18 改版时删掉了：写了必然过期）。
 
-- **提交数**：改动本文并提交后提交数会 +1 ⇒ §一 与 §三.5 里的数字会过期。
+- 唯一写死的 SHA 是 **`v0.1.0` 指向的提交 `a6c184a`**，它是历史事实，不会变；
+  复核命令见 §二。
 - **HEAD 提交号**：**本文件无法自引用自己的提交号** ——
   提交那一刻才产生该 SHA，写进去必然是上一个提交的 SHA。
 

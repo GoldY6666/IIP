@@ -17,7 +17,7 @@
 
 环境变量（全部可选）：
   IIP_DOCKER_BIN   docker.exe 绝对路径（不在 PATH 时必填）
-  IIP_TAG          镜像标签          默认 0.1.0（与 compose / Makefile / chart 联动）
+  IIP_TAG          镜像标签          默认 0.2.0（与 compose / Makefile / chart 联动）
   IIP_HTTP_PORT    宿主机映射端口    默认 8080
   IIP_KEEP         设为 1 则验证后不清理容器（便于人工排查）
   IIP_LOG_DIR      报告输出目录      默认 = 仓库根
@@ -59,7 +59,7 @@ from lib_docker import connect, run as _run  # noqa: E402
 # T7.6（2026-10-14）：默认标签随发版切到 0.1.0。与 deploy/docker-compose.yml、
 # Makefile 的 IMAGE_TAG、deploy/helm/iip 的 appVersion/tag 四处联动 ——
 # 改任何一处而忘了其余，compose 会去找一个并未构建的标签，up 直接失败。
-TAG = os.environ.get("IIP_TAG", "0.1.0")
+TAG = os.environ.get("IIP_TAG", "0.2.0")
 HTTP_PORT = int(os.environ.get("IIP_HTTP_PORT", "8080"))
 KEEP = os.environ.get("IIP_KEEP", "") == "1"
 

@@ -23,7 +23,7 @@
   IIP_SRC      源码根        默认脚本所在目录的上一级
   IIP_GO       go 可执行     默认 PATH，否则探测常见位置
   IIP_OUT      产物输出目录  默认 <系统临时目录>/iip-bin-check
-  IIP_VERSION  注入的版本号  默认 0.1.0（发版时与镜像标签一致）
+  IIP_VERSION  注入的版本号  默认 0.2.0（发版时与镜像标签一致）
   IIP_ARCH     目标架构      默认 amd64（可选 arm64）
   IIP_LOG_DIR  报告输出目录  默认源码根
 """
@@ -40,7 +40,7 @@ SRC = os.environ.get("IIP_SRC") or os.path.dirname(_HERE)
 OUT = os.environ.get("IIP_OUT") or os.path.join(tempfile.gettempdir(), "iip-bin-check")
 # T7.6（2026-10-14）：默认版本串随发版切到 0.1.0 —— 与镜像标签保持一致，
 # 否则「版本串注入生效」验的是一个发版里并不存在的旧值。
-VERSION = os.environ.get("IIP_VERSION", "0.1.0")
+VERSION = os.environ.get("IIP_VERSION", "0.2.0")
 ARCH = os.environ.get("IIP_ARCH", "amd64")
 LOG_DIR = os.environ.get("IIP_LOG_DIR") or SRC
 

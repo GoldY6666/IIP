@@ -14,7 +14,7 @@ COMPOSE ?= docker compose -f deploy/docker-compose.yml
 # 镜像标签与构建目标：一个 Dockerfile 出两个镜像（--target server / worker）
 # 2026-10-14 T7.6：0.0-m1 -> 0.1.0。此前该值自 M2 起停滞在 0.0-m1（落后两代），
 # 与 compose / verify-images.py / Helm chart 三处漂移；发版时五处必须同步改。
-IMAGE_TAG ?= 0.1.0
+IMAGE_TAG ?= 0.2.0
 IMAGE_PREFIX ?= iip
 
 .PHONY: help deps compose-up compose-down run-server run-worker test lint migrate-up migrate-down web-dev pg-up pg-down tidy build image-build image-ls app-up app-down verify-images verify-runtime check-binaries run-local

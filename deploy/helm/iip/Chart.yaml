@@ -5,7 +5,7 @@ type: application
 # chart 版本与 appVersion 分开：前者随 chart 模板改动递增，
 # 后者跟随产品发版（与 docker-compose.yml / Makefile IMAGE_TAG /
 # verify-images.py 的 IIP_TAG 四处联动，T7.6 发 v0.1.0 时一并修改）。
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 # 只支持 helm 3（v2 chart api 是兼容性声明，实际模板只用 v3 特性）
 kubeVersion: ">=1.21.0-0"

@@ -369,26 +369,14 @@ def stage_s0():
 
 # ---------------------------------------------------------------- S1 静态
 
-# 标签四联动的全部位置（T7.6 对齐过的 9 处 + compose 内 3 处引用 +
-# deploy/README 的构建示例）。每处必须「恰好匹配一次」——0 次=定义被删，
-# 多次=出现歧义，两者都是 FAIL 而不是跳过。
-TAG_LOCS = [
-    ("Makefile", r'^IMAGE_TAG\s*\?=\s*(\S+)'),
-    ("deploy/docker-compose.yml", r'^x-app-image:.*iip-server:(\S+)'),
-    ("deploy/docker-compose.yml", r'^\s+image:\s*iip-worker:(\S+)'),
-    ("deploy/docker-compose.yml", r'--target server -t iip-server:(\S+)'),
-    ("deploy/docker-compose.yml", r'--target worker -t iip-worker:(\S+)'),
-    ("deploy/README.md", r'--target server -t iip-server:(\S+)'),
-    ("deploy/README.md", r'--target worker -t iip-worker:(\S+)'),
-    ("deploy/helm/iip/Chart.yaml", r'^appVersion:\s*"?([^"\s]+)"?'),
-    ("deploy/helm/iip/Chart.yaml", r'^version:\s*(\S+)'),
-    ("deploy/helm/iip/values.yaml", r'^\s+tag:\s*"?([^"\s]+)"?'),
-    ("scripts/verify-images.py",
-     r'os\.environ\.get\("IIP_TAG",\s*"([^"]+)"\)'),
-    ("scripts/check-binaries.py",
-     r'os\.environ\.get\("IIP_VERSION",\s*"([^"]+)"\)'),
-    ("scripts/tasks.ps1", r"\$ImageTag\s*=\s*'([^']+)'"),
-]
+# 标签四联动的全部位置由 scripts/tag_locs.py 提供（发版脚本与判据共用一份，
+# 避免「该改哪几处」存在于两处而漂移）。每处必须「恰好匹配一次」。
+try:
+    sys.path.insert(0, _HERE)
+    from tag_locs import AUTHORITY as TAG_AUTHORITY  # noqa: F401  (供 bump 用)
+    from tag_locs import TAG_LOCS
+except ImportError as exc:  # pragma: no cover - 部署缺失时才触发
+    raise SystemExit("scripts/tag_locs.py 缺失或不可导入：%s" % exc)
 
 
 def check_tag_consistency():
@@ -420,22 +408,24 @@ def check_tag_consistency():
                    "；".join("%s=%s" % kv for kv in values.items())),
                 subs)
     common = distinct[0]
-    # 与最新 git tag 对齐（剥掉前导 v）：防「七处一起漂到一个没人发过的值」
+    n_loc = len(TAG_LOCS)
+    # 与最新 git tag 对齐（剥掉前导 v）：防「全部位置一起漂到一个没人发过的值」
     rc, out = run_cmd(["git", "describe", "--tags", "--abbrev=0"], timeout=30)
     if rc != 0:
         subs.append({"name": "git tag", "status": "warn",
                      "detail": "取不到最新 tag（跳过对齐检查）"})
-        return "PASS", "七处一致 = %s（未与 git tag 对齐：无 tag）" % common, subs
+        return ("PASS", "%d 处一致 = %s（未与 git tag 对齐：无 tag）"
+                % (n_loc, common), subs)
     tag = out.strip()
     tag_ver = tag[1:] if tag.startswith("v") else tag
     if tag_ver != common:
         subs.append({"name": "git tag 对齐", "status": "fail",
                      "detail": "tag=%s 但代码标签=%s" % (tag_ver, common)})
-        return ("FAIL", "git tag %s 与七处标签 %s 不一致" % (tag_ver, common),
-                subs)
+        return ("FAIL", "git tag %s 与 %d 处代码标签 %s 不一致"
+                % (tag_ver, n_loc, common), subs)
     subs.append({"name": "git tag 对齐", "status": "pass",
                  "detail": "%s == %s" % (tag, common)})
-    return "PASS", "七处 + git tag 全部一致 = %s" % common, subs
+    return "PASS", "%d 处 + git tag 全部一致 = %s" % (n_loc, common), subs
 
 
 def check_clean_clone_build():
@@ -765,7 +755,8 @@ def stage_s4():
 M_MAP = [
     ("M0", "干净 PG 上迁移可重复执行", ["s2"], ""),
     ("M0", "server/worker 启动且 /healthz 200", ["s3"], ""),
-    ("M0", "CI 三色通过", [], "仓库无 git remote，ci.yml 从未在 GitHub 上跑过"),
+    ("M0", "CI 三色通过", [],
+     "remote 已配置（github.com/GoldY6666/IIP）但仓库为空、从未推送 ⇒ ci.yml 一次都没在 GitHub 上跑过"),
     ("M1", "真实告警 3s 内落库，labels/severity/fingerprint 正确", ["s3"], ""),
     ("M1", "重复 firing 只 1 行、starts_at 为首次时间", ["s2", "s3"], ""),
     ("M1", "并发重复 webhook 无脏数据（单测+集成）", ["s2"], ""),
@@ -800,13 +791,32 @@ M_MAP = [
     ("M6", "非 UTF-8 → 400 / 超限 → 413 入口矩阵（T6.6）单测", ["s2"], ""),
 ]
 
-MVP_MAP = [
-    ("干净机器 git clone + docker compose up ≤15 分钟完成部署",
-     ["s1", "s7"],
-     "s1 覆盖 clone+构建；compose up+健康与计时在 s7（daemon 缺席则 BLOCKED）"),
-    ("Replay 数据集 + 故障演练全部通过", ["s2", "s5"], ""),
-    ("发布 v0.1.0", ["s1"], "S1 标签四联动一致 + git tag v0.1.0 存在"),
-]
+def release_version():
+    """当前代码里的版本标签（各位置已由 S1 判据保证一致；不一致时取权威处）。
+
+    用于「发布 vX.Y.Z」这条 MVP 验收项的标题——写死版本号会在每次发版后
+    撒谎（v0.2.0 发版时它还显示「发布 v0.1.0」）。
+    """
+    try:
+        with open(os.path.join(REPO, TAG_AUTHORITY[0]),
+                  "r", encoding="utf-8", errors="replace") as f:
+            hits = re.findall(TAG_AUTHORITY[1], f.read(), re.M)
+    except OSError:
+        return ""
+    return hits[0] if len(hits) == 1 else ""
+
+
+def mvp_map():
+    """MVP 总验收映射。版本号动态取，其余静态。"""
+    ver = release_version()
+    title = ("发布 v%s" % ver) if ver else "发布（版本号未知）"
+    return [
+        ("干净机器 git clone + docker compose up ≤15 分钟完成部署",
+         ["s1", "s7"],
+         "s1 覆盖 clone+构建；compose up+健康与计时在 s7（daemon 缺席则 BLOCKED）"),
+        ("Replay 数据集 + 故障演练全部通过", ["s2", "s5"], ""),
+        (title, ["s1"], "S1 标签四联动一致 + git tag v%s 存在" % ver),
+    ]
 
 STATUS_ORDER = {"FAIL": 0, "BLOCKED": 1, "MISSING": 2, "PASS": 3}
 
@@ -891,7 +901,7 @@ def build_summary(strict=False):
     lines.append("")
 
     lines.append("### MVP 总验收（开发计划 §11）")
-    for crit, covers, note in MVP_MAP:
+    for crit, covers, note in mvp_map():
         st = compose_status(covers, results)
         lines.append("  [%s] %s" % (st, crit))
         if note:

@@ -107,10 +107,10 @@ docker compose -f deploy/docker-compose.yml --profile app up -d
 
 ```bash
 # 在仓库根执行（标签与 Makefile IMAGE_TAG / compose x-app-image / Chart appVersion 四处联动）
-docker build --target server -t iip-server:0.1.0 .
-docker build --target worker -t iip-worker:0.1.0 .
+docker build --target server -t iip-server:0.2.0 .
+docker build --target worker -t iip-worker:0.2.0 .
 
-# 等价的一键方式（IMAGE_TAG 默认即 0.1.0）
+# 等价的一键方式（IMAGE_TAG 默认即 0.2.0）
 make image-build
 ```
 
