@@ -252,7 +252,11 @@ iip/
 
 **任务清单**：
 
-- [ ] T6.1 Slack Adapter：webhook URL 配置，新 Incident / 状态变更两类消息（Incident 摘要 + UI 深链）（1.5d）
+- [x] T6.1 Slack Adapter：webhook URL 配置，新 Incident / 状态变更两类消息（Incident 摘要 + UI 深链）（1.5d）
+  - 2026-10-18 实施完成：`internal/notify` 叶子包（异步派发 256 队列 + 单 worker；`SlackSink` 纯文本 `{"text":...}`；`formatText` 为可单测纯函数）+ 两处 hook（correlation 的 NEW 档 `link` 成功后、incident 的 `InTx` 提交后）+ 三个配置键（`IIP_SLACK_WEBHOOK_URL` / `IIP_SLACK_TIMEOUT` / `IIP_UI_BASE_URL`，默认关闭）。决策记录 **ADR-024**。
+  - **失败语义是本次的实质裁定**：默认关闭、异步 best-effort、失败只记日志（不返回 error，避免 Alertmanager 重投放大故障）；**计数查询失败宁可漏发**也不发「证据 0 条」的假消息。关闭顺序 `srv.Shutdown → notifier.Close → pool.Close`。
+  - **实测抓到两个真缺陷**：① 关闭竞态 —— `select` 同时等 queue 与 stopped 时两 case 同时就绪，Go 随机选分支，约一半概率把事件塞进已无人消费的队列并**返回 true**（10 次跑 5 次红）；修法用互斥量把「判 closed + 入队」做成原子段，新增 `TestServiceConcurrentCloseAndNotify` 并用变异证明必红。② 标题重复 —— `incidentTitle` 已含服务名，模板又拼一次（`LatencyHigh (checkout)（checkout）`）；模板改为只用 Title。
+  - 判据：`internal/notify` 15 用例（20 连跑稳定，变异 5 处全红）；两处 hook 各 4 用例（变异 3 处全红，其中「触发提前」只被时序用例抓到）；真栈探针（真 PG + 真 server + 假 webhook）两条消息内容与计数全对、优雅退出码 0。
 - [ ] T6.2 通知去风暴：同 Incident 10 分钟内最多 2 条更新消息；通用出站 webhook（预留外部系统接收）（1d）
 - [ ] T6.3 自监控 `/metrics`：`alert_ingest_total`、`webhook_duration_seconds`、`dedup_hit_ratio`、`correlation_score_bucket`（直方图）、`incident_created_total`、`evidence_collect_duration_seconds`、`task_retry_total`（1.5d）
 - [ ] T6.4 部署侧 Prometheus 抓取配置示例 + 基础面板 JSON（0.5d）

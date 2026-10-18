@@ -33,6 +33,7 @@ import (
 	"github.com/yu/iip/internal/incident"
 	"github.com/yu/iip/internal/logging"
 	appmw "github.com/yu/iip/internal/middleware"
+	"github.com/yu/iip/internal/notify"
 	"github.com/yu/iip/internal/repository"
 	"github.com/yu/iip/internal/store"
 	"github.com/yu/iip/internal/webui"
@@ -41,6 +42,11 @@ import (
 const (
 	readHeaderTimeout = 5 * time.Second
 	shutdownTimeout   = 10 * time.Second
+
+	// notifyCloseTimeout 是关闭时排空通知队列的上限。
+	// 比 sink 自身的超时（默认 5s）略长，给「最后几条」留出生效空间；
+	// 超时也不影响已完成的优雅关闭——通知本就是 best-effort。
+	notifyCloseTimeout = 8 * time.Second
 
 	// healthcheckFlag 触发自检模式；healthcheckTimeout 是自检请求的上限。
 	healthcheckFlag    = "--healthcheck"
@@ -167,8 +173,25 @@ func run() error {
 	}
 	logger.Info("数据库迁移完成")
 
+	// 4.5) 通知派发（M6 T6.1）。未配置 webhook 时返回 nil —— 两个消费包
+	// 对 nil 安全（notify.Service 的方法本身也 nil-safe），故下游无需分支。
+	//
+	// 关闭顺序由 defer 的 LIFO 保证：本 defer 晚于 pool.Close 注册，
+	// 因此先于 pool.Close 执行；而 srv.Shutdown 是显式调用，也在它之前。
+	// 即 srv.Shutdown → notifier.Close → pool.Close（ADR-024）。
+	notifier := buildNotifier(cfg, pool, logger)
+	if notifier != nil {
+		defer func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), notifyCloseTimeout)
+			defer cancel()
+			if err := notifier.Close(closeCtx); err != nil {
+				logger.Warn("通知队列排空超时，仍有少量通知未发出", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
 	// 5) 路由装配
-	r := newRouter(logger, pool, cfg)
+	r := newRouter(logger, pool, cfg, notifier)
 
 	// 6) HTTP 服务
 	srv := &http.Server{
@@ -202,8 +225,34 @@ func run() error {
 	return nil
 }
 
+// buildNotifier 按配置构造通知派发器；未配置 Slack webhook 时返回 nil。
+//
+// 只在服务端装配：worker 不产生事件，也就不发通知（它只消费采集任务）。
+func buildNotifier(cfg *config.Config, pool *pgxpool.Pool, logger *slog.Logger) *notify.Service {
+	if cfg.SlackWebhookURL == "" {
+		// 默认形态。明确记一条 INFO 而不是静默：运维要能区分
+		// 「没配所以没发」与「配了但发不出去」。
+		logger.Info("未配置 Slack webhook，通知功能关闭")
+		return nil
+	}
+	if cfg.UIBaseURL == "" {
+		// validateSlack 已允许空值（消息降级为不带深链），这里再提示一次：
+		// 没有深链的告警通知，on-call 要多点两次才能到事件页。
+		logger.Warn("UIBaseURL 为空，Slack 消息将不带事件深链")
+	}
+	// 刻意不打印 webhook URL：它是凭据（拿到即可往通道发任意消息）。
+	logger.Info("Slack 通知已启用",
+		slog.Duration("timeout", cfg.SlackTimeout),
+		slog.String("ui_base_url", cfg.UIBaseURL))
+	return notify.New(
+		[]notify.Sink{notify.NewSlackSink(cfg.SlackWebhookURL, cfg.UIBaseURL, cfg.SlackTimeout)},
+		repository.NewIncidents(pool), // CountsProvider：消息里的告警数/证据数
+		logger,
+	)
+}
+
 // newRouter 装配中间件与路由。业务逻辑不得写入此处（AGENTS.md 约束 2）。
-func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http.Handler {
+func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config, notifier *notify.Service) http.Handler {
 	r := chi.NewRouter()
 	r.Use(
 		chimw.RequestID,
@@ -302,6 +351,11 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 		WithTimeline(lifecycle).
 		WithSuppressions(repository.NewReviews(pool)).
 		WithEvidenceTasks(repository.NewTasks(pool))
+	// M6 T6.1：NEW 档建档成功后发通知。nil 时不注入（默认形态），
+	// 关联路径与 M2 完全一致。
+	if notifier != nil {
+		corrSvc = corrSvc.WithNotifier(notifier)
+	}
 
 	// M1：告警接入。此处只有装配——五阶段流水线在 internal/alert，
 	// SQL 在 internal/repository，handler 只负责 HTTP 契约（手册 §4.5）。
@@ -322,6 +376,10 @@ func newRouter(logger *slog.Logger, pool *pgxpool.Pool, cfg *config.Config) http
 	// M3：事件查询与生命周期（手册 §4.3）。装配处只连线，业务在 internal/incident，
 	// SQL 在 internal/repository —— 与 M1/M2 的分层一致。
 	incidentSvc := incident.NewService(lifecycle)
+	// M6 T6.1：状态流转提交成功后发通知。与关联侧同一实例、同一队列。
+	if notifier != nil {
+		incidentSvc = incidentSvc.WithNotifier(notifier)
+	}
 	r.Get("/api/v1/incidents", api.IncidentList(incidentSvc, logger))
 	r.Get("/api/v1/incidents/{id}", api.IncidentDetail(incidentSvc, logger))
 	r.Post("/api/v1/incidents/{id}/transition", api.IncidentTransition(incidentSvc, logger))

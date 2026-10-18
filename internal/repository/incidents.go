@@ -109,6 +109,18 @@ func (r *Incidents) SetAlertIncident(ctx context.Context, alertID, incidentID in
 	return nil
 }
 
+// IncidentCounts 返回某事件的关联告警数与证据数（T6.1 通知消息用，ADR-024）。
+//
+// 满足 notify.CountsProvider。事件不存在时两个计数均为 0（查询本身是标量子查询，
+// 不报错）——通知侧按 0 展示，不让「事件刚好被删」炸掉派发循环。
+func (r *Incidents) IncidentCounts(ctx context.Context, incidentID int64) (alertCount, evidenceCount int64, err error) {
+	row, qErr := r.queries.IncidentNotifyCounts(ctx, incidentID)
+	if qErr != nil {
+		return 0, 0, fmt.Errorf("repository: 统计事件计数失败: %w", qErr)
+	}
+	return row.AlertCount, row.EvidenceCount, nil
+}
+
 // textOrNull 把空串映射为 SQL NULL。
 func textOrNull(s string) pgtype.Text {
 	if s == "" {

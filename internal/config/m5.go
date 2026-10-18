@@ -38,6 +38,12 @@ const (
 	DefaultUIGrafanaURL    = "http://localhost:3000"
 	DefaultUILokiURL       = "http://localhost:3100"
 	DefaultUILokiTenantID  = ""
+	// DefaultUIBaseURL 是 IIP 自己前端的地址（T6.1 通知深链用）。
+	//
+	// 取 vite 开发服务器的 5173 而非 dist 静态托管的 8080：默认部署下
+	// WebRoot 为空（不启用静态托管），前端跑在 dev server 上；
+	// 生产部署显式覆盖即可。深链形如 {base}/incidents/{id}。
+	DefaultUIBaseURL = "http://localhost:5173"
 )
 
 // --- M5 字段 ---
@@ -65,6 +71,8 @@ func registerM5Flags(fs *pflag.FlagSet) {
 		"UI 链接用的 Loki 地址（浏览器可达）")
 	fs.String("ui-loki-tenant-id", DefaultUILokiTenantID,
 		"Loki 多租户时的 tenant id（单租户留空）")
+	fs.String("ui-base-url", DefaultUIBaseURL,
+		"IIP 前端根地址（浏览器可达）；通知消息里的事件深链由它拼出")
 }
 
 // readM5 从 koanf 读取 M5 配置并写回 cfg。
@@ -79,4 +87,5 @@ func readM5(k *koanf.Koanf, cfg *Config) {
 	cfg.UIGrafanaURL = strings.TrimSpace(k.String("ui-grafana-url"))
 	cfg.UILokiURL = strings.TrimSpace(k.String("ui-loki-url"))
 	cfg.UILokiTenantID = strings.TrimSpace(k.String("ui-loki-tenant-id"))
+	cfg.UIBaseURL = strings.TrimSpace(k.String("ui-base-url"))
 }

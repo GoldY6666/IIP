@@ -23,6 +23,8 @@ type Transactor interface {
 // 于是状态流转的全部规则都能在不起数据库、不起服务的情况下被测到。
 type Service struct {
 	tx Transactor
+	// notifier 为 nil 时不发通知（M6 T6.1 挂上）。
+	notifier Notifier
 	// now 是可替换的时钟。默认 time.Now；测试注入固定值后，
 	// 「timeline 事件时间」与「resolved_at」才能被精确断言而不是「大约此刻」。
 	now func() time.Time
@@ -191,11 +193,15 @@ func normalizeListFilter(f ListFilter) ListFilter {
 //     并发冲突返回 *ConflictError（409）；事件不存在返回 ErrIncidentNotFound（404）。
 func (s *Service) Transition(ctx context.Context, id int64, to Status, actor string) (Snapshot, error) {
 	var out Snapshot
+	// from 在闭包外声明：事务提交后发通知要用到原状态，
+	// 闭包内的 snap 出了 InTx 就不可见了。
+	var from Status
 	err := s.tx.InTx(ctx, func(st Store) error {
 		snap, err := st.GetByID(ctx, id)
 		if err != nil {
 			return err
 		}
+		from = snap.Status
 		// 用独立变量名而非复用 err：这里的 err 只在 if 内有效，
 		// 复用会触发 gocritic 的 sloppyReassign，遮蔽又会让外层错误被吞。
 		if transErr := NewTransitionError(snap.Status, to); transErr != nil {
@@ -236,5 +242,6 @@ func (s *Service) Transition(ctx context.Context, id int64, to Status, actor str
 	if err != nil {
 		return Snapshot{}, err
 	}
+	s.notifyChanged(&out, from, to, actor)
 	return out, nil
 }

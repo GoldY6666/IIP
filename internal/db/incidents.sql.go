@@ -83,6 +83,35 @@ func (q *Queries) GetIncidentByID(ctx context.Context, id int64) (Incident, erro
 	return i, err
 }
 
+const incidentNotifyCounts = `-- name: IncidentNotifyCounts :one
+SELECT
+    (SELECT count(*) FROM incident_alerts WHERE incident_alerts.incident_id = $1) AS alert_count,
+    (SELECT count(*) FROM evidence        WHERE evidence.incident_id        = $1) AS evidence_count
+`
+
+type IncidentNotifyCountsRow struct {
+	AlertCount    int64 `json:"alert_count"`
+	EvidenceCount int64 `json:"evidence_count"`
+}
+
+// T6.1 通知消息用的一次性计数：某事件的关联告警数与证据数（ADR-024）。
+//
+// 为什么不复用 ListIncidents 的聚合子查询：那条返回的是列表行形状
+// （title/severity/...），通知只需要两个数；且通知在**异步 goroutine** 里
+// 发（notify.Service），本查询不在 webhook / 状态流转的请求路径上，
+// 多一次往返的代价由派发线程承担，与主路径解耦。
+//
+// 两个计数都走既有索引前缀：incident_alerts 的 PK 是 (incident_id, alert_id)，
+// evidence 有 idx_evidence_incident_id ⇒ 均为索引计数，不扫表。
+// 事件不存在时两个计数都是 0（而不是报错）——通知侧按 0 展示即可，
+// 「事件没了」不该让一条通知炸掉整个派发循环。
+func (q *Queries) IncidentNotifyCounts(ctx context.Context, incidentID int64) (IncidentNotifyCountsRow, error) {
+	row := q.db.QueryRow(ctx, incidentNotifyCounts, incidentID)
+	var i IncidentNotifyCountsRow
+	err := row.Scan(&i.AlertCount, &i.EvidenceCount)
+	return i, err
+}
+
 const linkAlertToIncident = `-- name: LinkAlertToIncident :exec
 INSERT INTO incident_alerts (incident_id, alert_id, alert_starts_at, correlation_score, needs_review)
 VALUES ($1, $2, $3, $5, $4)

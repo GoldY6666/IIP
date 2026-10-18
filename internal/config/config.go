@@ -130,6 +130,19 @@ type Config struct {
 	// 补建未来分区 + 过期清理 + 重复 firing 扫描。
 	PartitionMaintenanceInterval time.Duration // IIP_PARTITION_MAINTENANCE_INTERVAL，默认 1h
 
+	// --- T6.1：Slack 通知（M6 §10，ADR-024，实现见 internal/notify）---
+
+	// SlackWebhookURL 是 Slack Incoming Webhook 地址。**空 = 关闭通知**。
+	//
+	// 沿用 ADR-017 的纪律：默认关闭，且「配了值必须真的能发」——
+	// 配了却因 URL 畸形发不出去，要在启动期就拦下（见 validateSlack），
+	// 而不是等第一条告警静默丢失。
+	SlackWebhookURL string // IIP_SLACK_WEBHOOK_URL，默认空（不通知）
+	// SlackTimeout 是单次 webhook POST 的超时上限。
+	// 通知是 best-effort 旁路：超时只丢这一条并记日志，
+	// 绝不反压 ingest / 状态流转主路径（派发是异步的，见 notify.Service）。
+	SlackTimeout time.Duration // IIP_SLACK_TIMEOUT，默认 5s
+
 	// EvidenceTLSInsecure 跳过采集目标的服务器证书校验（T7.5）。
 	//
 	// 默认 false。仅在「内网自签证书、来不及铺 CA」的过渡场景打开，
@@ -158,6 +171,12 @@ type Config struct {
 	UIGrafanaURL    string // IIP_UI_GRAFANA_URL，默认 http://localhost:3000
 	UILokiURL       string // IIP_UI_LOKI_URL，默认 http://localhost:3100
 	UILokiTenantID  string // IIP_UI_LOKI_TENANT_ID，默认空（单租户）
+	// UIBaseURL 是 IIP 自己的前端根地址（浏览器可达）。
+	//
+	// 通知消息里的事件深链由它拼出：{UIBaseURL}/incidents/{id}。
+	// 与上面三个面板链接同一族：给人点的，必须解析到宿主机——
+	// 容器内部地址（如 web:5173）点了打不开，比不配链接更难排查。
+	UIBaseURL string // IIP_UI_BASE_URL，默认 http://localhost:5173
 
 	// HTTPTimeout 是单个 HTTP 请求的处理超时上限（实现见 httptimeout.go）。
 	//
@@ -280,6 +299,8 @@ func Load(args []string) (*Config, error) {
 	registerM5Flags(fs)
 	// S5：HTTP 请求超时。注册在 httptimeout.go。
 	registerHTTPTimeoutFlags(fs)
+	// T6.1：Slack 通知。注册在 slack.go，默认空 = 关闭。
+	registerSlackFlags(fs)
 	// 自检模式开关。真正的分支在 main 里、早于本函数执行；此处仅注册以让
 	// "--healthcheck" / "--healthcheck=false" 都能被解析，不会报 unknown flag。
 	fs.Bool("healthcheck", false, "自检模式：请求本机 /healthz 后按结果退出")
@@ -360,6 +381,9 @@ func Load(args []string) (*Config, error) {
 	// S5：HTTP 请求超时（见 httptimeout.go）。
 	readHTTPTimeout(k, cfg)
 
+	// T6.1：Slack 通知（见 slack.go）。
+	readSlack(k, cfg)
+
 	// 采集器开关是否被**显式**配置过（见 validateM4 的说明）。
 	//
 	// 判据用 pflag 的 Changed（而非 koanf的键是否存在）：
@@ -409,6 +433,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validatePartition(); err != nil {
+		return err
+	}
+	if err := validateSlack(c); err != nil {
 		return err
 	}
 	return nil

@@ -67,6 +67,21 @@ curl.exe http://localhost:8080/healthz  # 预期输出 ok
 
 `/healthz` 会真实查询数据库（`SELECT 1`）：PG 正常返回 `ok`（HTTP 200），PG 不可用返回 `unavailable`（HTTP 503）。
 
+**可选：Slack 通知**
+
+默认关闭。三个环境变量：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `IIP_SLACK_WEBHOOK_URL` | 空（关闭） | Slack Incoming Webhook 地址；**是凭据**，不会被写进日志 |
+| `IIP_SLACK_TIMEOUT` | `5s` | 单条发送的 HTTP 超时 |
+| `IIP_UI_BASE_URL` | `http://localhost:5173` | 事件深链前缀（`<base>/incidents/<id>`）；为空则消息不带链接 |
+
+两类消息：新事件（标题/严重度/服务/关联告警数/证据数/开始时间）与状态变更
+（`from → to` + 操作人）。通知走异步队列，**Slack 挂掉不会影响告警接入**；
+计数查询失败时该条通知被放弃（不发送「证据 0 条」这类误导消息）。
+
+
 **卸载/清理**
 
 ```bash

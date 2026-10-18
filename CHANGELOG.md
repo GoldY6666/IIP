@@ -11,6 +11,13 @@ GitHub Release 与 CI 执行待 remote 就绪后补（见 v0.1.0 的 Known limit
 
 ### Added
 
+- **Slack 通知（T6.1 / ADR-024）**：新事件与状态变更两类消息，含事件摘要、
+  关联告警数/证据数、UI 深链。`internal/notify` 是叶子包（只依赖标准库）：
+  异步派发（256 队列 + 单 worker，`Notify` 非阻塞），失败只记日志
+  ——通知的可用性不参与告警接入的成败。默认关闭：未配
+  `IIP_SLACK_WEBHOOK_URL` 时装配处不注入，无「误发」路径。
+  计数查询失败**放弃该条通知**而不是发「证据 0 条」，避免 on-call 误判。
+  关闭顺序 `srv.Shutdown → notifier.Close → pool.Close`（排空残留）。
 - **`alerts` 按月 RANGE 分区（T7.1，迁移 0008 / ADR-022）**：分区键 `starts_at`，
   PK `(id, starts_at)`，月度边界按 UTC 计算——修掉了 `date AT TIME ZONE 'UTC'`
   在非 UTC 会话时区下把月末界算错（+08 下重叠 FAIL、负偏移下**静默分错月**）

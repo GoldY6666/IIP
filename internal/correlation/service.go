@@ -36,6 +36,8 @@ type Service struct {
 	suppressions SuppressionStore
 	// evidenceTasks 为 nil 时不入队采集任务（M2 行为，M4 挂上）。
 	evidenceTasks EvidenceEnqueuer
+	// notifier 为 nil 时不发通知（M2/M3/M4 行为，M6 T6.1 挂上）。
+	notifier Notifier
 	// now 是可注入时钟；nil 时取 time.Now().UTC()，让「留痕时间」可被精确断言。
 	now func() time.Time
 }
@@ -191,6 +193,7 @@ func (s *Service) correlateOne(
 		// 在这里入队是最早的时机，交给 worker 异步采。
 		s.enqueueEvidence(ctx, inc.ID, "create")
 		byIncident[inc.ID] = append(byIncident[inc.ID], v)
+		s.notifyCreated(inc)
 		return Result{Action: ActionNew, IncidentID: inc.ID, Score: 0}, nil
 	}
 }

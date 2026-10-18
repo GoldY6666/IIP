@@ -569,6 +569,7 @@
 | ADR-021 | M5 新增明暗主题切换：默认暗色 + localStorage 记忆，Header 图标切换，palette 动态解析保持 17 处调用点不变 | 已实施（推翻 M5 手册 §3.2 的 Out-of-Scope；**不推翻** ADR-016 —— 后者裁定的是默认基调而非「只有深色」。亮色语义色按白底重新校准，对比度须计算验证） |
 | ADR-022 | `alerts` 表按 `starts_at` 月度 RANGE 分区（T7.1，取代 ADR-002 的「暂不分区」） | 已实施（0008；PK/唯一索引含分区键、复合 FK、UTC 月界守卫测试、保留期走行级 DELETE） |
 | ADR-023 | T7.2 索引调优：建 `tasks` 事件表达式索引 + 删 `alerts` labels GIN | 已实施（0009；EXPLAIN 实测双重证据：GIN 的 14 个分区副本 `idx_scan` 全 0 = 零读者；tasks 两条消费查询全表扫且无保留期。Q3「join 加分区键」变体实测更慢/持平，**记录否决**以防重做） |
+| ADR-024 | T6.1 Slack 通知：默认关闭 + 异步 best-effort + 失败静默丢弃 | 已实施（`internal/notify` 叶子包 + 两处 hook；真库真栈探针 PASS，含竞态修复与标题去重；T6.2 的范围边界已在 ADR 内划清） |
 
 ---
 
@@ -798,6 +799,89 @@ ADR-022：`alerts` 表按 `starts_at` 月度 RANGE 分区（取代 ADR-002）
   `migrations/partition_test.go` 7 个用例（含会话时区守卫）+
   `migrate_test.go` 的 `TestAlertsPartitionMigration`（up → 单步回滚到 7 → up）；
   T7.1 收口时真库全量回归 0 FAIL。
+
+---
+
+ADR-024：T6.1 Slack 通知 —— 默认关闭、异步 best-effort、失败静默丢弃
+
+- **Status**: 已实施（T6.1，`internal/notify` + 两处 hook + server 装配）
+- **Date**: 2026-10-17（设计）/ 2026-10-18（实施与实测收口）
+- **来源**: docs/IIP开发计划.md §10 M6 T6.1「Slack Adapter：webhook URL 配置，
+  新 Incident / 状态变更两类消息（Incident 摘要 + UI 深链）」；
+  禹 2026-10-17 在 AskUserQuestion 中批准实施方案。
+- **Background**:
+  M6 的计划条目只写了「两类消息」。真正需要裁定的是**失败语义**：
+  通知一旦同步发在主路径上，Slack 的可用性就成了告警接入的可用性 ——
+  R7 压测有过实证教训：webhook 请求里同步做外部调用，吞吐从 1785 条/s
+  崩到 ~6 条/s。另一侧的风险是「发不出去就报错」：Alertmanager 会把
+  整批重投，双倍放大故障。因此本 ADR 的实质不是「怎么发消息」，
+  而是「消息发不出去时系统如何表现」。
+- **Options**:
+  ① 触发形态：(a) 同步发送（在关联/流转调用栈内）；
+     (b) 异步派发（入队即返回，单 goroutine 消费）。
+  ② 失败语义：(a) 向上返回 error（让调用方决定）；(b) 只记日志、静默丢弃。
+  ③ 计数查询失败：(a) 按 0 发送；(b) 放弃该条通知。
+  ④ 依赖形态：(a) notify 反向依赖 correlation/incident 的领域类型；
+     (b) 叶子包 + 消费方自定义最小接口。
+- **Decision**:
+  ① **(b) 异步派发**：256 容量队列 + 单 worker；`Notify*` 非阻塞，
+     队列满时丢弃当前条并记 WARN（通知无顺序价值，积压几百条过时消息无意义）。
+  ② **(b) 只记日志**：签名不返回 error，刻意不让它有上行压力；
+     关闭时排空残留（best-effort，`Close` 带超时兜底）。
+  ③ **(b) 放弃发送**：计数查不到就**不发**。一条写着「证据 0 条」的通知
+     会让 on-call 误判事件形态，比漏发更糟 —— 与 confidence
+     「给不出依据必须留空」同律（ADR-020 的取证诚实原则延伸到消息层）。
+  ④ **(b) 叶子包**：`internal/notify` 只依赖标准库；两个消费包各自声明
+     `Notifier` 接口（消费方定义），装配处注入同一实例。
+     代价是 `IncidentRef` 与领域对象字段重复；收益是 notify 的单测
+     不需要 correlation/incident 的任何替身。
+- **Consequences**:
+  - **默认关闭且结构性保证**：未配置 `IIP_SLACK_WEBHOOK_URL` 时
+    `buildNotifier` 返回 nil，装配处不注入 —— 下游不需要判空，
+    也不存在「误发」路径。`validateSlack` 只校验「配了就必须合法」。
+  - **关闭顺序**：`srv.Shutdown`（停止接入，在途请求完成）→
+    `notifier.Close`（排空队列）→ `pool.Close`。由 defer 的 LIFO 保证，
+    真栈探针实测退出码 0 且两条消息均已落账。
+  - **实测抓到的两个真缺陷（不是测试问题）**：
+    - **关闭竞态（谎报成功）**：首版 `enqueue` 用
+      `select { case queue<-ev: case <-stopped: }`。Close 已置停止信号
+      但 worker 仍在排空时，两个 case **同时就绪**，Go 随机选分支 ——
+      约一半概率把事件塞进已无人消费的队列并返回 true。
+      判据 `TestServiceNotifyAfterClose` 10 次跑 5 次红。
+      修法 = 互斥量把「判 closed + 非阻塞入队」做成原子段；
+      新增 `TestServiceConcurrentCloseAndNotify` 钉住
+      「Close 返回后入队必失败」，并用变异（还原旧实现）证明它必红。
+    - **标题重复**：关联引擎的 `incidentTitle` 已产出
+      `LatencyHigh (checkout)`，消息模板又拼了一次服务 →
+      `LatencyHigh (checkout)（checkout）`。真栈探针肉眼抓到。
+      修法 = 模板只用 Title；服务名由已有的「严重度｜服务」行承载。
+  - **消息形态**：`{"text": ...}` 纯文本，不上 Block Kit。
+    带 text 的 blocks 有天然降级路径，T6.2 若需要按钮/分区再加，
+    不破坏现有形态。
+  - **深链需要 `IIP_UI_BASE_URL`**：为空时消息不带详情行（可用的降级）。
+    代价（如实）：on-call 要多点两次才能到事件页。
+  - **计数的时效性**：`IncidentCounts` 在派发线程里查，取的是
+    「发送时刻」的库内值 —— 创建通知的计数可能已含并发合入的告警，
+    与消息里的「新事件」措辞并存不矛盾（事件确实新建，计数是当下快照）。
+  - **T6.2 的边界（本 ADR 明确不做）**：同 Incident 10 分钟去风暴、
+    通用出站 webhook 出口。两者都只需要**再加一个 Sink / 一层去重**，
+    不改变本 ADR 的异步与失败语义。
+- **Related ADRs**: ADR-020（断言拒绑漂移总数的诚实原则，本 ADR 的
+  「计数失败宁可漏发」同源）、R7 压测结论（主路径等外部系统的实测代价）、
+  ADR-001 系列的分层不变式（api → 领域 → repository）。
+- **Evidence**:
+  - 单测：`internal/notify` 15 个用例（10 个 Service 语义 + 4 个 Slack +
+    1 个标题去重），20 连跑稳定；变异 5 处（计数失败提前返回、关闭排空、
+    nil 保护、队列满谎报、旧 select 实现）全部如期转红。
+  - 接线：`internal/correlation/notify_test.go` 4 例、
+    `internal/incident/notify_test.go` 4 例；变异 3 处
+    （删两处 hook、把创建通知提前到 link 之前）均被对应用例抓到，
+    且「提前」只被时序用例抓到 —— 证明该用例不重复。
+  - 真栈探针（`D:\_iip_setup\_probe_slack.py`，输出存档
+    `_probe_slack.txt`）：真 PG 5434 + 真 iip-server + 假 webhook，
+    NEW 档消息含 `关联告警: 1 条｜证据: 0 条` 与深链，
+    transition 后消息含 `open → acknowledged（操作人: probe）`，
+    Ctrl+Break 优雅退出码 0。
 
 ---
 

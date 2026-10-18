@@ -231,6 +231,18 @@ type Querier interface {
 	// 带上 needs_review 条件：已经确认过的边（needs_review=FALSE）不应再被操作一次，
 	// 否则重复 reject 会往抑制表写第二次、重复 confirm 会产生重复留痕。
 	GetReviewEdge(ctx context.Context, arg GetReviewEdgeParams) (GetReviewEdgeRow, error)
+	// T6.1 通知消息用的一次性计数：某事件的关联告警数与证据数（ADR-024）。
+	//
+	// 为什么不复用 ListIncidents 的聚合子查询：那条返回的是列表行形状
+	// （title/severity/...），通知只需要两个数；且通知在**异步 goroutine** 里
+	// 发（notify.Service），本查询不在 webhook / 状态流转的请求路径上，
+	// 多一次往返的代价由派发线程承担，与主路径解耦。
+	//
+	// 两个计数都走既有索引前缀：incident_alerts 的 PK 是 (incident_id, alert_id)，
+	// evidence 有 idx_evidence_incident_id ⇒ 均为索引计数，不扫表。
+	// 事件不存在时两个计数都是 0（而不是报错）——通知侧按 0 展示即可，
+	// 「事件没了」不该让一条通知炸掉整个派发循环。
+	IncidentNotifyCounts(ctx context.Context, incidentID int64) (IncidentNotifyCountsRow, error)
 	// 持久化归一化后的告警（见手册 §4.2 阶段五 Persist）。
 	//
 	// ON CONFLICT 是 M1 的**数据库层去重兜底**：应用层的「先查后写」防不住并发投递，
