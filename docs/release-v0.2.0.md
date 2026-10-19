@@ -111,11 +111,13 @@ Helm chart `appVersion: 0.2.0`。版本标签由 `scripts/bump-version.py` 统�
 | E2E | S0–S6/S8/S9 PASS，S7 BLOCKED | `python scripts/verify-e2e.py` |
 | 发版前版本 | 0.1.0（tag 指向 `a6c184a`） | `git log --oneline v0.1.0 -1` |
 
-**三处必须说清的边界**（免得把「跑过」说成「在 tag 那个提交上跑过」）：
+**四处必须说清的边界**（免得把「跑过」说成「在 tag 那个提交上跑过」）：
 
 1. **E2E 全量一轮跑在 `8374be2`**。此后只改了：`CHANGELOG.md`（补三条 Fixed）、
    `docs/release-v0.2.0.md`（本附录）、`.github/workflows/ci.yml`（e2e job 的 Go
-   工具链改为从 `setup-go` 取）。**三者都不在 E2E 判据范围内**；发布提交上复跑了
+   工具链改为从 `setup-go` 取）、`README.md`（门户化：根 README 重写为面向访客的
+   门户版，原工程详情移至 `docs/README-工程详情.md` 并修正过期表述）。
+   **四者都不在 E2E 判据范围内**；发布提交上复跑了
    **S0 + S1**（含干净克隆 + 全量 build）仍 PASS、rc=0。没有为了「让报告覆盖到
    最后一版」再跑一次全量 —— 那 10 分钟里没跑的东西就是没跑过，不能算进去。
 2. **真库那 1103 是用 `-v` 跑出来的**（不带 `-v` 只能看到包级 `ok`，看不到子用例
