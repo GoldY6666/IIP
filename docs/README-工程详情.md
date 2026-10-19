@@ -884,7 +884,7 @@ M5 收尾时有一条 SKIP（`TestHandlerAllowsSymlinkedRoot`），根因是
 |----|------|------|
 | T7.1 告警按月分区 + retention | **已收口** | 迁移 0008（ADR-022，取代 ADR-002）：分区键 `starts_at`、PK `(id, starts_at)`、UTC 月界（修非 UTC 会话时区错月 bug + 永久守卫测试）；保留期走 `iip_drop_expired_alert_partitions()` 整表 DELETE + 行级 CASCADE（实测 FK 引用的分区 DROP/DETACH/TRUNCATE 全失败）；`incident_alerts` 复合 FK。已知限制：分区只增不减；同指纹跨 starts_at 的 firing 可并存（`iip_scan_firing_duplicates()` 曝光） |
 | T7.2 JSONB 索引调优 | **已收口** | 迁移 0009（ADR-023）：先取证后裁定（5 万 alerts / 5 千 tasks 规模 EXPLAIN 采样）。**删** labels GIN——14 个分区副本 `idx_scan` 全 0 = 零读者；**建** `idx_tasks_payload_incident((payload->>'incident_id')) WHERE kind='collect_evidence'`——两条消费查询原先全表扫且 tasks 无保留期。Q3「join 补分区键」变体实测更慢/持平，记录否决 |
-| T7.3 压测（1 万条） | **已收口** | **6/6 判据 PASS**：吞吐 346 条/s、折算单条 p95=45.6ms < 200ms、零丢失、rejected=0；M2 Replay 指标无退化（1.0000/1.0000）。残留边界：候选限额下「新告警最佳匹配为非种子老成员」仍可能漏合并（窄，待 V1.1 复查） |
+| T7.3 压测（1 万条） | **已收口** | **6/6 判据 PASS**（2026-10-19 带回退复跑）：吞吐 159 条/s、折算单条 p95=98.2ms < 200ms、零丢失、rejected=0、指纹互异。无回退基线轮（2026-10-14）为 346 条/s / p95=45.6ms；M2 Replay 指标无退化（1.0000/1.0000）。候选限额的残留边界（「新告警最佳匹配为非种子老成员」漏合并）已由两段式候选回退收口；回退快照改 Service 级共享 + 2s TTL 后，压测实证触发 9833 次不变、全量查询 9840→31 次（详见 CHANGELOG Unreleased「回退快照 TTL 缓存」）。与无回退版的吞吐差距是回退重算的固有 CPU，属边界修复的既定代价；残留收窄为「多个事件同处 MERGE 档时合并目标取限额集最佳而非全局最佳」 |
 | T7.4 故障演练 | **已收口** | `scripts/fault_drill.py` **33/33 PASS**：真 kill worker → ReclaimStale 回收（attempts=2）；真停 PG 25s → 不重启进程自动重连 + 队列不丢；Redis 缺席 = 默认形态（依赖闭包静态证明） |
 | T7.5 compose 生产化 + Helm | **已收口** | 7 服务 resources + 日志轮转；采集器 TLS（CA / insecure 双模式，读不到 CA 启动即失败）；`deploy/helm/iip` 简化版 chart（内置/外置 PG 双轨）。真栈容器链路段待 Docker daemon 恢复后补跑（T7.5 收口报告已如实标注） |
 | T7.6 README + CHANGELOG + v0.1.0 | **已收口** | 本文档重构 + `CHANGELOG.md` + 标签四联动；tag `v0.1.0` 本地已打（push / GitHub Release 待首次推送） |
