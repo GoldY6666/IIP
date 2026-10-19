@@ -60,20 +60,33 @@ const (
 // 这个按 service 的真实调用序**动态累积**成员，并按 mode 参数仿真 SQL 的
 // 候选集语义——members 按 link 顺序追加（= alert id 升序），
 // 与 SQL 的 `ORDER BY a.id DESC` 取尾部一致；种子 = members[0]（首条）。
+//
+// links 记录每条关联边的（事件, 分数, 是否待确认）：探针要断言的不是
+// 「分了几组」而是「N 以什么档位并入」——限额漏合并的病灶正在档位上
+// （自动合并降级成 REVIEW），只记分组看不出来。
 type realtimeStore struct {
 	nextID  int64
 	views   map[int64]AlertView
 	members map[int64][]CandidateAlert
+	links   map[int64]linkRecord
 
 	mode      limitMode
 	listCalls int
 	truncated int // 被限额裁掉的成员总数（鉴别力前置断言用）
 }
 
+// linkRecord 是一条关联边的留痕，字段与 LinkAlertToIncident 的入参一致。
+type linkRecord struct {
+	incidentID  int64
+	score       *float64
+	needsReview bool
+}
+
 func newRealtimeStore(mode limitMode) *realtimeStore {
 	return &realtimeStore{
 		views:   map[int64]AlertView{},
 		members: map[int64][]CandidateAlert{},
+		links:   map[int64]linkRecord{},
 		mode:    mode,
 	}
 }
@@ -116,7 +129,7 @@ func (r *realtimeStore) ListOpenIncidentAlerts(_ context.Context, perIncidentLim
 	return out, nil
 }
 
-func (r *realtimeStore) LinkAlertToIncident(_ context.Context, incidentID, alertID int64, alertStartsAt time.Time, _ *float64, _ bool) error {
+func (r *realtimeStore) LinkAlertToIncident(_ context.Context, incidentID, alertID int64, alertStartsAt time.Time, score *float64, needsReview bool) error {
 	v, ok := r.views[alertID]
 	if !ok {
 		return fmt.Errorf("假存储未登记告警 %d 的视图", alertID)
@@ -129,7 +142,14 @@ func (r *realtimeStore) LinkAlertToIncident(_ context.Context, incidentID, alert
 		return fmt.Errorf("告警 %d 的 starts_at 不一致: 传入 %s, 视图 %s", alertID, alertStartsAt, v.StartsAt)
 	}
 	r.members[incidentID] = append(r.members[incidentID], CandidateAlert{IncidentID: incidentID, View: v})
+	r.links[alertID] = linkRecord{incidentID: incidentID, score: score, needsReview: needsReview}
 	return nil
+}
+
+// linkOf 返回某告警的关联边留痕（供探针断言并入档位与分数）。
+func (r *realtimeStore) linkOf(alertID int64) (linkRecord, bool) {
+	rec, ok := r.links[alertID]
+	return rec, ok
 }
 
 func (r *realtimeStore) SetAlertIncident(_ context.Context, _, _ int64) error { return nil }
@@ -279,10 +299,15 @@ func TestReplayFixturesThroughRealtimePathUnderCandidateLimit(t *testing.T) {
 // service 是 0.6 而非 0——R 必须换命名空间（staging）才能把 N 的得分压到 0.5 以下；
 // 而 R 换命名空间后与 O2（同 service gateway）仍有 0.67，足够 REVIEW 入伙。
 //
-// 种子锚定后的**残留边界**（比修复前窄得多，如实记录）：只保证「与事件首条告警
-// 同根因的新告警」不漏合并；若最佳匹配是**非种子的**老成员，仍可能漏合并
-// （需要更复杂的异质构造，当前探针不覆盖）。标准回放夹具组内同质不受影响；
-// 压测中仅 2 个 incident 超 20 条且同为同质风暴，未观测到质量变化。
+// 种子锚定后的**残留边界第二半**——最佳匹配是**非种子**老成员时的漏合并——
+// 已由两段式回退收口（2026-10-19）：限额集内最高分 < merge 阈值且存在事件
+// 被限额截断（候选条数 == limit+1，证明见 candidates.go）时，引擎用不限额
+// 候选集重算，仅在全量严格更优时取代。构造与判据见同包
+// TestCandidateLimitFallbackRecoversOldNonSeedMember。
+// 修复后仍如实保留的残留：限额集内最高分已 ≥ merge 时，合并目标取限额集
+// 最佳而非全局最佳（多个事件同处 MERGE 档时）——全闭合等于永不限额，
+// 吞吐崩塌，不做。标准回放夹具组内同质不受影响；压测中仅 2 个 incident
+// 超 20 条且同为同质风暴，未观测到质量变化。
 func TestCandidateLimitBoundaryOnHeterogeneousIncident(t *testing.T) {
 	ctx := context.Background()
 	topo := &Topology{}

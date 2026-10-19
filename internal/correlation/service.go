@@ -43,6 +43,9 @@ type Service struct {
 	metrics *metrics.Metrics
 	// now 是可注入时钟；nil 时取 time.Now().UTC()，让「留痕时间」可被精确断言。
 	now func() time.Time
+	// fallback 是 R7 两段式回退的候选快照源（Service 级共享 + TTL 复用，
+	// 实测依据见 candidates.go 的 fallbackSnapshotTTL）。
+	fallback *fallbackSource
 }
 
 // NewService 构造关联服务。logger 为 nil 时退化为 slog.Default()。
@@ -56,6 +59,7 @@ func NewService(incidents IncidentStore, cfgStore ConfigStore, topo *Topology, l
 		topo:      topo,
 		logger:    logger,
 		metrics:   metrics.Noop(),
+		fallback:  newFallbackSource(incidents, logger, fallbackSnapshotTTL),
 	}
 }
 
@@ -84,10 +88,10 @@ func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAler
 	}
 
 	// 按 Incident 聚合候选告警；批次内新建/合并的事件会实时并入，使同批告警可互相累积。
-	byIncident := make(map[int64][]AlertView)
-	for _, c := range candidates {
-		byIncident[c.IncidentID] = append(byIncident[c.IncidentID], c.View)
-	}
+	byIncident := groupByIncident(candidates)
+	// 回退源（s.fallback，Service 级共享 + TTL 复用）：限额集内最高分不足
+	// merge 阈值且确有事件被限额截断时，按需补取不限额候选集重算，
+	// 见 correlateOne 与 candidates.go。
 
 	ref := time.Now().UTC()
 	// **历史维不查库**（2026-10-12 R7 实测）：本批告警都是刚落库的，
@@ -108,7 +112,7 @@ func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAler
 			continue
 		}
 		v := NewAlertView(a)
-		res, err := s.correlateOne(ctx, byIncident, scorer, cfg, v)
+		res, err := s.correlateOne(ctx, byIncident, s.fallback, scorer, cfg, v)
 		if err != nil {
 			return fmt.Errorf("告警 %d 关联失败: %w", v.ID, err)
 		}
@@ -121,26 +125,46 @@ func (s *Service) CorrelateAlerts(ctx context.Context, alerts []alert.StoredAler
 	return nil
 }
 
-// correlateOne 对单条告警视图执行「取最大分 → 决策 → 落库」。
+// correlateOne 对单条告警视图执行「取最大分 →（必要时回退重算）→ 三档决策 → 落库」。
 func (s *Service) correlateOne(
 	ctx context.Context,
 	byIncident map[int64][]AlertView,
+	fallback *fallbackSource,
 	scorer *Scorer,
 	cfg Config,
 	v AlertView,
 ) (Result, error) {
-	bestScore := 0.0
-	bestIncident := int64(0)
-	for incID, members := range byIncident {
-		maxForIncident := 0.0
-		for _, existing := range members {
-			if sc := scorer.Score(v, existing); sc > maxForIncident {
-				maxForIncident = sc
-			}
+	bestScore, bestIncident := bestMatch(byIncident, scorer, v)
+
+	// R7 残留边界收口（2026-10-19）：限额候选集（每事件最近 N 条 + 种子）会藏住
+	// 「非种子的老成员」——新告警的最佳匹配落在最近 N 条之外时，集内最高分跌破
+	// merge 阈值，自动合并降级为 REVIEW（更极端构造下漏成 NEW 重复事件）。
+	// 收口方式是在引擎侧回退一次，而不是在 SQL 里继续加锚点——那会把候选集
+	// 重新推回无上限，吞吐从 346 条/s 崩到 ~4.5 条/s（R7 压测实证）。
+	//
+	// 触发条件两个合取项都不可省：
+	//   - 分数项：集内已能自动合并的告警，不白付一次回退查询；
+	//   - 截断项：没有任何事件被限额裁过时，集内就是全量，回退毫无意义——
+	//     少了它，异质环境里大量 REVIEW 档告警会被拖去全量扫描。
+	// 结论只在全量**严格更优**时取代：并发关闭事件等使全量集反而更小的
+	// 情况下，限额结论不会被更差的结论覆盖。
+	if bestIncident != 0 &&
+		bestScore < cfg.Thresholds.Merge &&
+		anyIncidentTruncated(byIncident, int(CandidateLimitPerIncident)) {
+		fullScore, fullIncident, err := s.recomputeWithFullCandidates(ctx, fallback, byIncident, scorer, v)
+		if err != nil {
+			return Result{}, err
 		}
-		if maxForIncident > bestScore {
-			bestScore = maxForIncident
-			bestIncident = incID
+		s.observeCandidateFallback()
+		s.logger.Info("候选限额回退：限额集内不足 merge 且事件被截断，按不限额结论重算",
+			slog.Int64("alert_id", v.ID),
+			slog.Float64("bounded_score", bestScore),
+			slog.Float64("unlimited_score", fullScore),
+			slog.Int64("unlimited_incident", fullIncident))
+		// 仅在全量严格更优时取代：并发关闭事件等使全量集反而更小的情况下，
+		// 限额结论不会被更差的结论覆盖。
+		if fullIncident != 0 && fullScore > bestScore {
+			bestScore, bestIncident = fullScore, fullIncident
 		}
 	}
 
@@ -212,6 +236,28 @@ func (s *Service) correlateOne(
 		s.notifyCreated(inc)
 		return Result{Action: ActionNew, IncidentID: inc.ID, Score: 0}, nil
 	}
+}
+
+// recomputeWithFullCandidates 用「不限额快照 ∪ 本批内存累积」重算单条告警的
+// 最佳匹配，供 R7 回退路径使用。
+//
+// 取并集而不是直接用快照：本批在快照之后新建/合入的成员只存在于 byIncident
+// （内存累积），不在快照里；并集保证重算面对的是「库全量 + 本批增量」。
+// 回退查询本身失败时向上冒泡（存储故障语义与限额查询一致）。
+func (s *Service) recomputeWithFullCandidates(
+	ctx context.Context,
+	fallback *fallbackSource,
+	byIncident map[int64][]AlertView,
+	scorer *Scorer,
+	v AlertView,
+) (score float64, incidentID int64, err error) {
+	snapshot, err := fallback.unlimited(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	full := mergeViews(byIncident, snapshot)
+	score, incidentID = bestMatch(full, scorer, v)
+	return score, incidentID, nil
 }
 
 // link 建立关联边并回写告警的 incident_id 反规范化指针。

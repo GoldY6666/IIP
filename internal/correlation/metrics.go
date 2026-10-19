@@ -26,3 +26,13 @@ func (s *Service) WithMetrics(m *metrics.Metrics) *Service {
 func (s *Service) observeScore(action string, score float64) {
 	s.metrics.CorrelationScore.WithLabelValues(action).Observe(score)
 }
+
+// observeCandidateFallback 记录一次候选限额回退查询（R7 残留边界收口，2026-10-19）。
+//
+// 计数的是**回退查询发生**的次数，不论全量结论是否真的更优——运维要回答的
+// 两个问题都从它出发：「边界被踩得多频繁」（速率，衡量限额压力与查询成本）
+// 与「每次是否挽回了合并」（逐条读 Info 日志里的 bounded/unlimited 两组分数）。
+// 标准风暴场景组内同质，限额集内已是 MERGE 档，根本不触发，常态应接近 0。
+func (s *Service) observeCandidateFallback() {
+	s.metrics.CorrelationCandidateFallback.Inc()
+}

@@ -57,7 +57,7 @@
       }
     ]
   },
-  "description": "IIP 自监控总览（ADR-026 的 7 个指标 + 两个 target 的抓取状态）。数据来自 iip-server:8080/metrics 与 iip-worker:9091/metrics 两个独立注册表。",
+  "description": "IIP 自监控总览（ADR-026 的 8 个指标 + 两个 target 的抓取状态）。数据来自 iip-server:8080/metrics 与 iip-worker:9091/metrics 两个独立注册表。",
   "editable": true,
   "graphTooltip": 1,
   "id": null,
@@ -870,6 +870,98 @@
         }
       ],
       "title": "抓取耗时",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "候选限额回退的速率（R7 残留边界收口，2026-10-19）：限额候选集内最高分不足 merge 阈值且事件被限额截断时，引擎用不限额候选集重算。持续非 0 说明限额边界被频繁踩到，该回看 internal/correlation 的 CandidateLimitPerIncident 与 CHANGELOG Unreleased 的 R7 条目；标准风暴场景组内同质根本不触发，常态应接近 0。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "rate(iip_correlation_candidate_fallback_total[5m])",
+          "legendFormat": "{{job}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "候选限额回退速率（R7 边界）",
       "type": "timeseries"
     }
   ],

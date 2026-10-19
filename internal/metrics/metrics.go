@@ -36,8 +36,13 @@ const (
 	WebhookDurationSecs  = "iip_webhook_duration_seconds"
 	CorrelationScore     = "iip_correlation_score"
 	IncidentCreatedTotal = "iip_incident_created_total"
-	EvidenceDurationSecs = "iip_evidence_collect_duration_seconds"
-	TaskRetryTotal       = "iip_task_retry_total"
+	// CorrelationCandidateFallbackTotal 是候选限额回退计数（R7 残留边界收口，
+	// 2026-10-19）：限额集内最高分不足 merge 阈值且确有事件被限额截断时，
+	// 引擎用不限额候选集重算的次数。无标签——回退是全局行为，
+	// 按事件/告警维度打标签会把 Prometheus 时序数拖向业务量。
+	CorrelationCandidateFallbackTotal = "iip_correlation_candidate_fallback_total"
+	EvidenceDurationSecs              = "iip_evidence_collect_duration_seconds"
+	TaskRetryTotal                    = "iip_task_retry_total"
 )
 
 // iip_alert_ingest_total 的 result 取值。
@@ -97,7 +102,7 @@ var (
 // Metrics 是一组指标句柄 + 它们所属的注册表。
 //
 // 字段全部是具体类型（而非接口）：埋点处是热路径，能省一次接口调用是一次；
-// 且 nil 永远不会出现 —— New 与 Noop 都保证七个仪器全部非 nil，
+// 且 nil 永远不会出现 —— New 与 Noop 都保证八个仪器全部非 nil，
 // 故埋点代码里不需要任何 nil 判断（这类判断一旦漏写就是运行期 panic）。
 type Metrics struct {
 	reg *prometheus.Registry
@@ -112,6 +117,11 @@ type Metrics struct {
 	CorrelationScore *prometheus.HistogramVec
 	// IncidentCreated 是新建事件计数（CREATE 档，不含合入）。
 	IncidentCreated prometheus.Counter
+	// CorrelationCandidateFallback 是候选限额回退计数（R7 残留边界收口）。
+	// 计数的是**回退查询发生**的次数，不论全量结论是否真的更优——每次回退
+	// 都有 Info 日志带限额分/全量分，可逐对核对；速率异常是「限额边界被频繁
+	// 踩到」的信号（标准风暴场景组内同质，根本不触发，常态应接近 0）。
+	CorrelationCandidateFallback prometheus.Counter
 	// EvidenceDuration 按采集器来源记录单次采集耗时（internal/worker）。
 	EvidenceDuration *prometheus.HistogramVec
 	// TaskRetry 按原因记录重试/回收次数（internal/worker）。
@@ -153,6 +163,11 @@ func New() *Metrics {
 		Help: "新建事件数（关联结论为 new 的事件，不含合入已有事件）。",
 	})
 
+	m.CorrelationCandidateFallback = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: CorrelationCandidateFallbackTotal,
+		Help: "候选限额回退次数（限额集内不足 merge 且事件被截断时，用不限额候选集重算）。",
+	})
+
 	m.EvidenceDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    EvidenceDurationSecs,
 		Help:    "单次证据采集耗时（秒），按采集器来源分组。",
@@ -170,6 +185,7 @@ func New() *Metrics {
 		m.WebhookDuration,
 		m.CorrelationScore,
 		m.IncidentCreated,
+		m.CorrelationCandidateFallback,
 		m.EvidenceDuration,
 		m.TaskRetry,
 		collectors.NewGoCollector(),

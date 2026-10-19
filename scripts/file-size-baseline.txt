@@ -25,12 +25,12 @@ internal/api/evidence_test.go 501
 internal/api/incidents_test.go 384
 internal/collectors/prometheus_test.go 601
 internal/collectors/trace_test.go 425
-internal/correlation/replay_realtime_test.go 372
+internal/correlation/replay_realtime_test.go 397
 internal/correlation/replay_test.go 336
 internal/correlation/service_test.go 495
 internal/evidence/evidence_test.go 472
 internal/incident/service_test.go 449
-internal/metrics/metrics_test.go 325
+internal/metrics/metrics_test.go 330
 internal/middleware/authtoken_test.go 309
 internal/middleware/timeout_test.go 398
 internal/notify/notify_test.go 325

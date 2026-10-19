@@ -19,13 +19,14 @@ import (
 // 空切片表示「该指标不应有任何标签」（耗时直方图不带路数/路径标签：
 // 路径在本项目是常量，加它只会在将来加出第二、第三个 webhook 端点时炸基数）。
 var familyLabelAllow = map[string][]string{
-	AlertIngestTotal:     {"result"},
-	AlertDedupTotal:      {"result"},
-	WebhookDurationSecs:  {},
-	CorrelationScore:     {"action"},
-	IncidentCreatedTotal: {},
-	EvidenceDurationSecs: {"source"},
-	TaskRetryTotal:       {"reason"},
+	AlertIngestTotal:                  {"result"},
+	AlertDedupTotal:                   {"result"},
+	WebhookDurationSecs:               {},
+	CorrelationScore:                  {"action"},
+	IncidentCreatedTotal:              {},
+	CorrelationCandidateFallbackTotal: {},
+	EvidenceDurationSecs:              {"source"},
+	TaskRetryTotal:                    {"reason"},
 }
 
 // touchAll 给每个带标签的指标各点一次（每个允许的取值一次），
@@ -178,6 +179,7 @@ func TestInstrumentsRecordValues(t *testing.T) {
 	m.WebhookDuration.Observe(0.7)
 	m.CorrelationScore.WithLabelValues("merge").Observe(0.85)
 	m.IncidentCreated.Add(4)
+	m.CorrelationCandidateFallback.Add(3)
 	m.EvidenceDuration.WithLabelValues("prometheus").Observe(2)
 	m.TaskRetry.WithLabelValues(RetryStaleReclaim).Add(5)
 
@@ -197,6 +199,9 @@ func TestInstrumentsRecordValues(t *testing.T) {
 	}
 	if got := simpleCounter(t, fams, IncidentCreatedTotal); got != 4 {
 		t.Errorf("%s = %v，期望 4", IncidentCreatedTotal, got)
+	}
+	if got := simpleCounter(t, fams, CorrelationCandidateFallbackTotal); got != 3 {
+		t.Errorf("%s = %v，期望 3", CorrelationCandidateFallbackTotal, got)
 	}
 
 	if n, sum := histogramOf(t, fams, WebhookDurationSecs, "", ""); n != 2 || sum < 0.99 || sum > 1.01 {
