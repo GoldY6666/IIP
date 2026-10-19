@@ -17,41 +17,29 @@
 # 格式：<相对路径> <物理行数>（含空行与注释，与 wc -l 同口径）
 # 带 "Code generated ... DO NOT EDIT" 标记的文件（sqlc 产物）不在检查范围内。
 
-cmd/iip-worker/main.go 516
 cmd/iip-worker/main_test.go 438
 internal/alert/service_test.go 378
 internal/api/alert_webhook_test.go 423
 internal/api/correlation_config_test.go 331
 internal/api/evidence_test.go 501
-internal/api/incidents.go 356
 internal/api/incidents_test.go 384
-internal/collectors/k8s.go 533
-internal/collectors/loki.go 551
-internal/collectors/prometheus.go 333
 internal/collectors/prometheus_test.go 601
-internal/collectors/trace.go 486
 internal/collectors/trace_test.go 425
 internal/correlation/replay_realtime_test.go 372
 internal/correlation/replay_test.go 336
 internal/correlation/service_test.go 495
-internal/evidence/evidence.go 407
 internal/evidence/evidence_test.go 472
 internal/incident/service_test.go 449
 internal/metrics/metrics_test.go 325
 internal/middleware/authtoken_test.go 309
 internal/middleware/timeout_test.go 398
 internal/notify/notify_test.go 325
-internal/rca/confidence.go 325
 internal/rca/confidence_test.go 335
 internal/repository/alerts_test.go 516
-internal/repository/evidence.go 327
 internal/repository/evidence_test.go 632
-internal/repository/lifecycle.go 374
 internal/repository/lifecycle_query_test.go 589
 internal/repository/lifecycle_test.go 430
 internal/repository/m4_pipeline_test.go 491
-internal/repository/tasks.go 309
 internal/repository/tasks_test.go 545
-internal/testsupport/pg.go 319
 internal/worker/confidence_f3_test.go 714
 migrations/partition_test.go 354
