@@ -26,14 +26,11 @@ internal/api/evidence_test.go 501
 internal/api/incidents.go 356
 internal/api/incidents_test.go 384
 internal/collectors/k8s.go 533
-internal/collectors/k8s_test.go 1246
 internal/collectors/loki.go 551
-internal/collectors/loki_test.go 775
 internal/collectors/prometheus.go 333
 internal/collectors/prometheus_test.go 601
 internal/collectors/trace.go 486
 internal/collectors/trace_test.go 425
-internal/config/config_test.go 946
 internal/correlation/replay_realtime_test.go 372
 internal/correlation/replay_test.go 336
 internal/correlation/service_test.go 495
@@ -47,7 +44,6 @@ internal/notify/notify_test.go 325
 internal/rca/confidence.go 325
 internal/rca/confidence_test.go 335
 internal/repository/alerts_test.go 516
-internal/repository/correlation_test.go 896
 internal/repository/evidence.go 327
 internal/repository/evidence_test.go 632
 internal/repository/lifecycle.go 374
@@ -58,6 +54,4 @@ internal/repository/tasks.go 309
 internal/repository/tasks_test.go 545
 internal/testsupport/pg.go 319
 internal/worker/confidence_f3_test.go 714
-internal/worker/processor_test.go 723
-migrations/migrate_test.go 949
 migrations/partition_test.go 354
