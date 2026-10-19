@@ -106,7 +106,18 @@ Helm chart `appVersion: 0.2.0`。版本标签由 `scripts/bump-version.py` 统�
 
 | 项 | 值 | 复核命令 |
 |---|---|---|
-| 版本 | 0.2.0 | `python scripts/bump-version.py --check` |
-| 真库用例 | 1103 PASS / 1 SKIP / 0 FAIL | `python scripts/run_pgtests.py` |
-| E2E | S0–S6/S8/S9 PASS，S7 BLOCKED | `python scripts/verify-e2e.py --stages s0,s1,...` |
+| 版本 | 0.2.0（16 处一致） | `python scripts/bump-version.py --check` |
+| 真库用例 | 1103 PASS / 1 SKIP / 0 FAIL（20 包，exit=0） | `python scripts/run_pgtests.py -v` |
+| E2E | S0–S6/S8/S9 PASS，S7 BLOCKED | `python scripts/verify-e2e.py` |
 | 发版前版本 | 0.1.0（tag 指向 `a6c184a`） | `git log --oneline v0.1.0 -1` |
+
+**两处必须说清的边界**（免得把「跑过」说成「在 tag 那个提交上跑过」）：
+
+1. **E2E 全量一轮跑在 `8374be2`**，之后只改了 `CHANGELOG.md`（补三条 Fixed）。
+   发布提交上复跑了 **S1**（含干净克隆 + 全量 build）仍 PASS。
+   没有为了「让报告覆盖到最后一版」再跑一次全量 —— 但那 10 分钟里没跑过的东西
+   就是没跑过，不能算进去。
+2. **真库那 1103 是用 `-v` 跑出来的**（不带 `-v` 只能看到包级 `ok`，看不到子用例
+   与 SKIP）。唯一 SKIP 是 `TestHandlerAllowsSymlinkedRoot`：Windows 非管理员
+   无法建符号链接，Linux 容器侧该用例为 PASS。
+
