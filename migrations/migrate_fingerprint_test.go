@@ -1,8 +1,3 @@
-// Package migrations_test 以**外部测试包**形式编写。
-//
-// 必须用外部测试包：本用例要通过 testsupport 拿到一次性库，而 testsupport 依赖
-// internal/store，store 又 import 本包（embed 迁移文件）——若写成包内测试
-// （package migrations）就会构成 import cycle。外部测试包正是为切断此类环而存在。
 package migrations_test
 
 import (
