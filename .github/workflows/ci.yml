@@ -252,9 +252,18 @@ jobs:
       E2E_PG_DATA: /tmp/iip_e2e_pgdata
       E2E_PG_USER: postgres
       E2E_PG_PASSWORD: postgres
-      E2E_GO_BIN: /usr/local/go/bin/go
+      # **E2E_GO_BIN 不在这里写死**（2026-10-19 修）。原先写的是
+      # `/usr/local/go/bin/go` —— 那是 **runner 镜像自带的 Go**，
+      # 而本 job 下面的「Set up Go」装的是 go.mod 声明的 1.26.9
+      # （setup-go 在 Linux 装到 tool cache，**不覆盖 /usr/local/go**）。
+      # ⇒ 同一个 job 里 backend 用一个工具链、e2e 用另一个，而
+      # 镜像那份若低于 go.mod 的 `go 1.26.0`，Go 会走 GOTOOLCHAIN=auto
+      # **静默下载** go1.26.9：能跑，但每次多一次隐藏网络依赖，
+      # 且失败时报错完全不指向「用错工具链」这个真因。
+      # 现在由「Resolve Go for E2E」步骤用 `go env GOROOT` 写进
+      # $GITHUB_ENV —— 永远等于 setup-go 刚装的那一个。
       E2E_SERVER_BIN: /tmp/iip-e2e-server
-      # CI 上没有「必须用系统 Chrome」的理由（那|本机约束），必须用
+      # CI 上没有「必须用系统 Chrome」的理由（那是本机约束），必须用
       # Playwright 自带的 chromium。
       # 本机反之（无网络，装不了浏览器）—— 所以 config 里做成可覆盖。
       #
@@ -285,6 +294,27 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Resolve Go for E2E
+        # 让 stack.mjs 用的 Go **就是** setup-go 刚装的那一个。
+        # setup-go 在 Linux 装到 tool cache（不覆盖 /usr/local/go），
+        # 所以镜像自带的那份与 go.mod 声明的版本可能不同 ——
+        # 写死路径会让「backend 与 e2e 用两个工具链」悄悄成立。
+        #
+        # 走 $GITHUB_ENV 而不是直接改 env: 块：job 级 env 在步骤开始前
+        # 就已固定，拿不到 setup-go 的结果。
+        #
+        # **这一步失败要显式失败**：`go env GOROOT` 取不到就报错退出，
+        # 不许 silently 回落到 PATH 里的 go —— 那正是要消除的歧义源。
+        run: |
+          set -euo pipefail
+          goroot="$(go env GOROOT)"
+          if [ -z "$goroot" ] || [ ! -x "$goroot/bin/go" ]; then
+            echo "::error::go env GOROOT 未给出可执行的 go（got: '$goroot'）"
+            exit 1
+          fi
+          echo "E2E_GO_BIN=$goroot/bin/go" >> "$GITHUB_ENV"
+          echo "E2E will use: $goroot/bin/go ($(go version))"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

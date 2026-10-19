@@ -244,6 +244,17 @@
   `v0.1.1` 打在 HEAD ⇒ 红（`tag=0.1.1`）；恢复 `v0.2.0` ⇒ 绿。
   **判据本身有鉴别力，红在取值**。
 - **`bump-version.py` 在多处待改时可能误报「没有改动可做」**：见上方发版工具条目。
+- **CI 的 e2e job 原先用错了 Go 工具链**：`E2E_GO_BIN` 写死成
+  `/usr/local/go/bin/go`（runner 镜像自带的那份），而同一个 job 刚用
+  `setup-go`（`go-version-file: go.mod`，即 `go 1.26.0` / `toolchain go1.26.9`）
+  装好了正确版本 —— **setup-go 在 Linux 装到 tool cache，不覆盖 `/usr/local/go`**。
+  于是 backend 与 e2e 各用一个工具链；镜像那份若低于 go.mod 声明的版本，
+  Go 会走 `GOTOOLCHAIN=auto` **静默下载** go1.26.9（能跑，但每次多一次隐藏网络
+  依赖，且失败时报错不指向「用错工具链」这个真因）。现改为由一步
+  `Resolve Go for E2E` 用 `go env GOROOT` 写进 `$GITHUB_ENV`，取不到就显式
+  `exit 1`，**不回落**到 PATH 里的 go。三向实测（真工具链→rc=0 且指向 1.26.9 /
+  GOROOT 为空→exit 1 且不写环境变量 / GOROOT 指向不存在目录→exit 1）。
+  **本仓库 CI 至今没在 GitHub 上跑过一次**，这条是推送前的静态审计发现的。
 - **文档里的 `pwsh` 全部改为 `powershell`**：本机只装 Windows PowerShell 5.1，
   照着 `pwsh -File scripts/tasks.ps1 ...` 敲会 command not found。
   文档里的命令必须能原样执行——这是 T6.5「文档代码块原文实跑」同一条纪律。
