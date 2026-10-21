@@ -158,8 +158,40 @@ def docker(*args: str, timeout: int = 900):
     return run([DOCKER, *args], timeout=timeout)
 
 
+# HTTP_PORT != 8080 时由 _ensure_port_override() 生成；为 None 时 compose()
+# 退化为只用基文件，与历史行为逐字节一致。
+OVERRIDE_FILE = None
+
+
 def compose(*args: str, timeout: int = 900):
-    return docker("compose", "-f", COMPOSE_FILE, *args, timeout=timeout)
+    files = ["-f", COMPOSE_FILE]
+    if OVERRIDE_FILE:
+        files += ["-f", OVERRIDE_FILE]
+    return docker("compose", *(files + list(args)), timeout=timeout)
+
+
+def _ensure_port_override() -> None:
+    """HTTP_PORT != 8080 时生成 compose override，驱动宿主机端口映射。
+
+    背景（2026-10-21 S7）：8080 被用户另一个自研项目（OsSwitch RTS 原型，
+    python -m http.server）长期占用，而 compose 基文件写死 8080:8080，
+    脚本除了退出别无选择 —— 尽管 IIP_HTTP_PORT 的文档写明它是
+    「宿主机映射端口」。本函数让这个变量名副其实：既驱动脚本的 curl
+    目标，也驱动 compose 映射。override 的 ports 整体替换基文件映射，
+    故基文件零改动；文件是验收临时产物，__main__ 的 finally 里删除。
+    """
+    global OVERRIDE_FILE
+    if HTTP_PORT == 8080:
+        return
+    path = os.path.join(PROJ, "_compose_port_override.yml")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("# verify-images.py 自动生成的临时 override（IIP_HTTP_PORT=%d）\n"
+                 % HTTP_PORT)
+        fh.write("# 把 iip-server 的宿主机端口映射从 8080 改到 %d；勿手改，验收结束自动删除。\n"
+                 % HTTP_PORT)
+        fh.write("services:\n  iip-server:\n    ports:\n      - \"%d:8080\"\n"
+                 % HTTP_PORT)
+    OVERRIDE_FILE = path
 
 
 # -------------------------------------------------------------------- http
@@ -439,8 +471,8 @@ def t75_static_checks() -> None:
     #   config 注册 flag（用户能配）→ 装配读取并构造（配了能用）→
     #   实现文件存在（构造真有逻辑）。只 grep 其中一处会发现不了
     # 「flag 在、装配忘了传」这类真实缺陷。
-    cfg_go = os.path.join(PROJ, "internal", "config", "config.go")
-    main_go = os.path.join(PROJ, "cmd", "iip-worker", "main.go")
+    cfg_dir = os.path.join(PROJ, "internal", "config")
+    worker_dir = os.path.join(PROJ, "cmd", "iip-worker")
     tls_go = os.path.join(PROJ, "internal", "collectors", "tls.go")
     collectors_go = os.path.join(PROJ, "internal", "collectors", "collectors.go")
 
@@ -448,7 +480,25 @@ def t75_static_checks() -> None:
         with open(p, encoding="utf-8") as f:
             return f.read()
 
-    cfg_src, main_src = _read(cfg_go), _read(main_go)
+    def _read_pkg(d: str) -> str:
+        """聚合读一个包的**产品**源码（不含 _test.go）。
+
+        T7.8 单文件门禁把 config.go / iip-worker/main.go 拆成多文件后，
+        钉死单文件路径的判据全线假红：flag 注册搬去了 config_load.go、
+        装配搬去了 worker_registry.go，而判据还在读拆分前的文件名
+        （2026-10-21 S7 实测：4 条接线判据全红，而 grep 全源一抓就着）。
+        判据的本意是「该组件是否注册/接线」这个语义，那就按包聚合读 ——
+        文件再怎么拆，语义判据不动。不含 _test.go：测试里出现字面量
+        证明不了产品接线（那只证明测试引用了它）。
+        """
+        parts = []
+        for fn in sorted(os.listdir(d)):
+            if fn.endswith(".go") and not fn.endswith("_test.go"):
+                with open(os.path.join(d, fn), encoding="utf-8") as f:
+                    parts.append(f.read())
+        return "\n".join(parts)
+
+    cfg_src, main_src = _read_pkg(cfg_dir), _read_pkg(worker_dir)
     check("config 注册 evidence-tls-insecure flag（T7.5）",
           '"evidence-tls-insecure"' in cfg_src)
     check("config 注册 evidence-tls-ca-file flag（T7.5）",
@@ -492,6 +542,11 @@ def main() -> int:
     # ---------------------------------------------------------- 0. 前置
     # T7.5 静态判据放最前：daemon 不在时它照样能跑（见函数注释）。
     t75_static_checks()
+    # 端口 override 也要尽早生成：main() 的任何早退路径都会走进 __main__ 的
+    # finally（那里要 compose down），override 必须先于它存在。
+    _ensure_port_override()
+    if OVERRIDE_FILE:
+        w("### [0] 端口 override：宿主机 %d -> 容器 8080（IIP_HTTP_PORT）" % HTTP_PORT)
     w("### [0] 前置检查")
     if not DOCKER:
         w("  FATAL: 找不到 docker 可执行文件")
@@ -1138,14 +1193,22 @@ def main() -> int:
     #
     # 探针形态：docker exec 跑 `--help`（distroless 无 shell，
     # exec 直接指定二进制路径即可，不需要 sh -c）。
+    #
+    # **退出码不纳入断言**：worker 用 pflag（ContinueOnError），--help 时
+    # Parse 返回 pflag.ErrHelp，main 随之 os.Exit(1) —— 退出码非 0 是
+    # pflag 帮助语义的既定行为，不是二进制坏了（2026-10-21 S7 实证：
+    # usage 完整打印、两个 flag 行都在，rc=1；此前断言 rc_h==0 与
+    # pflag 语义不兼容，恒假红）。绑 usage 内容本身就是强断言：
+    # 两行都在才绿；exec 失败/容器不在时 len=0 照样红。
     _wc = svc_container("iip-worker")
     rc_h, out_h = docker("exec", _wc, "/usr/local/bin/iip-worker",
                          "--help", timeout=60)
     _tls_flags = [ln.strip() for ln in out_h.splitlines()
                   if "evidence-tls" in ln]
     check("worker 二进制 --help 暴露 evidence-tls-insecure / evidence-tls-ca-file（T7.5）",
-          rc_h == 0 and len(_tls_flags) >= 2,
-          "匹配到 %d 条 evidence-tls flag 行" % len(_tls_flags))
+          len(_tls_flags) >= 2,
+          "匹配到 %d 条 evidence-tls flag 行（--help rc=%d 不纳入断言）"
+          % (len(_tls_flags), rc_h))
 
 
     # 4.7.4c M6：**开关打开时真二进制会注册**（验「启用路径」而非只验禁用路径）。
@@ -1992,6 +2055,14 @@ if __name__ == "__main__":
             w("### 清理：compose down（保留 named volume 数据）")
             rc, out = compose("--profile", "app", "down", timeout=300)
             w("  rc=%s %s" % (rc, out[:200]))
+        # 顺序不能反：override 是 compose 命令的输入，删它必须在最后一次
+        # compose 调用（上面的 down）之后，否则 down 找不到服务定义。
+        if OVERRIDE_FILE and os.path.exists(OVERRIDE_FILE):
+            try:
+                os.remove(OVERRIDE_FILE)
+                w("  已删除临时 override：%s" % os.path.basename(OVERRIDE_FILE))
+            except OSError as e:
+                w("  override 删除失败（可手动删）：%s (%s)" % (OVERRIDE_FILE, e))
         try:
             with open(REPORT, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(L))

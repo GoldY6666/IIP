@@ -37,6 +37,9 @@ _tmp/
 _probe.txt
 _tree.txt
 _*.txt
+# verify-runtime.py 的机器可读汇总（_verify_runtime.json），与 _*.txt
+# 同属验证脚本运行产物，每次跑重新生成。
+_*.json
 # 验证脚本的运行产物：服务日志（scripts/verify-*.py 落 _verify_*_srv.log）
 # 与 UI 截图（verify-images.py 落 _verify_ui.png）——每次跑都重新生成，
 # 入库只会制造无意义 diff；M6 的 UI 交付证据是 screenshots/ 那三张，另行入库。
