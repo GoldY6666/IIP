@@ -117,13 +117,17 @@ function PendingLabel({ count }: { count: number }) {
     // 徽标放在标签右侧而非文字里挤着：数字是**待人工判定的关联边条数**
     // （队列维度），与事件列表里的「待处理边」不是一个数 —— 那个是单个
     // 事件内的边数。两个数分开摆放，避免被当成同一个数在两处显示却不一致。
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+    //
+    // **必须是 <Link> 而不是 <span>**：侧栏导航靠 label 里的 <Link> 跳转。
+    // 之前这里写成纯 span，导致「待确认数 > 0」时角标虽在、点击整项却不导航
+    // （待确认数 = 0 时仍走 <Link> 能跳转），表现就是「待确认点了没反应」。
+    <Link to="/reviews" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
       待确认
       <Badge
         count={count}
         overflowCount={99}
         style={{ backgroundColor: palette.semantic.warning }}
       />
-    </span>
+    </Link>
   )
 }
