@@ -45,7 +45,7 @@ jobs:
     #
     # 用 service 容器起 PG16；testsupport 自己 CREATE DATABASE iip_testsession
     # （pg.go:183 createDatabaseIfAbsent，存在则跳过），adminDSN 用默认
-    # postgres 库即可，host 名 = service 名 `postgres`（Actions 网络内解決）。
+    # postgres 库即可。
     services:
       postgres:
         image: postgres:16
@@ -57,13 +57,32 @@ jobs:
           - 5432:5432
         # 健康检查必须做：没有它，go test 起来时 PG 还没 ready，
         # 表现为「connection refused」，而真因是服务没起完。
+        # 注意：health-cmd 在**容器内**执行，它只证明容器活着，
+        # 证明不了 runner 侧能解析/连到它（2026-10-21 的教训）。
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
     env:
-      IIP_TEST_PG_URL: postgres://postgres:postgres@postgres:5432/postgres?sslmode=disable
+      # **连 127.0.0.1:5432，不连 service 名 `postgres`**（2026-10-21 实证修复）：
+      # 之前写 `postgres://...@postgres:5432/...`，CI 首跑三个 run（run#1 纯
+      # v0.2.0 / run#2 / run#3 合并提交）**全部**挂在同一个错误上：
+      #   failed to connect to `user=postgres database=postgres`:
+      #   hostname resolving error: lookup postgres on 127.0.0.53:53:
+      #   server misbehaving
+      # 形态：首个碰库的包（internal/api）0.1s 内即失败，之后 repository/
+      # testsupport/worker/migrations 共 103 条全同错；不碰库的包全 ok。
+      # ⇒ 不是容器挂了（health check 全过、Initialize containers 成功），
+      # 是 runner 的 systemd-resolved（127.0.0.53）对 docker 网络内的
+      # service 名返回 SERVFAIL——容器内健康检查证明不了 runner 侧可达。
+      #
+      # 改用上面 ports 已声明的映射：service 容器的 5432 发布在 runner 宿主
+      # 的 5432 上，走 127.0.0.1 纯 TCP，**完全绕开 DNS**。端口若被占，
+      # Initialize containers 会直接失败（端口绑定冲突），不会静默连错。
+      # 容器栈自身（deploy/docker-compose.yml）内部的 postgres:5432 不受
+      # 影响——那是 compose 网络内的服务名互访，另一回事。
+      IIP_TEST_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
     defaults:
       run:
         working-directory: .

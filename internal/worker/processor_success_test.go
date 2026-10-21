@@ -171,10 +171,11 @@ func TestRunOnce_PassesResolvedWindowToCollectors(t *testing.T) {
 	if _, err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce 返回错误: %v", err)
 	}
-	if len(col.seen) != 1 {
-		t.Fatalf("采集器被调用 %d 次，期望 1", len(col.seen))
+	seen := col.seenInputs()
+	if len(seen) != 1 {
+		t.Fatalf("采集器被调用 %d 次，期望 1", len(seen))
 	}
-	got := col.seen[0]
+	got := seen[0]
 	if got.IncidentID != 42 {
 		t.Errorf("IncidentID = %d，期望 42", got.IncidentID)
 	}
@@ -209,14 +210,15 @@ func TestRunOnce_UsesCursorFromPayload(t *testing.T) {
 	if _, err := p.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce 返回错误: %v", err)
 	}
-	if len(col.seen) != 1 {
-		t.Fatalf("采集器被调用 %d 次，期望 1", len(col.seen))
+	seen := col.seenInputs()
+	if len(seen) != 1 {
+		t.Fatalf("采集器被调用 %d 次，期望 1", len(seen))
 	}
-	if !col.seen[0].Window.Start.Equal(cursor) {
+	if !seen[0].Window.Start.Equal(cursor) {
 		t.Errorf("窗口起点 = %v，期望游标 %v —— 第二次采集必须只覆盖新增区间",
-			col.seen[0].Window.Start, cursor)
+			seen[0].Window.Start, cursor)
 	}
-	if w := col.seen[0].Window.Duration(); w != 3*time.Minute {
+	if w := seen[0].Window.Duration(); w != 3*time.Minute {
 		t.Errorf("窗口宽 %v，期望 3m（= 游标到 now）", w)
 	}
 }

@@ -66,6 +66,25 @@
     CPU（9833 次 × 增长中的快照评分），属 R7 边界修复的既定代价；更高吞吐的兜底
     仍是关联异步化（开发计划 R7 应对③）。
 
+- **CI 首跑三连红的根因修复（三个独立缺陷，均非产品代码问题）**。v0.2.0 推送后
+  GitHub Actions 首次运行，三个 run（纯 v0.2.0 / README 修订 / R7 合并提交）全部
+  failure 且失败 job 同构；从 job 日志逐字节比对定位到：
+  - backend：service 容器名 `postgres` 在 runner 上**从头就不通 DNS**
+    （`lookup postgres on 127.0.0.53:53: server misbehaving`，103 条全同形态，
+    首个碰库的包 0.1s 内即失败；容器 health check 全过——它只证明容器活着，
+    证明不了 runner 侧可达）。修法：`IIP_TEST_PG_URL` 改用 service 已声明的
+    端口映射 `127.0.0.1:5432`，纯 TCP 绕开 DNS；
+  - e2e：stack.mjs 拉起的 postgres 在 Linux 上无法创建 socket 锁文件
+    （`/var/run/postgresql/.s.PGSQL.5434.lock: Permission denied`，runner 用户
+    无写权限；Windows 无 AF_UNIX 故本机永远复现不出）。修法：非 Windows 分支
+    传 `-c unix_socket_directories=/tmp`；
+  - worker 测试替身：`fakeCollector.Collect` 无锁 append `seen`，被
+    `TestRunOnce_ConcurrentCallsAreSafe`（8 worker 并发）读出 4 条 DATA RACE。
+    修法：替身加互斥锁 + `seenInputs()` 访问器，读取点全部改走访问器
+    （同文件 fakeStore 的注释早已写明这条契约，fakeCollector 是漏网的那个）；
+  - 本地验证：全量真库测试 exit=0（20 包全 ok，124.9s）、e2e 9/9、lint 0 issues、
+    worker 并发用例 30 轮加压通过；`-race` 维度本机无 gcc 跑不了，由 CI 最终裁决。
+
 ## [0.2.0] - 2026-10-18
 
 自 v0.1.0 起的第二个发布版。**无破坏性变更**，按 semver 定 minor：

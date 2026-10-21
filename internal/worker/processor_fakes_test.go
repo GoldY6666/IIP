@@ -15,7 +15,14 @@ import (
 )
 
 // fakeCollector 是一个可控的采集器。
+//
+// **seen 必须加锁**：Processor 的契约明说「同一实例会被多个 goroutine
+// 同时调用」（TestRunOnce_ConcurrentCallsAreSafe 就是并发 RunOnce），
+// 替身不满足这个契约的话，并发用例测的是替身的 bug——2026-10-21 CI
+// -race 实证：Collect 里无锁 append seen，8 worker 并发跑出 4 条
+// WARNING: DATA RACE（与下面 fakeStore 的注释是同一道理）。
 type fakeCollector struct {
+	mu   sync.Mutex
 	src  string
 	evs  []evidence.Evidence
 	err  error
@@ -28,11 +35,23 @@ type fakeCollector struct {
 func (f *fakeCollector) Source() evidence.Source { return f.src }
 
 func (f *fakeCollector) Collect(_ context.Context, in evidence.Input) ([]evidence.Evidence, error) {
+	f.mu.Lock()
 	f.seen = append(f.seen, in)
+	f.mu.Unlock()
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
 	return f.evs, f.err
+}
+
+// seenInputs 返回 Collect 收到的全部输入副本（并发安全）。
+// 断言一律走它，不要直接读 seen——直接读就又把锁绕过去了。
+func (f *fakeCollector) seenInputs() []evidence.Input {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]evidence.Input, len(f.seen))
+	copy(out, f.seen)
+	return out
 }
 
 // fakeStore 是 task.Store 的内存实现。

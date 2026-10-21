@@ -134,7 +134,19 @@ async function cmdUp() {
   const pidf = path.join(PG_DATA, 'postmaster.pid')
   if (existsSync(pidf)) rmSync(pidf, { force: true })
 
-  const pg = spawn(exe('postgres'), ['-D', PG_DATA, '-p', String(pgPort)], { stdio: 'pipe' })
+  // **Linux 必须显式指定 unix socket 目录**（2026-10-21 CI 首跑实证）：
+  // Debian/Ubuntu 编译的 PG 默认 unix_socket_directories=/var/run/postgresql，
+  // 而 CI 上 job 以 runner 用户跑，对该目录无写权限：
+  //   FATAL: could not create lock file
+  //   "/var/run/postgresql/.s.PGSQL.5434.lock": Permission denied
+  // ⇒ postgres 起不来，playwright 报「webServer 无法启动」，完全不指向真因。
+  // 本机 Windows 没有 AF_UNIX，永远碰不到这条路径（所以本机 9/9 全绿）。
+  // /tmp 世界可写（sticky），且测试连接全部走 -h 127.0.0.1 的 TCP，
+  // socket 目录只影响本地 socket 文件落点，不影响任何连接。
+  const pgArgs = ['-D', PG_DATA, '-p', String(pgPort)]
+  if (!IS_WIN) pgArgs.push('-c', 'unix_socket_directories=/tmp')
+
+  const pg = spawn(exe('postgres'), pgArgs, { stdio: 'pipe' })
   const pgLog = []
   pg.stdout?.on('data', (d) => pgLog.push(d))
   pg.stderr?.on('data', (d) => pgLog.push(d))
