@@ -85,6 +85,30 @@
   - 本地验证：全量真库测试 exit=0（20 包全 ok，124.9s）、e2e 9/9、lint 0 issues、
     worker 并发用例 30 轮加压通过；`-race` 维度本机无 gcc 跑不了，由 CI 最终裁决。
 
+- **CI run#4 暴露的真产品缺陷：并发补建分区的假失败（迁移 0010）**。三连红修复后
+  复跑，backend 只剩 `internal/repository` 包红：并发插入同时补建同一个月分区时，
+  落败者报 `relation "alerts_2026_09" already exists (42P07)`，被当成「补建失败」、
+  整个 Insert 报错。根因在 0008 的 `iip_ensure_alert_partitions()`：「查 pg_class →
+  CREATE TABLE」跨会话不原子——落败者的存在性检查看不到对方**未提交**的建表
+  （快照隔离），它的 CREATE 阻塞到对方提交后必撞 42P07（2026-10-21 两会话探针
+  实证：racer 等的是父表 alerts 的 AccessExclusiveLock，holder 未提交的建表
+  正持着它；42P07 发生在拿到锁之后的 CREATE 上）。CI 的 `-race` 拖慢时序放大
+  竞争窗口；本机无 cgo 跑不了 `-race`，故本地全量测试复现不出——这正是它能活到
+  CI 才暴露的原因。失败链：告警 starts_at 落在预建范围外（如测试库硬编码的
+  2026-09-24，迁移只预建 [当月, 当月+2]）→ 插入撞 23514 → 补建 → 42P07。
+  修复 = 迁移 0010 把 CREATE 包进子事务，`EXCEPTION WHEN duplicate_table` 静默
+  跳过（分区已存在 = 目标达成，不是错误），**Go 侧零改动**；down 精确还原 0008
+  原版函数体。为什么不是别的修法：`CREATE TABLE IF NOT EXISTS` 同样看不见未提交
+  建表（同一个快照隔离问题，竞争窗口原样存在）；Go 侧重试第 N 次仍然要与第 1 个
+  抢同一把父表锁。如实保留的残余窗口：存在性检查通过后、CREATE 执行前对方恰好
+  提交时，`created` 记账会把该分区说成本事务新建（实际是对方）——微秒级窗口，
+  且 `created` 只被日志消费（23514 重试路径直接丢弃返回值），不影响正确性。
+  判据：`migrations/migrate_partition_race_test.go` 两个方向——down 还原旧函数后
+  同一竞争 harness 必报 42P07（证明 harness 真的复现了竞争，防恒绿）/ 重新 up 后
+  同竞争必成功且只把未建月记入返回值（防「把循环和记账一起吞掉」的坏修法）。
+  变异 2/2 全红（异常名换 `check_violation` → 阶段 2 的 42P07 透出；异常分支
+  把竞争月也记账 → 记账断言红），还原后 sha256 与基线逐位一致。
+
 ## [0.2.0] - 2026-10-18
 
 自 v0.1.0 起的第二个发布版。**无破坏性变更**，按 semver 定 minor：

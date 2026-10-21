@@ -38,7 +38,7 @@ flowchart LR
         WEB["Web UI<br/>Vite/React，server 静态托管"]
         SRV["iip-server :8080<br/>chi API + 五维关联引擎"]
         WRK["iip-worker<br/>轮询领任务 + 四类采集器"]
-        PG[("PostgreSQL 16<br/>9 张表 + 0001-0009 迁移")]
+        PG[("PostgreSQL 16<br/>9 张表 + 0001-0010 迁移")]
     end
 
     BROWSER["浏览器"] --> WEB

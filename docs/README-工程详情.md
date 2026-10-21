@@ -341,7 +341,7 @@ iip/
 │   └── worker/         # worker 主循环：领任务、回写游标、重试
 ├── Dockerfile          # iip-server / iip-worker 多阶段构建（--target 区分）
 ├── .dockerignore       # 构建上下文排除清单
-├── migrations/         # golang-migrate 迁移 0001-0009（.up.sql / .down.sql + embed.go）
+├── migrations/         # golang-migrate 迁移 0001-0010（.up.sql / .down.sql + embed.go）
 ├── web/                # 前端（Vite + React + TS + antd）
 ├── deploy/             # docker-compose（五个依赖服务；应用组 profiles:[app] 隔离）+ Helm + 各服务配置
 ├── scripts/            # pre-commit、tasks.ps1、验收脚本、E2E 编排（verify-e2e.py）
@@ -367,7 +367,7 @@ flowchart LR
         WEB["Web UI<br/>Vite/React，server 静态托管"]
         SRV["iip-server :8080<br/>chi API + 五维关联引擎"]
         WRK["iip-worker<br/>轮询领任务 + 四类采集器"]
-        PG[("PostgreSQL 16<br/>9 张表 + 0001-0009 迁移")]
+        PG[("PostgreSQL 16<br/>9 张表 + 0001-0010 迁移")]
     end
 
     BROWSER["浏览器"] --> WEB
